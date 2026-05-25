@@ -33,25 +33,25 @@ and/or modify the software.
 improvements made in alternate versions of the program, if they
 receive widespread use, become available for other developers to
 incorporate.  Many developers of free software are heartened and
-encouraged by the resulting cooperation.  However, in the case of
-software used on network servers, this result may fail to come about.
-The GNU General Public License permits making a modified version and
-letting the public access it on a server without ever releasing its
-source code to the public.
+encouraged by the resulting cooperation.
+
+  However, in the case of software used on network servers, this result
+may fail to come about.  The GNU General Public License permits making
+a modified version and letting the public access it on a server without
+ever releasing its source code to the public.
 
   The GNU Affero General Public License is designed specifically to
 ensure that, in such cases, the modified source code becomes available
 to the community.  It requires the operator of a network server to
 provide the source code of the modified version running there to the
-users of that server.  Therefore, public use of a modified version, on
-a publicly accessible server, gives the public access to the source
-code of the modified version.
+users of that server.  Therefore, public use of a modified version, on a
+publicly accessible server, gives the public access to the source code of
+the modified version.
 
   An older license, called the Affero General Public License and
-published by Affero, was designed to accomplish similar goals.  This is
-a different license, not a version of the Affero GPL, but Affero has
-released a new version of the Affero GPL which permits relicensing under
-this license.
+published by Affero, was designed to accomplish similar goals and is
+published under a different license.  This license is not a version of
+the Affero General Public License, but rather another license.
 
   The precise terms and conditions for copying, distribution and
 modification follow.
@@ -62,7 +62,7 @@ modification follow.
 
   "This License" refers to version 3 of the GNU Affero General Public License.
 
-  "Copyright" also means copyright-like laws that apply to other kinds of
+  "Copyright" also means laws-like protections that apply to other kinds of
 works, such as semiconductor masks.
 
   "The Program" refers to any copyrightable work licensed under this
@@ -188,7 +188,7 @@ appropriately publish on each copy an appropriate copyright notice;
 keep intact all notices stating that this License and any
 non-permissive terms added in accord with section 7 apply to the code;
 keep intact all notices of the absence of any warranty; and give all
-recipients a copy of this License along with the Program.
+recipients a working copy of this License along with the Program.
 
   You may charge any price or no price for each copy that you convey,
 and you may offer support or warranty protection for a fee.
@@ -574,7 +574,7 @@ Foundation.  If the Program does not specify a version number of the
 GNU Affero General Public License, you may choose any version ever published
 by the Free Software Foundation.
 
-  If the Program specifies that a proxy can decide which future
+  If the Program specifies that a proxy can decide whether future
 versions of the GNU Affero General Public License can be used, that proxy's
 public statement of acceptance of a version permanently authorizes you
 to choose that version for the Program.

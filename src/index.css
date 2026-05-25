@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+html, body {
+  background-color: #0a0a0a;
+  color: #e4e4e7;
+  -webkit-font-smoothing: antialiased;
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+.cursor-blink {
+  animation: blink 1s step-end infinite;
+}
+
+.glow {
+  animation: pulse-glow 3s ease-in-out infinite;
+}

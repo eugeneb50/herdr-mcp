@@ -1,0 +1,24 @@
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[package]
+name = "herdr-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server that exposes herdr terminal multiplexer as tools"
+
+[dependencies]
+rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+regex = "1"
