@@ -4,7 +4,7 @@
 
 # herdr-mcp
 
-MCP (Model Context Protocol) server that exposes [herdr](https://herdr.dev) — a terminal-native agent multiplexer — as tools.
+MCP (Model Context Protocol) server written in Rust that exposes [herdr](https://herdr.dev) — a terminal-native agent multiplexer — as tools.
 
 **HTTP bridge + interactive web playground** included: run individual tools or chain them into multi-step recipes with variable passing, all from a browser.
 
