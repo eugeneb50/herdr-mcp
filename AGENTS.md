@@ -43,6 +43,9 @@ npm run dev
 - CLI errors returned as MCP `isError: true` content (not protocol errors).
 - IDs are session-local and may compact — re-read from list commands after structural changes.
 - Recipe engine supports variable interpolation: `{{ stepId.result.path }}` with dot/bracket navigation.
+- Message-trim layer in `src/trim/`: `caveman` (style) + `pfc1` (Cherokee-syllabary phonetic key-dict) compressors, composed via an ordered pipeline and exposed as MCP tools (`compress`, `decompress`, `trim_policy_get`/`set`, `trim_eval`, `trim_bench`) and a `herdr-mcp trim` CLI subcommand. Per-pane policy lives on `AgentHandle.trim_policy` (default off); `agent_message`/`agent_read` honor it. See `compressorplan.md`.
+- **Correctness contract:** `caveman` is *lossy* (style — drops articles/fillers, never technical identifiers like `user_database`); `pfc1` is *lossless*. The a2a path (`agent_message`→`agent_read`) uses **compact header-less PFC1** (both ends share the server's persistent key) and is lossless end-to-end. The standalone `compress` tool embeds the self-describing key header. An **adaptive gate** never expands the wire bytes (short messages pass through unchanged).
+- `pfc1` memory persists to `data_dir/pfc1_memory.json` (shared steady-state key across CLI tools and MCP calls).
 
 ## Website specifics
 

@@ -1,0 +1,91 @@
+//! Pipeline runner — the executable entry point for the trim layer.
+//!
+//! Wraps `pipeline::run` with persistent PFC1 "memory": a learned key merged
+//! into the default key and saved between runs so repeated terms compress even
+//! on the first occurrence in a new session. Usable from the CLI (`herdr-mcp
+//! trim`), from the MCP tools, and from recipes.
+
+use std::path::Path;
+
+use crate::trim::pfc1::{self, CompressionKey};
+use crate::trim::pipeline::{self, StageSpec};
+
+/// On-disk memory file name (inside the data dir).
+pub const MEMORY_FILE: &str = "pfc1_memory.json";
+
+/// Runs the trim pipeline, owning the persistent base key.
+pub struct PipelineRunner {
+    base_key: CompressionKey,
+    memory_path: Option<std::path::PathBuf>,
+}
+
+impl PipelineRunner {
+    /// Build a runner rooted at `data_dir`, loading any existing memory.
+    pub fn new(data_dir: &Path) -> Self {
+        let memory_path = data_dir.join(MEMORY_FILE);
+        let seed = load_memory(&memory_path);
+        let base_key = match seed {
+            Some(s) => pfc1::merge_keys(&pfc1::default_key(), &s),
+            None => pfc1::default_key(),
+        };
+        PipelineRunner {
+            base_key,
+            memory_path: Some(memory_path),
+        }
+    }
+
+    /// Build a runner with an explicit in-memory base key (no persistence).
+    pub fn with_base_key(base_key: CompressionKey) -> Self {
+        PipelineRunner {
+            base_key,
+            memory_path: None,
+        }
+    }
+
+    /// Run `text` through the given stages. When a PFC1 stage produces a key,
+    /// it is merged into persistent memory.
+    pub fn run(&self, text: &str, stages: &[StageSpec]) -> pipeline::PipelineResult {
+        let result = pipeline::run(text, stages, &self.base_key);
+        if let Some(path) = &self.memory_path {
+            if let Some(last) = result
+                .stages
+                .iter()
+                .rev()
+                .find_map(|s| s.pfc1_key.clone())
+            {
+                save_memory(path, &last);
+            }
+        }
+        result
+    }
+
+    /// Decompress text (PFC1 header-aware); no-op if no header present.
+    pub fn decompress(&self, text: &str) -> String {
+        pipeline::decompress_pfc1(text, None)
+    }
+
+    /// Current merged base key (default + memory).
+    pub fn base_key(&self) -> &CompressionKey {
+        &self.base_key
+    }
+}
+
+/// Load a saved PFC1 memory key (symbol -> term) from `path`, if present.
+pub fn load_memory(path: &Path) -> Option<CompressionKey> {
+    let content = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str::<CompressionKey>(&content).ok()
+}
+
+/// Merge `key` into the memory at `path` (union; new symbols win) and write back.
+pub fn save_memory(path: &Path, key: &CompressionKey) {
+    let mut merged = load_memory(path).unwrap_or_default();
+    for (k, v) in key {
+        merged.insert(k.clone(), v.clone());
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(s) = serde_json::to_string_pretty(&merged) {
+        let _ = std::fs::write(path, s);
+    }
+}
