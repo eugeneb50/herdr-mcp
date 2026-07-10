@@ -21,3 +21,8 @@ regex = { workspace = true }
 lazy_static = { workspace = true }
 
 herdr-mcp-trim = { path = "../herdr-mcp-trim" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = { workspace = true }
+pretty_assertions = { workspace = true }

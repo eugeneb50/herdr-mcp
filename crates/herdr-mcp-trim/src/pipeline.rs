@@ -6,7 +6,7 @@
 //! safe: style first, then the private-key dictionary.
 
 use crate::caveman::{self, CavemanLevel};
-use crate::code_regions::{detect_all_regions, split_by_regions, DetectMode};
+use crate::code_regions::{DetectMode, detect_all_regions, split_by_regions};
 use crate::pfc1::{self, CompressionKey, CompressionStats};
 
 /// A single stage in the trim pipeline.
@@ -16,7 +16,9 @@ pub enum StageSpec {
     /// PFC1 phonetic compressor. `emit_header` controls whether the self-
     /// describing key header is embedded. Set `false` for trusted a2a where
     /// both ends share the server's persistent key (keeps short messages small).
-    Pfc1 { emit_header: bool },
+    Pfc1 {
+        emit_header: bool,
+    },
 }
 
 /// Parse a stage string (`"caveman"`, `"caveman:lite|full|ultra"`,
@@ -99,17 +101,17 @@ pub fn run(text: &str, stages: &[StageSpec], base_key: &CompressionKey) -> Pipel
                 });
                 current = out;
             }
-StageSpec::Pfc1 { emit_header } => {
+            StageSpec::Pfc1 { emit_header } => {
                 let key = pfc1::analyze_and_build(&current, base_key);
-                
+
                 // Code-aware compression: detect all code regions (fenced, inline, bracketed)
                 // and only compress prose segments. Track which symbols are actually used.
                 let regions = detect_all_regions(&current, DetectMode::Full);
                 let segments = split_by_regions(&current, &regions);
-                
+
                 let mut compressed_body = String::with_capacity(current.len());
                 let mut used_symbols = Vec::new();
-                
+
                 for (is_code, content) in segments {
                     if is_code {
                         compressed_body.push_str(&content);
@@ -120,7 +122,7 @@ StageSpec::Pfc1 { emit_header } => {
                         used_symbols.extend(segment_used);
                     }
                 }
-                
+
                 let body = compressed_body;
                 let header = if *emit_header {
                     pfc1::generate_header(&key, &used_symbols)
@@ -164,7 +166,7 @@ StageSpec::Pfc1 { emit_header } => {
 
     let total_savings = text.len().saturating_sub(current.len());
     let total_header = stage_results.iter().map(|s| s.header_bytes).sum();
-    let total_ratio = if text.len() > 0 {
+    let total_ratio = if !text.is_empty() {
         (total_savings as f64 / text.len() as f64) * 100.0
     } else {
         0.0
@@ -191,4 +193,161 @@ pub fn decompress_pfc1(text: &str, shared_key: Option<&CompressionKey>) -> Strin
         return pfc1::decompress_text(text, key);
     }
     text.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::caveman::CavemanLevel;
+    use crate::pfc1::{self, default_key};
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_parse_pfc1() {
+        let s = parse_stage_spec("pfc1").unwrap();
+        assert!(matches!(s, StageSpec::Pfc1 { emit_header: true }));
+    }
+
+    #[test]
+    fn test_parse_caveman_defaults_full() {
+        let s = parse_stage_spec("caveman").unwrap();
+        assert!(matches!(s, StageSpec::Caveman(CavemanLevel::Full)));
+    }
+
+    #[test]
+    fn test_parse_caveman_full() {
+        let s = parse_stage_spec("caveman:full").unwrap();
+        assert!(matches!(s, StageSpec::Caveman(CavemanLevel::Full)));
+    }
+
+    #[test]
+    fn test_parse_caveman_lite() {
+        let s = parse_stage_spec("caveman:lite").unwrap();
+        assert!(matches!(s, StageSpec::Caveman(CavemanLevel::Lite)));
+    }
+
+    #[test]
+    fn test_parse_caveman_ultra() {
+        let s = parse_stage_spec("caveman:ultra").unwrap();
+        assert!(matches!(s, StageSpec::Caveman(CavemanLevel::Ultra)));
+    }
+
+    #[test]
+    fn test_parse_empty_defaults_full() {
+        let s = parse_stage_spec("").unwrap();
+        assert!(matches!(s, StageSpec::Caveman(CavemanLevel::Full)));
+    }
+
+    #[test]
+    fn test_parse_unknown_errors() {
+        assert!(parse_stage_spec("bogus").is_err());
+        assert!(parse_stage_spec("pfc1:extra").is_err());
+    }
+
+    #[test]
+    fn test_parse_wenyan_errors() {
+        assert!(parse_stage_spec("caveman:wenyan-lite").is_err());
+        assert!(parse_stage_spec("wenyan-full").is_err());
+    }
+
+    #[test]
+    fn test_parse_stage_specs_valid() {
+        let specs = vec!["caveman:full".to_string(), "pfc1".to_string()];
+        let parsed = parse_stage_specs(&specs).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert!(matches!(parsed[0], StageSpec::Caveman(CavemanLevel::Full)));
+        assert!(matches!(parsed[1], StageSpec::Pfc1 { emit_header: true }));
+    }
+
+    #[test]
+    fn test_parse_stage_specs_invalid_fails_fast() {
+        let specs = vec![
+            "caveman:full".to_string(),
+            "bogus".to_string(),
+            "pfc1".to_string(),
+        ];
+        assert!(parse_stage_specs(&specs).is_err());
+    }
+
+    #[test]
+    fn test_run_caveman_compresses_prose() {
+        let key = default_key();
+        let input = "the quick brown fox jumps over the lazy dog";
+        let result = run(input, &[StageSpec::Caveman(CavemanLevel::Full)], &key);
+        assert_eq!(result.stages.len(), 1);
+        assert!(result.output.len() < input.len());
+    }
+
+    #[test]
+    fn test_run_pfc1_on_repetitive_text_compresses() {
+        let key = default_key();
+        let input =
+            "configuration gateway profile session database connection retry timeout ".repeat(10);
+        let result = run(&input, &[StageSpec::Pfc1 { emit_header: true }], &key);
+        assert_eq!(result.stages.len(), 1);
+        let stage = &result.stages[0];
+        assert!(
+            stage.skipped.is_none(),
+            "expected compression, got: {:?}",
+            stage.skipped
+        );
+        assert!(result.output.len() < input.len());
+    }
+
+    #[test]
+    fn test_run_pfc1_adaptive_gate_skips_short() {
+        let key = default_key();
+        let input = "hi";
+        let result = run(input, &[StageSpec::Pfc1 { emit_header: true }], &key);
+        assert_eq!(result.stages.len(), 1);
+        assert!(result.stages[0].skipped.is_some());
+        // Adaptive gate never expands: short message passes through untouched.
+        assert_eq!(result.output, input);
+    }
+
+    #[test]
+    fn test_run_caveman_then_pfc1_compose() {
+        let key = default_key();
+        let input = "the configuration gateway profile session database connection is ready";
+        let stages = vec![
+            StageSpec::Caveman(CavemanLevel::Full),
+            StageSpec::Pfc1 { emit_header: true },
+        ];
+        let result = run(input, &stages, &key);
+        assert_eq!(result.stages.len(), 2);
+        // The pipeline never expands the wire bytes overall.
+        assert!(result.output.len() <= input.len());
+    }
+
+    #[test]
+    fn test_decompress_pfc1_roundtrip_with_header() {
+        let key = default_key();
+        let input =
+            "configuration gateway profile session database connection retry timeout ".repeat(10);
+        let result = run(&input, &[StageSpec::Pfc1 { emit_header: true }], &key);
+        assert!(result.stages[0].skipped.is_none());
+        let recovered = decompress_pfc1(&result.output, None);
+        assert_eq!(recovered, input);
+    }
+
+    #[test]
+    fn test_decompress_pfc1_no_header_uses_shared_key() {
+        let key = default_key();
+        let input = "session configuration gateway profile";
+        // Headerless PFC1 (trusted a2a): compress with the shared key directly.
+        let (compressed, _used) = pfc1::compress_text(input, &key);
+        let recovered = decompress_pfc1(&compressed, Some(&key));
+        assert_eq!(recovered, input);
+    }
+
+    #[test]
+    fn test_run_records_stage_count_and_savings() {
+        let key = default_key();
+        let input = "the quick brown fox jumps over the lazy dog and the cat sat still";
+        let result = run(input, &[StageSpec::Caveman(CavemanLevel::Full)], &key);
+        assert_eq!(result.stages.len(), 1);
+        // savings is non-negative; ratio is a percentage in [0, 100].
+        assert!(result.total_savings_bytes <= input.len());
+        assert!(result.total_ratio >= 0.0 && result.total_ratio <= 100.0);
+    }
 }

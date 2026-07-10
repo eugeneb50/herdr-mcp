@@ -13,10 +13,7 @@ use crossterm::{
     cursor::{Hide, Show},
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
-    terminal::{
-        disable_raw_mode, enable_raw_mode, EnterAlternateScreen,
-        LeaveAlternateScreen,
-    },
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 
 use crate::stats;
@@ -42,19 +39,19 @@ pub async fn run(data_dir: &Path) -> Result<()> {
         let timeout = std::time::Duration::from_secs(2);
         let mut quit = false;
         while start.elapsed() < timeout {
-            if event::poll(std::time::Duration::from_millis(100))? {
-                if let Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Char('q') => {
-                            quit = true;
-                            break;
-                        }
-                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            quit = true;
-                            break;
-                        }
-                        _ => {}
+            if event::poll(std::time::Duration::from_millis(100))?
+                && let Event::Key(key) = event::read()?
+            {
+                match key.code {
+                    KeyCode::Char('q') => {
+                        quit = true;
+                        break;
                     }
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        quit = true;
+                        break;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -93,12 +90,14 @@ async fn render(out: &mut io::Stdout, data_dir: &Path) -> Result<()> {
     workspaces.sort();
 
     let mut frame = String::new();
-    frame.push_str(&format!("\x1b[2J\x1b[H")); // clear + home
+    frame.push_str("\x1b[2J\x1b[H"); // clear + home
     frame.push_str("\x1b[1;36mherdr-mcp Trim Dashboard\x1b[0m  (q to quit)\r\n");
     frame.push_str("\x1b[90m─────────────────────────────────────────────────────────\x1b[0m\r\n");
 
     if workspaces.is_empty() {
-        frame.push_str("\x1b[90mno trim stats yet — send a trimmed message or run `herdr-mcp trim`\x1b[0m\r\n");
+        frame.push_str(
+            "\x1b[90mno trim stats yet — send a trimmed message or run `herdr-mcp trim`\x1b[0m\r\n",
+        );
     }
 
     for ws in &workspaces {
@@ -116,13 +115,13 @@ async fn render(out: &mut io::Stdout, data_dir: &Path) -> Result<()> {
 
         // Per-pane bars.
         let mut panes: Vec<_> = s.per_pane.iter().collect();
-        panes.sort_by(|a, b| b.1.net_saved_bytes.cmp(&a.1.net_saved_bytes));
+        panes.sort_by_key(|b| std::cmp::Reverse(b.1.net_saved_bytes));
         let max_net = panes
             .first()
             .map(|(_, p)| p.net_saved_bytes.max(1))
             .unwrap_or(1);
         for (pane, p) in &panes {
-            let filled = (p.net_saved_bytes * BAR_WIDTH as usize) / max_net;
+            let filled = (p.net_saved_bytes * BAR_WIDTH) / max_net;
             let bar = "█".repeat(filled) + &"░".repeat(BAR_WIDTH - filled);
             frame.push_str(&format!(
                 "  \x1b[90m{pane:<14}\x1b[0m {bar} \x1b[90m{}B\x1b[0m\r\n",

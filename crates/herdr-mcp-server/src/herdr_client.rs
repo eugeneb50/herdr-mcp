@@ -16,10 +16,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 use crate::persistence::Persistence;
-use herdr_mcp_trim::policy::{TrimPolicy, TrimDirection};
+use herdr_mcp_trim::policy::{TrimDirection, TrimPolicy};
 
 /// Agent lifecycle state, mirroring herdr's `AgentStatus` (snake_case).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,20 +115,18 @@ impl AgentRegistry {
     ) {
         let now = chrono::Utc::now().timestamp();
         let mut map = self.inner.write().await;
-        let mut handle = map
-            .remove(pane_id)
-            .unwrap_or_else(|| AgentHandle {
-                pane_id: pane_id.to_string(),
-                workspace_id: workspace_id.to_string(),
-                tab_id: String::new(),
-                agent: String::new(),
-                role: String::new(),
-                label: String::new(),
-                status: String::new(),
-                output: String::new(),
-                trim_policy: None,
-                updated_at: now,
-            });
+        let mut handle = map.remove(pane_id).unwrap_or_else(|| AgentHandle {
+            pane_id: pane_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            tab_id: String::new(),
+            agent: String::new(),
+            role: String::new(),
+            label: String::new(),
+            status: String::new(),
+            output: String::new(),
+            trim_policy: None,
+            updated_at: now,
+        });
         handle.pane_id = pane_id.to_string();
         handle.workspace_id = workspace_id.to_string();
         if !tab_id.is_empty() {
@@ -222,8 +220,7 @@ impl AgentRegistry {
         }
         map.values()
             .find(|h| {
-                (ws.is_empty() || h.workspace_id == ws)
-                    && (h.role == target || h.label == target)
+                (ws.is_empty() || h.workspace_id == ws) && (h.role == target || h.label == target)
             })
             .map(|h| h.pane_id.clone())
     }
@@ -342,13 +339,12 @@ impl HerdrClient {
 
             let mut lines = BufReader::new(read_half).lines();
             // First line is the subscribe ack.
-            if let Some(line) = lines.next_line().await? {
-                if let Ok(ack) = serde_json::from_str::<serde_json::Value>(&line) {
-                    if ack.get("error").is_some() {
-                        writer_task.abort();
-                        anyhow::bail!("events.subscribe rejected: {line}");
-                    }
-                }
+            if let Some(line) = lines.next_line().await?
+                && let Ok(ack) = serde_json::from_str::<serde_json::Value>(&line)
+                && ack.get("error").is_some()
+            {
+                writer_task.abort();
+                anyhow::bail!("events.subscribe rejected: {line}");
             }
 
             while let Some(line) = lines.next_line().await? {
@@ -369,7 +365,9 @@ impl HerdrClient {
         #[cfg(not(unix))]
         {
             let _ = &self.socket_path;
-            tracing::info!("herdr event subscriber is only supported on Unix; registry will be populated by explicit tool calls");
+            tracing::info!(
+                "herdr event subscriber is only supported on Unix; registry will be populated by explicit tool calls"
+            );
             Ok(())
         }
     }
@@ -394,9 +392,7 @@ impl HerdrClient {
                 let agent = p.get("agent").and_then(|x| x.as_str()).unwrap_or("");
                 let label = p.get("label").and_then(|x| x.as_str()).unwrap_or("");
                 let status = p.get("agent_status").and_then(|x| x.as_str()).unwrap_or("");
-                self.registry
-                    .upsert(pane_id, ws, "", agent, label)
-                    .await;
+                self.registry.upsert(pane_id, ws, "", agent, label).await;
                 if !label.is_empty() {
                     self.registry.set_label(pane_id, label).await;
                 }
@@ -446,13 +442,16 @@ impl HerdrClient {
                 let ws = event.data.workspace_id;
                 let agent = event.data.agent.clone().unwrap_or_default();
                 let label = event.data.label.clone().unwrap_or_default();
-                self.registry
-                    .upsert(&pane_id, &ws, "", &agent, "")
-                    .await;
+                self.registry.upsert(&pane_id, &ws, "", &agent, "").await;
                 if !label.is_empty() {
                     self.registry.set_label(&pane_id, &label).await;
                 }
-                if let Some(status) = event.data.agent_status.as_deref().and_then(AgentStatus::parse) {
+                if let Some(status) = event
+                    .data
+                    .agent_status
+                    .as_deref()
+                    .and_then(AgentStatus::parse)
+                {
                     let status_str = status.as_str().to_string();
                     self.registry.set_status(&pane_id, &status_str).await;
                     if status == AgentStatus::Idle {
@@ -545,8 +544,183 @@ struct SubData {
 async fn read_pane_output(pane_id: &str) -> anyhow::Result<String> {
     let binary = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
     let output = tokio::process::Command::new(binary)
-        .args(["pane", "read", pane_id, "--source", "recent", "--lines", "200"])
+        .args([
+            "pane", "read", pane_id, "--source", "recent", "--lines", "200",
+        ])
         .output()
         .await?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn make_persistence() -> Arc<Persistence> {
+        // Keep the tempdir alive for the test duration by leaking it; the OS
+        // reclaims it when the test process exits.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        std::mem::forget(tmp);
+        Arc::new(p)
+    }
+
+    fn make_registry() -> AgentRegistry {
+        let p = make_persistence();
+        AgentRegistry::new(p)
+    }
+
+    #[tokio::test]
+    async fn test_upsert_then_get() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "agentA").await;
+        let h = reg.get("p1").await.unwrap();
+        assert_eq!(h.pane_id, "p1");
+        assert_eq!(h.agent, "claude");
+    }
+
+    #[tokio::test]
+    async fn test_upsert_preserves_role() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "agentA").await;
+        let h = reg.get("p1").await.unwrap();
+        assert_eq!(h.role, "agentA");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_by_pane_id() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "").await;
+        assert_eq!(reg.resolve("w1", "p1").await, Some("p1".into()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_by_role() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "agentA").await;
+        assert_eq!(reg.resolve("w1", "agentA").await, Some("p1".into()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_by_label() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "agentA").await;
+        reg.set_label("p1", "my-label").await;
+        assert_eq!(reg.resolve("w1", "my-label").await, Some("p1".into()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_empty_ws_spans_all() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "agentA").await;
+        assert_eq!(reg.resolve("", "agentA").await, Some("p1".into()));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_scoped_ws() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "agentA").await;
+        reg.upsert("p2", "w2", "", "gpt", "agentA").await;
+        // role "agentA" exists in both; w2 scope resolves to p2
+        assert_eq!(reg.resolve("w2", "agentA").await, Some("p2".into()));
+        // w1 scope resolves to p1
+        assert_eq!(reg.resolve("w1", "agentA").await, Some("p1".into()));
+    }
+
+    #[tokio::test]
+    async fn test_set_status() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "").await;
+        reg.set_status("p1", "working").await;
+        assert_eq!(reg.get("p1").await.unwrap().status, "working");
+    }
+
+    #[tokio::test]
+    async fn test_set_output() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "").await;
+        reg.set_output("p1", "the work product".into()).await;
+        assert_eq!(reg.get("p1").await.unwrap().output, "the work product");
+    }
+
+    #[tokio::test]
+    async fn test_set_trim_policy_get() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "").await;
+        let policy = TrimPolicy {
+            stages: vec!["caveman:full".into(), "pfc1".into()],
+            direction: TrimDirection::OutboundWithAck,
+        };
+        reg.set_trim_policy("p1", Some(policy.clone())).await;
+        let got = reg.get_trim_policy("p1").await.unwrap();
+        assert_eq!(got, policy);
+    }
+
+    #[tokio::test]
+    async fn test_set_label() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "").await;
+        reg.set_label("p1", "labelX").await;
+        assert_eq!(reg.get("p1").await.unwrap().label, "labelX");
+    }
+
+    #[tokio::test]
+    async fn test_list_for_ws() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "").await;
+        reg.upsert("p2", "w1", "", "gpt", "").await;
+        reg.upsert("p3", "w2", "", "gemini", "").await;
+        assert_eq!(reg.list_for_ws("w1").await.len(), 2);
+        assert_eq!(reg.list_for_ws("w2").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_inner_snapshot() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "").await;
+        reg.upsert("p2", "w2", "", "gpt", "").await;
+        assert_eq!(reg.inner_snapshot().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_seed_outputs() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "agentA").await;
+        reg.set_output("p1", "out".into()).await;
+        let seed = reg.seed("w1").await;
+        assert!(seed.contains_key("p1"));
+        assert!(seed.contains_key("agentA"));
+        assert_eq!(seed.get("p1").unwrap()["output"], serde_json::json!("out"));
+    }
+
+    #[tokio::test]
+    async fn test_upsert_update_existing() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "agentA").await;
+        reg.upsert("p1", "w1", "", "gpt", "agentB").await;
+        let h = reg.get("p1").await.unwrap();
+        assert_eq!(h.agent, "gpt");
+        assert_eq!(h.role, "agentB");
+    }
+
+    #[tokio::test]
+    async fn test_get_trim_policy_none_when_unset() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "").await;
+        assert!(reg.get_trim_policy("p1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_clear_trim_policy() {
+        let reg = make_registry();
+        reg.upsert("p1", "w1", "", "claude", "").await;
+        let policy = TrimPolicy {
+            stages: vec!["pfc1".into()],
+            direction: TrimDirection::Outbound,
+        };
+        reg.set_trim_policy("p1", Some(policy)).await;
+        reg.set_trim_policy("p1", None).await;
+        assert!(reg.get_trim_policy("p1").await.is_none());
+    }
 }

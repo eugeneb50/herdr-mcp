@@ -1,5 +1,12 @@
 # herdr-mcp — AGENTS.md
 
+## Running context
+
+- `herdr-mcp-context.toml` (repo root) holds the project's evolving memory for
+  resuming sessions — architecture, spec facts the tests rely on, known
+  non-determinism, and the test layout/counts. **Read it first when resuming
+  work, and update it at the end of each session.**
+
 ## Build & dev
 
 ```bash

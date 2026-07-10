@@ -1,6 +1,6 @@
-use std::env;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -26,12 +26,6 @@ pub struct Config {
 
     #[serde(default)]
     pub logging: LoggingConfig,
-}
-
-fn default_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("herdr-mcp")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -362,16 +356,16 @@ impl Config {
 
     /// Validate configuration
     fn validate(&self) -> Result<()> {
-        if let Some(parent) = self.data_dir.parent() {
-            if !parent.exists() {
-                anyhow::bail!("data_dir parent does not exist: {}", parent.display());
-            }
+        if let Some(parent) = self.data_dir.parent()
+            && !parent.exists()
+        {
+            anyhow::bail!("data_dir parent does not exist: {}", parent.display());
         }
 
-        if let Some(port) = self.http.port {
-            if port == 0 {
-                anyhow::bail!("http.port cannot be 0");
-            }
+        if let Some(port) = self.http.port
+            && port == 0
+        {
+            anyhow::bail!("http.port cannot be 0");
         }
 
         if self.mcp.tool_timeout_secs == 0 {
@@ -406,13 +400,10 @@ impl Config {
 
     /// Get the resolved herdr socket path
     pub fn herdr_socket_path(&self) -> PathBuf {
-        self.herdr
-            .socket_path
-            .clone()
-            .unwrap_or_else(|| {
-                let home = env::var("HOME").unwrap_or_else(|_| ".".into());
-                PathBuf::from(home).join(".config/herdr/herdr.sock")
-            })
+        self.herdr.socket_path.clone().unwrap_or_else(|| {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".into());
+            PathBuf::from(home).join(".config/herdr/herdr.sock")
+        })
     }
 
     /// Get the effective trim stages
@@ -494,10 +485,14 @@ mod tests {
 
     #[test]
     fn test_merge_precedence() {
-        let mut a = Config::default();
-        a.data_dir = PathBuf::from("/a");
-        let mut b = Config::default();
-        b.data_dir = PathBuf::from("/b");
+        let a = Config {
+            data_dir: PathBuf::from("/a"),
+            ..Default::default()
+        };
+        let b = Config {
+            data_dir: PathBuf::from("/b"),
+            ..Default::default()
+        };
         let merged = a.merge(b);
         assert_eq!(merged.data_dir, PathBuf::from("/b"));
     }
@@ -507,5 +502,226 @@ mod tests {
         let config = Config::default();
         let socket = config.herdr_socket_path();
         assert!(socket.ends_with(".config/herdr/herdr.sock"));
+    }
+
+    #[test]
+    fn test_config_default_values() {
+        let c = Config::default();
+        assert_eq!(c.http.port, Some(5173));
+        assert_eq!(c.http.bind_addr.as_deref(), Some("127.0.0.1"));
+        assert_eq!(c.mcp.tool_timeout_secs, 300);
+        assert_eq!(c.mcp.max_concurrent_tools, 10);
+        assert_eq!(c.trim.pfc1.max_symbols, 80);
+        assert_eq!(c.logging.level, "info");
+        assert!(!c.sandbox.enabled);
+        assert_eq!(c.trim.default_stages, vec!["caveman:full", "pfc1"]);
+    }
+
+    #[test]
+    fn test_config_toml_roundtrip() {
+        let original = Config::default();
+        let toml_str = toml::to_string(&original).unwrap();
+        let restored: Config = toml::from_str(&toml_str).unwrap();
+        assert_eq!(original.http.port, restored.http.port);
+        assert_eq!(
+            original.mcp.tool_timeout_secs,
+            restored.mcp.tool_timeout_secs
+        );
+        assert_eq!(original.trim.default_stages, restored.trim.default_stages);
+        assert_eq!(original.logging.level, restored.logging.level);
+    }
+
+    #[test]
+    fn test_merge_all_fields_override() {
+        let a = Config::default();
+        let b = Config {
+            data_dir: PathBuf::from("/data"),
+            http: HttpConfig {
+                port: Some(9999),
+                http_only: true,
+                ..Default::default()
+            },
+            mcp: McpConfig {
+                tool_timeout_secs: 1,
+                ..Default::default()
+            },
+            herdr: HerdrConfig {
+                socket_path: Some(PathBuf::from("/sock")),
+                ..Default::default()
+            },
+            logging: LoggingConfig {
+                level: "debug".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let merged = a.merge(b);
+        assert_eq!(merged.data_dir, PathBuf::from("/data"));
+        assert_eq!(merged.http.port, Some(9999));
+        assert!(merged.http.http_only);
+        assert_eq!(merged.mcp.tool_timeout_secs, 1);
+        assert_eq!(merged.herdr.socket_path, Some(PathBuf::from("/sock")));
+        assert_eq!(merged.logging.level, "debug");
+    }
+
+    #[test]
+    fn test_merge_preserves_other_defaults() {
+        let mut a = Config::default();
+        let mut b = Config::default();
+        a.data_dir = PathBuf::from("/a");
+        b.http.port = Some(1234);
+        let merged = a.merge(b);
+        // merge takes `other` wholesale for every field
+        assert_eq!(merged.data_dir, PathBuf::from(""));
+        assert_eq!(merged.http.port, Some(1234));
+        // untouched field keeps its default
+        assert_eq!(merged.logging.level, "info");
+    }
+
+    #[test]
+    fn test_apply_cli_overrides_partial() {
+        let cli = CliOverrides {
+            http_port: Some(8080),
+            ..Default::default()
+        };
+        let mut c = Config::default();
+        c = c.apply_cli_overrides(cli);
+        assert_eq!(c.http.port, Some(8080));
+        assert_eq!(c.logging.level, "info");
+    }
+
+    #[test]
+    fn test_apply_cli_overrides_all() {
+        let cli = CliOverrides {
+            data_dir: Some(PathBuf::from("/cli/data")),
+            http_port: Some(9000),
+            http_only: Some(true),
+            http_bind: Some("0.0.0.0".into()),
+            herdr_socket: Some(PathBuf::from("/cli/sock")),
+            log_level: Some("warn".into()),
+            trim_stages: vec!["pfc1".into()],
+        };
+        let c = Config::default().apply_cli_overrides(cli);
+        assert_eq!(c.data_dir, PathBuf::from("/cli/data"));
+        assert_eq!(c.http.port, Some(9000));
+        assert!(c.http.http_only);
+        assert_eq!(c.http.bind_addr.as_deref(), Some("0.0.0.0"));
+        assert_eq!(c.herdr.socket_path, Some(PathBuf::from("/cli/sock")));
+        assert_eq!(c.logging.level, "warn");
+        assert_eq!(c.trim.default_stages, vec!["pfc1"]);
+    }
+
+    #[test]
+    fn test_validate_rejects_port_zero() {
+        let mut c = Config::default();
+        c.http.port = Some(0);
+        assert!(c.validate().is_err());
+        assert!(
+            c.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be 0")
+        );
+    }
+
+    #[test]
+    fn test_validate_rejects_tool_timeout_zero() {
+        let mut c = Config::default();
+        c.mcp.tool_timeout_secs = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_max_concurrent_zero() {
+        let mut c = Config::default();
+        c.mcp.max_concurrent_tools = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_max_symbols_over_85() {
+        let mut c = Config::default();
+        c.trim.pfc1.max_symbols = 86;
+        assert!(c.validate().is_err());
+        assert!(c.validate().unwrap_err().to_string().contains("85"));
+    }
+
+    #[test]
+    fn test_validate_rejects_max_symbols_85_ok() {
+        let mut c = Config::default();
+        c.trim.pfc1.max_symbols = 85;
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_log_level() {
+        let mut c = Config::default();
+        c.logging.level = "verbose".into();
+        assert!(c.validate().is_err());
+        assert!(
+            c.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("invalid log level")
+        );
+    }
+
+    #[test]
+    fn test_validate_accepts_all_log_levels() {
+        for lvl in ["trace", "debug", "info", "warn", "error"] {
+            let mut c = Config::default();
+            c.logging.level = lvl.into();
+            assert!(c.validate().is_ok(), "{lvl} should be valid");
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_max_phrase_lt_min_phrase() {
+        let mut c = Config::default();
+        c.trim.pfc1.min_phrase_words = 4;
+        c.trim.pfc1.max_phrase_words = 2;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_min_phrase_zero() {
+        let mut c = Config::default();
+        c.trim.pfc1.min_phrase_words = 0;
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn test_log_format_from_str() {
+        use std::str::FromStr;
+        assert_eq!(LogFormat::from_str("text"), Ok(LogFormat::Text));
+        assert_eq!(LogFormat::from_str("json"), Ok(LogFormat::Json));
+        assert!(LogFormat::from_str("xml").is_err());
+        assert_eq!(LogFormat::from_str("TEXT"), Ok(LogFormat::Text));
+    }
+
+    #[test]
+    fn test_log_format_display() {
+        assert_eq!(LogFormat::Text.to_string(), "text");
+        assert_eq!(LogFormat::Json.to_string(), "json");
+    }
+
+    #[test]
+    fn test_generate_default_config() {
+        let out = generate_default_config();
+        assert!(out.contains("# herdr-mcp configuration"));
+        assert!(out.contains("http"));
+    }
+
+    #[test]
+    fn test_trim_stages_returns_configured() {
+        let c = Config::default();
+        assert_eq!(c.trim_stages(), c.trim.default_stages.as_slice());
+    }
+
+    #[test]
+    fn test_config_deny_unknown_fields() {
+        let bad = "unknown_field = 1\nhttp.port = 8080\n";
+        let result: Result<Config, _> = toml::from_str(bad);
+        assert!(result.is_err(), "unknown fields must be rejected");
     }
 }

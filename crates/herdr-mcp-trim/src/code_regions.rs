@@ -52,13 +52,30 @@ pub struct CodeRegion {
 }
 
 impl CodeRegion {
-    pub fn new(start: usize, end: usize, is_code: bool, region_type: RegionType, content: String) -> Self {
-        Self { start, end, is_code, region_type, content }
+    pub fn new(
+        start: usize,
+        end: usize,
+        is_code: bool,
+        region_type: RegionType,
+        content: String,
+    ) -> Self {
+        Self {
+            start,
+            end,
+            is_code,
+            region_type,
+            content,
+        }
     }
 
     /// Length in bytes.
     pub fn len(&self) -> usize {
         self.end - self.start
+    }
+
+    /// Whether the region spans zero bytes.
+    pub fn is_empty(&self) -> bool {
+        self.end == self.start
     }
 }
 
@@ -104,7 +121,13 @@ impl CodeRegionRegistry {
     /// Detect all regions using registered detectors.
     pub fn detect_all(&self, text: &str, mode: DetectMode) -> Vec<CodeRegion> {
         if text.is_empty() {
-            return vec![CodeRegion::new(0, 0, false, RegionType::Prose, String::new())];
+            return vec![CodeRegion::new(
+                0,
+                0,
+                false,
+                RegionType::Prose,
+                String::new(),
+            )];
         }
 
         let mut all_regions = Vec::new();
@@ -119,7 +142,9 @@ impl CodeRegionRegistry {
 
         // Sort by priority (higher first), then by start position
         all_regions.sort_by(|a, b| {
-            a.0.cmp(&b.0).reverse().then_with(|| a.1.start.cmp(&b.1.start))
+            a.0.cmp(&b.0)
+                .reverse()
+                .then_with(|| a.1.start.cmp(&b.1.start))
         });
 
         // Resolve overlaps: higher priority wins
@@ -162,7 +187,13 @@ fn regions_overlap(a: &CodeRegion, b: &CodeRegion) -> bool {
 fn fill_prose_gaps(text: &str, regions: &mut Vec<CodeRegion>) {
     if regions.is_empty() {
         if !text.is_empty() {
-            regions.push(CodeRegion::new(0, text.len(), false, RegionType::Prose, text.to_string()));
+            regions.push(CodeRegion::new(
+                0,
+                text.len(),
+                false,
+                RegionType::Prose,
+                text.to_string(),
+            ));
         }
         return;
     }
@@ -216,7 +247,8 @@ fn build_default_registry() -> CodeRegionRegistry {
 
 /// Split `text` into (is_code, content) segments using the given regions.
 pub fn split_by_regions(_text: &str, regions: &[CodeRegion]) -> Vec<(bool, String)> {
-    regions.iter()
+    regions
+        .iter()
         .map(|r| (r.is_code, r.content.clone()))
         .collect()
 }
@@ -258,8 +290,8 @@ fn detect_fenced_blocks(text: &str) -> Vec<CodeRegion> {
         let at_line_start = i == 0 || (i > 0 && bytes[i - 1] == b'\n');
         if at_line_start {
             let remaining = &bytes[i..];
-            let is_fence = remaining.len() >= 3 &&
-                (remaining[..3] == [b'`', b'`', b'`'] || remaining[..3] == [b'~', b'~', b'~']);
+            let is_fence = remaining.len() >= 3
+                && (remaining[..3] == [b'`', b'`', b'`'] || remaining[..3] == [b'~', b'~', b'~']);
             if is_fence {
                 let marker_len = 3;
                 let marker = &text[i..i + marker_len];
@@ -272,7 +304,11 @@ fn detect_fenced_blocks(text: &str) -> Vec<CodeRegion> {
                         let region_end = line_end;
                         let content = text[fence_start..region_end].to_string();
                         regions.push(CodeRegion::new(
-                            fence_start, region_end, true, RegionType::Fenced, content
+                            fence_start,
+                            region_end,
+                            true,
+                            RegionType::Fenced,
+                            content,
                         ));
                         in_code = false;
                         i = region_end;
@@ -293,13 +329,23 @@ fn detect_fenced_blocks(text: &str) -> Vec<CodeRegion> {
             continue;
         }
         // Move to next char
-        i += bytes[i..].iter().position(|&b| b == b'\n').map(|p| p + 1).unwrap_or(bytes.len() - i);
+        i += bytes[i..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| p + 1)
+            .unwrap_or(bytes.len() - i);
     }
 
     // If we ended inside a fence (unclosed), close at EOF
     if in_code {
         let content = text[fence_start..].to_string();
-        regions.push(CodeRegion::new(fence_start, text.len(), true, RegionType::Fenced, content));
+        regions.push(CodeRegion::new(
+            fence_start,
+            text.len(),
+            true,
+            RegionType::Fenced,
+            content,
+        ));
     }
 
     regions
@@ -356,7 +402,13 @@ fn detect_inline_code(text: &str) -> Vec<CodeRegion> {
                 // Include both backticks in region
                 let region_end = if i < bytes.len() { i + 1 } else { i };
                 let content = text[start..region_end].to_string();
-                regions.push(CodeRegion::new(start, region_end, true, RegionType::Inline, content));
+                regions.push(CodeRegion::new(
+                    start,
+                    region_end,
+                    true,
+                    RegionType::Inline,
+                    content,
+                ));
                 i = region_end;
             } else {
                 i += 1;
@@ -435,7 +487,11 @@ fn detect_bracketed(text: &str) -> Vec<CodeRegion> {
                             let end = char_index_to_byte(text, j + 1);
                             let content = text[start..end].to_string();
                             regions.push(CodeRegion::new(
-                                start, end, true, RegionType::Bracketed, content
+                                start,
+                                end,
+                                true,
+                                RegionType::Bracketed,
+                                content,
                             ));
                             i = j; // will be incremented by loop
                             break;
@@ -535,10 +591,92 @@ mod tests {
         let text = "`code`\n```\n`inline in fence`\n```";
         let regions = detect_all_regions(text, DetectMode::Full);
         // The fenced block should be one region, inline inside it should NOT be separate
-        let fenced = regions.iter().filter(|r| r.region_type == RegionType::Fenced).count();
+        let fenced = regions
+            .iter()
+            .filter(|r| r.region_type == RegionType::Fenced)
+            .count();
         assert_eq!(fenced, 1);
-        let inline = regions.iter().filter(|r| r.region_type == RegionType::Inline).count();
+        let inline = regions
+            .iter()
+            .filter(|r| r.region_type == RegionType::Inline)
+            .count();
         // The inline inside fence should be part of fenced region, not separate
         assert_eq!(inline, 1); // only the first `code`
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let regions = detect_all_regions("", DetectMode::FencedOnly);
+        assert_eq!(regions.len(), 1);
+        assert!(!regions[0].is_code);
+    }
+
+    #[test]
+    fn test_only_prose() {
+        let text = "hello world this is prose";
+        let regions = detect_all_regions(text, DetectMode::FencedOnly);
+        assert_eq!(regions.len(), 1);
+        assert!(!regions[0].is_code);
+        let rebuilt: String = regions.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(rebuilt, text);
+    }
+
+    #[test]
+    fn test_unclosed_fence_captures_to_eof() {
+        let text = "prose\n```rust\ncode here";
+        let regions = detect_all_regions(text, DetectMode::FencedOnly);
+        let fenced = regions
+            .iter()
+            .find(|r| r.region_type == RegionType::Fenced)
+            .unwrap();
+        assert!(fenced.content.contains("code here"));
+        assert!(fenced.content.starts_with("```rust"));
+    }
+
+    #[test]
+    fn test_multiple_fenced_blocks() {
+        let text = "prose1\n```\na\n```\nprose2\n```\nb\n```\nprose3";
+        let regions = detect_all_regions(text, DetectMode::FencedOnly);
+        let fenced = regions
+            .iter()
+            .filter(|r| r.region_type == RegionType::Fenced)
+            .count();
+        assert_eq!(fenced, 2);
+        let rebuilt: String = regions.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(rebuilt, text);
+    }
+
+    #[test]
+    fn test_split_by_regions_concatenation() {
+        let text = "prose\n```\ncode\n```\nmore";
+        let regions = detect_all_regions(text, DetectMode::FencedOnly);
+        let segments = split_by_regions(text, &regions);
+        let rebuilt: String = segments.iter().map(|(_, c)| c.as_str()).collect();
+        assert_eq!(rebuilt, text);
+    }
+
+    #[test]
+    fn test_tilde_fence() {
+        let text = "~~~\ncode\n~~~\n";
+        let regions = detect_all_regions(text, DetectMode::FencedOnly);
+        let fenced = regions
+            .iter()
+            .find(|r| r.region_type == RegionType::Fenced)
+            .unwrap();
+        assert!(fenced.content.contains("code"));
+        assert!(fenced.content.starts_with("~~~"));
+    }
+
+    #[test]
+    fn test_inline_code_in_prose() {
+        let text = "run `cargo build` now please";
+        let regions = detect_all_regions(text, DetectMode::Full);
+        let inline = regions
+            .iter()
+            .find(|r| r.region_type == RegionType::Inline)
+            .unwrap();
+        assert_eq!(inline.content, "`cargo build`");
+        let rebuilt: String = regions.iter().map(|r| r.content.as_str()).collect();
+        assert_eq!(rebuilt, text);
     }
 }

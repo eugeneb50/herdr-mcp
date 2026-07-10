@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +62,11 @@ pub fn extract_variables(result: &serde_json::Value) -> HashMap<String, serde_js
     vars
 }
 
-fn extract_recursive(value: &serde_json::Value, vars: &mut HashMap<String, serde_json::Value>, prefix: &str) {
+fn extract_recursive(
+    value: &serde_json::Value,
+    vars: &mut HashMap<String, serde_json::Value>,
+    prefix: &str,
+) {
     match value {
         serde_json::Value::Object(obj) => {
             for (key, val) in obj {
@@ -87,5 +91,94 @@ fn extract_recursive(value: &serde_json::Value, vars: &mut HashMap<String, serde
             vars.insert(prefix.to_string(), serde_json::Value::Null);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_extract_string() {
+        let v = serde_json::json!({ "result": "hello" });
+        let vars = extract_variables(&v);
+        // Keys are always prefixed with "result." by extract_variables.
+        assert_eq!(
+            vars.get("result.result").unwrap(),
+            &serde_json::json!("hello")
+        );
+    }
+
+    #[test]
+    fn test_extract_nested_object() {
+        let v = serde_json::json!({ "result": { "pane_id": "p1", "output": "done" } });
+        let vars = extract_variables(&v);
+        assert_eq!(
+            vars.get("result.result.pane_id").unwrap(),
+            &serde_json::json!("p1")
+        );
+        assert_eq!(
+            vars.get("result.result.output").unwrap(),
+            &serde_json::json!("done")
+        );
+    }
+
+    #[test]
+    fn test_extract_number() {
+        let v = serde_json::json!({ "result": 42 });
+        let vars = extract_variables(&v);
+        assert_eq!(vars.get("result.result").unwrap(), &serde_json::json!(42));
+    }
+
+    #[test]
+    fn test_extract_bool() {
+        let v = serde_json::json!({ "result": true });
+        let vars = extract_variables(&v);
+        assert_eq!(vars.get("result.result").unwrap(), &serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_extract_null() {
+        let v = serde_json::json!({ "result": null });
+        let vars = extract_variables(&v);
+        assert_eq!(vars.get("result.result").unwrap(), &serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_extract_multiple_top_level_keys() {
+        let v = serde_json::json!({
+            "result": {
+                "status": "ok",
+                "pane_id": "p1",
+                "count": 3
+            }
+        });
+        let vars = extract_variables(&v);
+        assert_eq!(
+            vars.get("result.result.status").unwrap(),
+            &serde_json::json!("ok")
+        );
+        assert_eq!(
+            vars.get("result.result.pane_id").unwrap(),
+            &serde_json::json!("p1")
+        );
+        assert_eq!(
+            vars.get("result.result.count").unwrap(),
+            &serde_json::json!(3)
+        );
+        assert_eq!(vars.len(), 3);
+    }
+
+    #[test]
+    fn test_extract_ignores_arrays() {
+        // The extractor only walks objects/primitives; arrays are not flattened.
+        let v = serde_json::json!({ "result": { "items": ["a", "b"] } });
+        let vars = extract_variables(&v);
+        assert!(
+            vars.is_empty(),
+            "arrays should not be extracted: {:?}",
+            vars
+        );
     }
 }

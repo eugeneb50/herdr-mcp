@@ -6,16 +6,8 @@ use clap::{Parser, Subcommand};
 use rmcp::{ServiceExt, transport::stdio};
 use tracing_subscriber::EnvFilter;
 
-use herdr_mcp_server::{
-    HerdrMcpServer, Persistence, HerdrClient,
-    server::start_http,
-};
-use herdr_mcp_trim::{
-    runner::PipelineRunner,
-    pipeline,
-    dashboard,
-    folder_key as fk,
-};
+use herdr_mcp_server::{HerdrClient, HerdrMcpServer, Persistence, server::start_http};
+use herdr_mcp_trim::{dashboard, folder_key as fk, pipeline, runner::PipelineRunner};
 
 #[derive(Parser)]
 #[command(name = "herdr-mcp", version)]
@@ -100,40 +92,60 @@ async fn main() -> Result<()> {
     let args = Args::parse();
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("herdr_mcp=info".parse()?),
-        )
+        .with_env_filter(EnvFilter::from_default_env().add_directive("herdr_mcp=info".parse()?))
         .with_writer(std::io::stderr)
         .init();
 
     match args.command {
-        Command::Trim { stage, decompress, data_dir, file, text } =>
-            run_trim(stage, decompress, &data_dir, file, text).await,
-        Command::Serve { http, http_only, data_dir, herdr_socket } =>
-            run_serve(http, http_only, data_dir, herdr_socket).await,
-        Command::Dashboard { data_dir } =>
-            dashboard::run(&data_dir).await,
-        Command::FolderKey { action } =>
-            run_folder_key(action).await,
+        Command::Trim {
+            stage,
+            decompress,
+            data_dir,
+            file,
+            text,
+        } => run_trim(stage, decompress, &data_dir, file, text).await,
+        Command::Serve {
+            http,
+            http_only,
+            data_dir,
+            herdr_socket,
+        } => run_serve(http, http_only, data_dir, herdr_socket).await,
+        Command::Dashboard { data_dir } => dashboard::run(&data_dir).await,
+        Command::FolderKey { action } => run_folder_key(action).await,
     }
 }
 
 async fn run_folder_key(action: FolderKeyAction) -> Result<()> {
     match action {
-        FolderKeyAction::Build { folder, data_dir, min_frequency, min_length,
-            max_terms, persist_central, learn_master } => {
+        FolderKeyAction::Build {
+            folder,
+            data_dir,
+            min_frequency,
+            min_length,
+            max_terms,
+            persist_central,
+            learn_master,
+        } => {
             let mut opts = fk::FolderKeyOptions::default();
-            if let Some(v) = min_frequency { opts.min_frequency = v; }
-            if let Some(v) = min_length { opts.min_length = v; }
-            if let Some(v) = max_terms { opts.max_terms = v; }
+            if let Some(v) = min_frequency {
+                opts.min_frequency = v;
+            }
+            if let Some(v) = min_length {
+                opts.min_length = v;
+            }
+            if let Some(v) = max_terms {
+                opts.max_terms = v;
+            }
             opts.persist_central = persist_central;
             opts.learn_master = learn_master;
             let key = fk::build_folder_key(&folder, &opts, &data_dir).await?;
             println!(
                 "Built key for {} — {} terms ({} phrases, {} code terms), {} files scanned",
-                folder.display(), key.stats.terms_accepted,
-                key.stats.phrases_found, key.stats.code_terms, key.stats.files_scanned,
+                folder.display(),
+                key.stats.terms_accepted,
+                key.stats.phrases_found,
+                key.stats.code_terms,
+                key.stats.files_scanned,
             );
             println!("Key file: {}", folder.join(fk::FOLDER_KEY_FILE).display());
         }
@@ -144,12 +156,10 @@ async fn run_folder_key(action: FolderKeyAction) -> Result<()> {
                 println!("  {} — {} terms", k.folder.display(), k.key.len());
             }
         }
-        FolderKeyAction::Show { folder } => {
-            match fk::load_folder_key(&folder).await? {
-                Some(k) => println!("{}", serde_json::to_string_pretty(&k)?),
-                None => println!("No folder key found for {}", folder.display()),
-            }
-        }
+        FolderKeyAction::Show { folder } => match fk::load_folder_key(&folder).await? {
+            Some(k) => println!("{}", serde_json::to_string_pretty(&k)?),
+            None => println!("No folder key found for {}", folder.display()),
+        },
         FolderKeyAction::Decompress { folder, text } => {
             let out = fk::decompress_with_folder_key(&folder, &text).await;
             println!("{out}");
@@ -159,8 +169,11 @@ async fn run_folder_key(action: FolderKeyAction) -> Result<()> {
 }
 
 async fn run_trim(
-    stage: Vec<String>, decompress: bool, data_dir: &std::path::Path,
-    file: Option<std::path::PathBuf>, text: Vec<String>,
+    stage: Vec<String>,
+    decompress: bool,
+    data_dir: &std::path::Path,
+    file: Option<std::path::PathBuf>,
+    text: Vec<String>,
 ) -> Result<()> {
     let input = if let Some(path) = file {
         std::fs::read_to_string(&path)?
@@ -203,8 +216,10 @@ async fn run_trim(
 }
 
 async fn run_serve(
-    http: Option<u16>, http_only: bool,
-    data_dir: std::path::PathBuf, herdr_socket: Option<std::path::PathBuf>,
+    http: Option<u16>,
+    http_only: bool,
+    data_dir: std::path::PathBuf,
+    herdr_socket: Option<std::path::PathBuf>,
 ) -> Result<()> {
     let persistence = Persistence::new(data_dir.clone());
     persistence.init().await?;
@@ -248,18 +263,15 @@ fn build_herdr_client(
         Some(p) => p,
         None => {
             let from_env = std::env::var("HERDR_SOCKET_PATH")
-                .ok().map(std::path::PathBuf::from);
+                .ok()
+                .map(std::path::PathBuf::from);
             from_env.unwrap_or_else(|| {
-                let home = std::env::var("HOME")
-                    .unwrap_or_else(|_| ".".into());
-                std::path::PathBuf::from(home)
-                    .join(".config/herdr/herdr.sock")
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+                std::path::PathBuf::from(home).join(".config/herdr/herdr.sock")
             })
         }
     };
     let persistence = Persistence::new(data_dir.to_path_buf());
-    let client = HerdrClient::new(
-        std::sync::Arc::new(persistence), socket_path,
-    );
+    let client = HerdrClient::new(std::sync::Arc::new(persistence), socket_path);
     std::sync::Arc::new(client)
 }

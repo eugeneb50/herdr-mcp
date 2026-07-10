@@ -7,10 +7,10 @@
 //! - `savings_pct()` (savings): what fraction of *total input bytes* were
 //!   actually saved on the wire. This is the number shown on the badge.
 
-use std::collections::HashMap;
-use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
 
 /// Per-pane savings breakdown.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -118,10 +118,131 @@ pub async fn save_stats(
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
     }
-    let json = serde_json::to_string_pretty(stats)
-        .context(format!("serializing trim stats for workspace {workspace_id}"))?;
+    let json = serde_json::to_string_pretty(stats).context(format!(
+        "serializing trim stats for workspace {workspace_id}"
+    ))?;
     tokio::fs::write(&path, json)
         .await
         .context(format!("writing trim stats to {}", path.display()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_savings_pct_empty() {
+        let s = TrimStats::default();
+        assert_eq!(s.savings_pct(), 0.0);
+    }
+
+    #[test]
+    fn test_savings_pct_normal() {
+        let s = TrimStats {
+            gross_saved_bytes: 50,
+            total_input_bytes: 200,
+            ..Default::default()
+        };
+        assert!((s.savings_pct() - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_workspace_net_pct_empty() {
+        let s = TrimStats::default();
+        assert_eq!(s.workspace_net_pct(), 0.0);
+    }
+
+    #[test]
+    fn test_workspace_net_pct_normal() {
+        let s = TrimStats {
+            gross_saved_bytes: 100,
+            net_saved_bytes: 80,
+            ..Default::default()
+        };
+        assert!((s.workspace_net_pct() - 80.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_record_trim_updates_counters() {
+        let mut s = TrimStats::default();
+        s.record_trim("p1", 100, 60, 5);
+        assert_eq!(s.gross_saved_bytes, 40);
+        assert_eq!(s.net_saved_bytes, 35);
+        assert_eq!(s.total_input_bytes, 100);
+        assert_eq!(s.messages_trimmed, 1);
+        assert_eq!(s.per_pane.len(), 1);
+    }
+
+    #[test]
+    fn test_record_trim_per_pane_accumulates() {
+        let mut s = TrimStats::default();
+        s.record_trim("p1", 100, 60, 5);
+        s.record_trim("p1", 100, 60, 5);
+        s.record_trim("p2", 50, 40, 2);
+        assert_eq!(s.per_pane.len(), 2);
+        let p1 = &s.per_pane["p1"];
+        assert_eq!(p1.gross_saved_bytes, 80);
+        assert_eq!(p1.messages_trimmed, 2);
+        let p2 = &s.per_pane["p2"];
+        assert_eq!(p2.gross_saved_bytes, 10);
+    }
+
+    #[tokio::test]
+    async fn test_load_stats_missing_returns_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = load_stats(tmp.path(), "nope").await;
+        assert_eq!(s.gross_saved_bytes, 0);
+        assert_eq!(s.messages_trimmed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_save_then_load_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = TrimStats::default();
+        s.record_trim("p1", 100, 60, 5);
+        save_stats(tmp.path(), "w1", &s).await.unwrap();
+        let loaded = load_stats(tmp.path(), "w1").await;
+        assert_eq!(loaded.gross_saved_bytes, 40);
+        assert_eq!(loaded.net_saved_bytes, 35);
+        assert_eq!(loaded.messages_trimmed, 1);
+    }
+
+    #[tokio::test]
+    async fn test_save_then_load_per_pane() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = TrimStats::default();
+        s.record_trim("p1", 100, 60, 5);
+        s.record_trim("p2", 100, 60, 5);
+        save_stats(tmp.path(), "w1", &s).await.unwrap();
+        let loaded = load_stats(tmp.path(), "w1").await;
+        assert_eq!(loaded.per_pane.len(), 2);
+        assert!(loaded.per_pane.contains_key("p1"));
+        assert!(loaded.per_pane.contains_key("p2"));
+    }
+
+    #[tokio::test]
+    async fn test_record_then_save_then_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = TrimStats::default();
+        s.record_trim("p1", 200, 100, 10);
+        s.record_trim("p1", 200, 100, 10);
+        save_stats(tmp.path(), "ws", &s).await.unwrap();
+        let loaded = load_stats(tmp.path(), "ws").await;
+        assert_eq!(loaded.total_input_bytes, 400);
+        assert_eq!(loaded.gross_saved_bytes, 200);
+        assert_eq!(loaded.messages_trimmed, 2);
+    }
+
+    #[tokio::test]
+    async fn test_load_stats_creates_parent_dir_on_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("deep");
+        let mut s = TrimStats::default();
+        s.record_trim("p1", 10, 5, 1);
+        save_stats(&sub, "w1", &s).await.unwrap();
+        let loaded = load_stats(&sub, "w1").await;
+        assert_eq!(loaded.gross_saved_bytes, 5);
+    }
 }

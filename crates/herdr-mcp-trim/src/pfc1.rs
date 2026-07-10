@@ -29,8 +29,7 @@ pub struct CompressionStats {
 }
 
 /// Cherokee syllabary block, space-free. 85 symbols.
-pub const CHEROKEE_SYMBOLS_STR: &str =
-    "ᎠᎡᎢᎣᎤᎥᎦᎧᎨᎩᎪᎫᎬᎭᎮᎯᎰᎱᎲᎳᎴᎵᎶᎷᎸᎹᎺᎻᎼᎽᎾᎿ\
+pub const CHEROKEE_SYMBOLS_STR: &str = "ᎠᎡᎢᎣᎤᎥᎦᎧᎨᎩᎪᎫᎬᎭᎮᎯᎰᎱᎲᎳᎴᎵᎶᎷᎸᎹᎺᎻᎼᎽᎾᎿ\
      ᏀᏁᏂᏃᏄᏅᏆᏇᏈᏉᏊᏋᏌᏍᏎᏏᏐᏑᏒᏓᏔᏕᏖᏗᏘᏙᏚᏛᏜᏝᏞᏟ\
      ᏠᏡᏢᏣᏤᏥᏦᏧᏨᏩᏪᏫᏬᏭᏮᏯᏰᏱᏲᏳᏴ";
 
@@ -103,10 +102,10 @@ pub fn merge_keys(base: &CompressionKey, extra: &CompressionKey) -> CompressionK
 
 const STOPWORDS: &[&str] = &[
     "the", "and", "for", "are", "with", "that", "this", "from", "have", "your", "you", "was",
-    "were", "not", "but", "all", "can", "has", "had", "its", "out", "our", "into", "than",
-    "then", "they", "their", "them", "here", "there", "what", "when", "where", "while",
-    "which", "will", "would", "could", "about", "after", "before", "over", "under", "just",
-    "only", "also", "more", "most", "some", "many", "very", "each", "other", "such",
+    "were", "not", "but", "all", "can", "has", "had", "its", "out", "our", "into", "than", "then",
+    "they", "their", "them", "here", "there", "what", "when", "where", "while", "which", "will",
+    "would", "could", "about", "after", "before", "over", "under", "just", "only", "also", "more",
+    "most", "some", "many", "very", "each", "other", "such",
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -250,7 +249,7 @@ pub fn analyze_phonetic_pairs(
     if enable_heuristic {
         pairs.retain(|p| p.net_benefit > 0);
     }
-    pairs.sort_by(|a, b| b.net_benefit.cmp(&a.net_benefit));
+    pairs.sort_by_key(|b| std::cmp::Reverse(b.net_benefit));
 
     // Extract phrases if enabled
     let mut phrases: Vec<PhrasePair> = Vec::new();
@@ -272,10 +271,13 @@ pub fn analyze_phonetic_pairs(
             }
         }
 
-        phrases.sort_by(|a, b| b.net_benefit.cmp(&a.net_benefit));
+        phrases.sort_by_key(|b| std::cmp::Reverse(b.net_benefit));
     }
 
-    AnalyzedTerms { tokens: pairs, phrases }
+    AnalyzedTerms {
+        tokens: pairs,
+        phrases,
+    }
 }
 /// Returns HashMap of phrase -> frequency.
 fn extract_phrases(
@@ -303,17 +305,17 @@ fn extract_phrases(
             for i in 0..=word_positions.len() - window_size {
                 let window = &word_positions[i..i + window_size];
 
-            // Reconstruct phrase with exact original text including punctuation between words
-            let start = window[0].0;
-            let end = window[window_size - 1].1;
-            let phrase = text[start..end].to_string();
+                // Reconstruct phrase with exact original text including punctuation between words
+                let start = window[0].0;
+                let end = window[window_size - 1].1;
+                let phrase = text[start..end].to_string();
 
-            // Filter out phrases that are just punctuation/whitespace
-            if phrase.trim().is_empty() {
-                continue;
-            }
+                // Filter out phrases that are just punctuation/whitespace
+                if phrase.trim().is_empty() {
+                    continue;
+                }
 
-            *phrase_counts.entry(phrase).or_insert(0) += 1;
+                *phrase_counts.entry(phrase).or_insert(0) += 1;
             }
         }
     }
@@ -354,7 +356,7 @@ pub fn generate_compression_key(
             all_terms.push((&phrase.phrase, phrase.net_benefit));
         }
     }
-    all_terms.sort_by(|a, b| b.1.cmp(&a.1));
+    all_terms.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     for (i, (term, _)) in all_terms.iter().enumerate() {
         if i >= available.len() || i >= max_new {
@@ -420,7 +422,7 @@ pub fn compress_text(text: &str, key: &CompressionKey) -> (String, Vec<String>) 
         .filter(|(_, term)| !term.is_empty())
         .map(|(s, t)| (s.clone(), t.clone()))
         .collect();
-    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
     let mut result = text.to_string();
     let mut used_symbols = Vec::new();
@@ -500,10 +502,11 @@ pub fn parse_header(text: &str) -> Option<(CompressionKey, String)> {
             body_start = line_as_ptr_offset(after_key, line);
             break;
         }
-        if let Some((sym, term)) = trimmed.split_once('=') {
-            if !sym.is_empty() && !term.is_empty() {
-                key.insert(sym.to_string(), term.to_string());
-            }
+        if let Some((sym, term)) = trimmed.split_once('=')
+            && !sym.is_empty()
+            && !term.is_empty()
+        {
+            key.insert(sym.to_string(), term.to_string());
         }
     }
 
@@ -547,3 +550,344 @@ pub fn analyze_and_build(text: &str, seed: &CompressionKey) -> CompressionKey {
     generate_compression_key(&terms, seed, 80)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn test_key() -> CompressionKey {
+        let mut key = CompressionKey::new();
+        key.insert("Ꮜ".to_string(), "session".to_string());
+        key.insert("Ꮞ".to_string(), "tools".to_string());
+        key.insert("Ꮟ".to_string(), "agent".to_string());
+        key
+    }
+
+    #[test]
+    fn test_cherokee_symbols_count_85() {
+        assert_eq!(cherokee_symbols().len(), 85);
+    }
+
+    #[test]
+    fn test_cherokee_symbols_unique() {
+        let syms = cherokee_symbols();
+        let unique: std::collections::HashSet<_> = syms.iter().collect();
+        assert_eq!(syms.len(), unique.len(), "symbols must be unique");
+    }
+
+    #[test]
+    fn test_cherokee_symbols_in_range() {
+        let lo = std::char::from_u32(0x13A0).unwrap();
+        let hi = std::char::from_u32(0x13FF).unwrap();
+        for &c in &cherokee_symbols() {
+            assert!(lo <= c && c <= hi, "symbol {c} is outside U+13A0..=U+13FF");
+        }
+    }
+
+    #[test]
+    fn test_default_key_has_expected_entries() {
+        let key = default_key();
+        assert_eq!(key.get("Ꮜ").map(|s| s.as_str()), Some("session"));
+        assert_eq!(key.get("Ꮞ").map(|s| s.as_str()), Some("tools"));
+        assert_eq!(key.get("Ꮟ").map(|s| s.as_str()), Some("agent"));
+        assert!(key.len() >= 30);
+    }
+
+    #[test]
+    fn test_merge_keys_union() {
+        let a = test_key();
+        let mut b = CompressionKey::new();
+        b.insert("Ꮠ".to_string(), "profile".to_string());
+        b.insert("Ꮜ".to_string(), "SESSION_OVERRIDE".to_string());
+
+        let merged = merge_keys(&a, &b);
+        assert_eq!(
+            merged.get("Ꮜ").map(|s| s.as_str()),
+            Some("SESSION_OVERRIDE")
+        );
+        assert_eq!(merged.get("Ꮞ").map(|s| s.as_str()), Some("tools"));
+        assert_eq!(merged.get("Ꮠ").map(|s| s.as_str()), Some("profile"));
+        assert_eq!(merged.len(), 4);
+    }
+
+    #[test]
+    fn test_compress_text_replaces_known_terms() {
+        let key = test_key();
+        let (compressed, used) = compress_text("the session tools are ready", &key);
+        assert!(compressed.contains('Ꮜ'), "session should be compressed");
+        assert!(compressed.contains('Ꮞ'), "tools should be compressed");
+        assert!(used.contains(&"Ꮜ".to_string()));
+        assert!(used.contains(&"Ꮞ".to_string()));
+    }
+
+    #[test]
+    fn test_compress_text_ignores_unknown_terms() {
+        let key = test_key();
+        let (compressed, _used) = compress_text("unknown_word_foo", &key);
+        assert_eq!(compressed, "unknown_word_foo");
+    }
+
+    #[test]
+    fn test_decompress_text_expands_symbols() {
+        let key = test_key();
+        let out = decompress_text("Ꮜ is Ꮞ", &key);
+        assert_eq!(out, "session is tools");
+    }
+
+    #[test]
+    fn test_pfc1_roundtrip_empty_string() {
+        let key = test_key();
+        let (c, _u) = compress_text("", &key);
+        let d = decompress_text(&c, &key);
+        assert_eq!(d, "");
+    }
+
+    #[test]
+    fn test_pfc1_roundtrip_single_word() {
+        let key = test_key();
+        let (c, _u) = compress_text("session", &key);
+        let d = decompress_text(&c, &key);
+        assert_eq!(d, "session");
+    }
+
+    #[test]
+    fn test_pfc1_roundtrip_known_terms_only() {
+        let key = test_key();
+        let input = "session tools agent profile";
+        let (c, _u) = compress_text(input, &key);
+        let d = decompress_text(&c, &key);
+        assert_eq!(d, input);
+    }
+
+    #[test]
+    fn test_pfc1_roundtrip_mixed_known_unknown() {
+        let key = test_key();
+        let input = "session tools unknown_foo agent bar";
+        let (c, _u) = compress_text(input, &key);
+        let d = decompress_text(&c, &key);
+        assert_eq!(d, input);
+    }
+
+    #[test]
+    fn test_pfc1_roundtrip_unicode() {
+        let key = test_key();
+        let input = "こんにちは世界 — session tools";
+        let (c, _u) = compress_text(input, &key);
+        let d = decompress_text(&c, &key);
+        assert_eq!(d, input, "PFC1 roundtrip must be lossless for unicode");
+    }
+
+    #[test]
+    fn test_pfc1_roundtrip_emoji() {
+        let key = test_key();
+        let input = "🚀 session 🎉 tools";
+        let (c, _u) = compress_text(input, &key);
+        let d = decompress_text(&c, &key);
+        assert_eq!(d, input);
+    }
+
+    #[test]
+    fn test_pfc1_roundtrip_long_paragraph() {
+        let key = default_key();
+        let input = "session tools agent profile gateway config ".repeat(40);
+        let (c, _u) = compress_text(&input, &key);
+        let d = decompress_text(&c, &key);
+        assert_eq!(d, input);
+    }
+
+    #[test]
+    fn test_pfc1_roundtrip_newlines_and_whitespace() {
+        let key = test_key();
+        let input = "line1\nline2\n\nline3";
+        let (c, _u) = compress_text(input, &key);
+        let d = decompress_text(&c, &key);
+        assert_eq!(d, input);
+    }
+
+    #[test]
+    fn test_pfc1_roundtrip_special_chars() {
+        let key = test_key();
+        let input = "session@tools!agent#profile";
+        let (c, _u) = compress_text(input, &key);
+        let d = decompress_text(&c, &key);
+        assert_eq!(d, input);
+    }
+
+    #[test]
+    fn test_replace_whole_words_basic() {
+        let out = replace_whole_words("the session is active", "session", "X");
+        assert_eq!(out, "the X is active");
+    }
+
+    #[test]
+    fn test_replace_whole_words_no_substring_match() {
+        // "sessions" should be left alone (whole-word boundary, not prefix)
+        let out = replace_whole_words("sessions", "session", "X");
+        assert_eq!(out, "sessions");
+    }
+
+    #[test]
+    fn test_replace_whole_words_no_identifier_match() {
+        let out = replace_whole_words("user_session_id", "session", "X");
+        assert_eq!(out, "user_session_id");
+    }
+
+    #[test]
+    fn test_replace_whole_words_empty_expansion() {
+        let out = replace_whole_words("session session", "", "X");
+        assert_eq!(out, "session session");
+    }
+
+    #[test]
+    fn test_replace_whole_words_multiple_occurrences() {
+        let out = replace_whole_words("session tools session agent session", "session", "X");
+        assert_eq!(out, "X tools X agent X");
+    }
+
+    #[test]
+    fn test_generate_header_contains_used_symbols_only() {
+        let mut key = CompressionKey::new();
+        key.insert("Ꮜ".to_string(), "session".to_string());
+        key.insert("Ꮞ".to_string(), "tools".to_string());
+        key.insert("Ꮟ".to_string(), "agent".to_string());
+        let used = vec!["Ꮜ".to_string(), "Ꮞ".to_string()];
+        let header = generate_header(&key, &used);
+        assert!(header.contains("Ꮜ=session"));
+        assert!(header.contains("Ꮞ=tools"));
+        assert!(!header.contains("agent"), "unused symbol must not appear");
+        assert!(header.starts_with("PFC1|"));
+        assert!(header.contains("---\n"));
+    }
+
+    #[test]
+    fn test_parse_header_roundtrip() {
+        let mut key = CompressionKey::new();
+        key.insert("Ꮜ".to_string(), "session".to_string());
+        key.insert("Ꮞ".to_string(), "tools".to_string());
+        let used = vec!["Ꮜ".to_string(), "Ꮞ".to_string()];
+        let header = generate_header(&key, &used);
+        let body = "hello world";
+        let full = format!("{header}{body}");
+        let (parsed_key, parsed_body) = parse_header(&full).expect("header should parse");
+        assert_eq!(parsed_key.get("Ꮜ").map(|s| s.as_str()), Some("session"));
+        assert_eq!(parsed_key.get("Ꮞ").map(|s| s.as_str()), Some("tools"));
+        assert!(!parsed_key.contains_key("Ꮟ"));
+        assert_eq!(parsed_body, body);
+    }
+
+    #[test]
+    fn test_parse_header_returns_none_for_non_pfc1() {
+        assert!(parse_header("just plain text").is_none());
+    }
+
+    #[test]
+    fn test_parse_header_body_after_separator() {
+        let mut key = CompressionKey::new();
+        key.insert("Ꮜ".to_string(), "session".to_string());
+        let header = generate_header(&key, &["Ꮜ".to_string()]);
+        let body = "payload after header";
+        let full = format!("{header}{body}");
+        let (_k, parsed_body) = parse_header(&full).unwrap();
+        assert_eq!(parsed_body, body);
+    }
+
+    #[test]
+    fn test_calculate_heuristic_benefit_positive() {
+        // long frequent term saves bytes
+        let b = calculate_heuristic_benefit("config", 5);
+        assert!(b.net_benefit > 0, "frequent long term should be beneficial");
+    }
+
+    #[test]
+    fn test_calculate_heuristic_benefit_negative() {
+        // short rare term costs more than it saves
+        let b = calculate_heuristic_benefit("cat", 1);
+        assert!(
+            b.net_benefit < 0,
+            "rare short term should not be beneficial"
+        );
+    }
+
+    #[test]
+    fn test_calculate_stats_zero_input() {
+        let key = test_key();
+        let s = calculate_stats("", "", &key);
+        assert_eq!(s.ratio, 0.0);
+        assert_eq!(s.savings, 0);
+    }
+
+    #[test]
+    fn test_calculate_stats_normal() {
+        let key = test_key();
+        let s = calculate_stats("a".repeat(100).as_str(), "b".repeat(60).as_str(), &key);
+        assert_eq!(s.original_size, 100);
+        assert_eq!(s.compressed_size, 60);
+        assert_eq!(s.savings, 40);
+        assert!((s.ratio - 40.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_analyze_and_build_returns_key() {
+        let seed = default_key();
+        let text = "config gateway profile agent session tools config gateway config";
+        let key = analyze_and_build(text, &seed);
+        assert!(key.len() >= seed.len());
+    }
+
+    #[test]
+    fn test_analyze_phonetic_pairs_min_frequency() {
+        // Disable the net-benefit heuristic so only frequency/count filtering applies.
+        let opts = CompressionOptions {
+            enable_phrases: false,
+            ..CompressionOptions::default()
+        };
+        let terms = analyze_phonetic_pairs(
+            "configuration configuration configuration",
+            4,
+            2,
+            false,
+            opts,
+        );
+        // appears 3 times, should pass min_frequency=2
+        assert!(terms.tokens.iter().any(|t| t.term == "configuration"));
+        let terms2 = analyze_phonetic_pairs("configuration", 4, 2, false, opts);
+        // appears once, should be filtered
+        assert!(!terms2.tokens.iter().any(|t| t.term == "configuration"));
+    }
+
+    #[test]
+    fn test_analyze_phonetic_pairs_phrases() {
+        let opts = CompressionOptions::default();
+        let terms = analyze_phonetic_pairs(
+            "run the build run the build run the build",
+            4,
+            2,
+            true,
+            opts,
+        );
+        // the repeated phrase "run the build" should be extracted
+        assert!(!terms.phrases.is_empty());
+    }
+
+    #[test]
+    fn test_compression_options_default_is_lossless() {
+        let opts = CompressionOptions::default();
+        assert!(!opts.normalize_case);
+        assert!(!opts.filter_stopwords);
+    }
+
+    #[test]
+    fn test_pfc1_roundtrip_large_key_exhaustion() {
+        // Build a key with 85 entries (one per symbol) and confirm full roundtrip.
+        let syms = cherokee_symbols();
+        let mut key = CompressionKey::new();
+        for (i, sym) in syms.iter().enumerate() {
+            key.insert(sym.to_string(), format!("term{i}"));
+        }
+        let input: Vec<String> = (0..85).map(|i| format!("term{i}")).collect();
+        let input = input.join(" ");
+        let (c, _u) = compress_text(&input, &key);
+        let d = decompress_text(&c, &key);
+        assert_eq!(d, input);
+    }
+}

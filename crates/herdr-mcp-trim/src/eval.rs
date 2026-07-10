@@ -71,12 +71,13 @@ pub fn trim_bench(corpus_path: &str, level: &str, base_key: &CompressionKey) -> 
         }
         lines += 1;
         let r = run(line, &parsed, base_key);
-        if r.input.len() == 0 {
+        if r.input.is_empty() {
             continue;
         }
         total_in += r.input.len();
         total_out += r.output.len();
-        let ratio = (r.input.len().saturating_sub(r.output.len())) as f64 / r.input.len() as f64 * 100.0;
+        let ratio =
+            (r.input.len().saturating_sub(r.output.len())) as f64 / r.input.len() as f64 * 100.0;
         ratios.push(ratio);
         if r.stages.iter().any(|s| s.skipped.is_some()) {
             skipped += 1;
@@ -112,4 +113,70 @@ pub fn trim_bench(corpus_path: &str, level: &str, base_key: &CompressionKey) -> 
         "min_ratio_pct": min,
         "max_ratio_pct": max,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pfc1::default_key;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_trim_eval_returns_expected_fields() {
+        let key = default_key();
+        let report = trim_eval(
+            "the quick brown fox jumps over the lazy dog",
+            &["caveman:full".to_string(), "pfc1".to_string()],
+            &key,
+        );
+        assert!(report.get("input_bytes").is_some());
+        assert!(report.get("output_bytes").is_some());
+        assert!(report.get("total_savings_bytes").is_some());
+        assert!(report.get("stages").unwrap().is_array());
+        assert!(report.get("output").is_some());
+    }
+
+    #[test]
+    fn test_trim_eval_invalid_stage_returns_error() {
+        let key = default_key();
+        let report = trim_eval("hello world", &["bogus".to_string()], &key);
+        assert!(report.get("error").is_some());
+    }
+
+    #[test]
+    fn test_trim_eval_output_not_larger_than_input() {
+        let key = default_key();
+        let text = "the quick brown fox jumps over the lazy dog because it is slow";
+        let report = trim_eval(
+            text,
+            &["caveman:full".to_string(), "pfc1".to_string()],
+            &key,
+        );
+        let in_b = report["input_bytes"].as_u64().unwrap();
+        let out_b = report["output_bytes"].as_u64().unwrap();
+        assert!(out_b <= in_b);
+    }
+
+    #[test]
+    fn test_trim_bench_reads_corpus() {
+        let tmp = tempfile::tempdir().unwrap();
+        let corpus = tmp.path().join("corpus.txt");
+        std::fs::write(
+            &corpus,
+            "the quick brown fox\nlazy dog sleeps\nconfiguration session gateway profile\n",
+        )
+        .unwrap();
+        let key = default_key();
+        let report = trim_bench(corpus.to_str().unwrap(), "caveman:full,pfc1", &key);
+        assert_eq!(report["lines"].as_u64().unwrap(), 3);
+        assert!(report.get("aggregate_ratio_pct").is_some());
+        assert!(report.get("mean_ratio_pct").is_some());
+    }
+
+    #[test]
+    fn test_trim_bench_missing_file_returns_error() {
+        let key = default_key();
+        let report = trim_bench("/nonexistent/path/corpus.txt", "pfc1", &key);
+        assert!(report.get("error").is_some());
+    }
 }

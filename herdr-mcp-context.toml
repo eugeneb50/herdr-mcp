@@ -1,0 +1,84 @@
+# herdr-mcp — running context
+# Evolving memory for resuming sessions. Read first when resuming work,
+# update at the end of each session. (Originally lived at
+# /root/.config/herdr-mcp-context.md; moved into the repo as TOML.)
+
+objective = "herdr-mcp migrated from a monolith into a 4-crate workspace; comprehensive test suite written per TEST_PLAN.md. Migration COMPLETE. Test suite COMPLETE (233 tests, all passing)."
+edition = "2024"
+binary_name = "herdr-mcp"
+cli_subcommands = ["serve", "trim", "dashboard", "folder-key"]
+
+[architecture]
+crates = ["herdr-mcp-core", "herdr-mcp-trim", "herdr-mcp-server", "herdr-mcp-cli"]
+note = "The herdr-mcp-folder-key crate was eliminated; folder-key logic lives in herdr-mcp-trim/src/folder_key.rs."
+
+[dev_dependencies]
+tempfile = "3"
+pretty_assertions = "1"
+rstest = "0.23"
+assert_cmd = "2"
+predicates = "3"
+
+[run_commands]
+workspace = "cargo test --workspace"
+trim = "cargo test -p herdr-mcp-trim --lib"
+server = "cargo test -p herdr-mcp-server --lib"
+cli = "cargo test -p herdr-mcp-cli"
+build = "cargo build --release"
+
+# Spec facts the tests rely on
+[[spec]]
+fact = "extract_variables always prefixes keys with 'result.' (input {\"result\":\"hello\"} -> \"result.result\")."
+[[spec]]
+fact = "extract_variables ignores arrays."
+[[spec]]
+fact = "resolve_json_path requires a dotted path (step.field); a bare single key returns None."
+[[spec]]
+fact = "resolve_variables leaves unknown {{ path }} placeholders unchanged."
+[[spec]]
+fact = "Config::merge takes other wholesale for every field (no per-field default-preservation)."
+[[spec]]
+fact = "TrimPolicy::parse_stages defaults emit_header = true; parse_stages_with(false/true) sets it."
+[[spec]]
+fact = "CompressionKey = HashMap<String,String> (Cherokee symbol -> term). 85 symbols (U+13A0..=U+13FF)."
+[[spec]]
+fact = "caveman is lossy (style); pfc1 is lossless. Pipeline run never expands wire bytes (adaptive gate skips PFC1 when candidate.len() >= current.len())."
+[[spec]]
+fact = "stats.rs: savings_pct() = gross/total_input; workspace_net_pct() = net/gross."
+
+# Known non-determinism / gotchas
+[[gotcha]]
+note = "build_folder_key writes its output INTO the scanned root folder, so a second scan re-ingests that JSON file -> the produced key is non-deterministic across separate builds (symbol->term assignment order AND term selection both depend on HashMap iteration when over-subscribed). The persisted-on-disk key IS stable for a single build (test_load_folder_key_roundtrip). Don't assert two separate builds are equal."
+
+# Test layout (crate -> count)
+[test_layout]
+herdr_mcp_trim = 126
+herdr_mcp_server = 73
+herdr_mcp_core = 24
+herdr_mcp_cli = 10
+
+[test_breakdown.herdr_mcp_trim]
+pfc1 = 35
+caveman = 18
+code_regions = 13
+policy = 9
+stats = 11
+runner = 5
+eval = 5
+folder_key = 13
+pipeline = 17
+
+[test_breakdown.herdr_mcp_server]
+config = 24
+variables = 6
+templates = 10
+server_recipe_engine = 19
+persistence = 13
+herdr_client = 16
+scheduler = 6
+
+[test_breakdown.herdr_mcp_core]
+config = 24
+
+[test_breakdown.herdr_mcp_cli]
+integration = 10

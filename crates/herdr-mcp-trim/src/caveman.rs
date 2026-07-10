@@ -8,7 +8,7 @@
 //! PFC1's Cherokee syllabary (U+13A0–U+13FF), so the two compressors
 //! never collide and compose cleanly (caveman first, then pfc1).
 
-use crate::code_regions::{detect_all_regions, split_by_regions, DetectMode};
+use crate::code_regions::{DetectMode, detect_all_regions, split_by_regions};
 
 /// Intensity level. `wenyan-*` levels require a `zh` corpus and, without one,
 /// return `skipped = true` (see `CompressionPlan` Open Items §1).
@@ -30,7 +30,9 @@ impl CavemanLevel {
             "ultra" | "caveman:ultra" => Some(CavemanLevel::Ultra),
             "wenyan-lite" | "wenyan_lite" | "caveman:wenyan-lite" => Some(CavemanLevel::WenyanLite),
             "wenyan-full" | "wenyan_full" | "caveman:wenyan-full" => Some(CavemanLevel::WenyanFull),
-            "wenyan-ultra" | "wenyan_ultra" | "caveman:wenyan-ultra" => Some(CavemanLevel::WenyanUltra),
+            "wenyan-ultra" | "wenyan_ultra" | "caveman:wenyan-ultra" => {
+                Some(CavemanLevel::WenyanUltra)
+            }
             _ => None,
         }
     }
@@ -65,23 +67,48 @@ pub struct CavemanResult {
 
 // Multi-word pleasantries removed verbatim (case-insensitive).
 const MULTI_WORD_PLEASANTRIES: &[&str] = &[
-    "of course", "happy to", "glad to", "no problem", "you're welcome",
-    "you are welcome", "let me know", "feel free", "i would be happy to",
+    "of course",
+    "happy to",
+    "glad to",
+    "no problem",
+    "you're welcome",
+    "you are welcome",
+    "let me know",
+    "feel free",
+    "i would be happy to",
 ];
 
 // Single-word tokens dropped (case-insensitive bare-word match; technical terms
 // are preserved because they contain interior uppercase / digits / separators).
 const PLEASANTRIES: &[&str] = &[
-    "sure", "certainly", "actually", "basically", "really", "simply",
+    "sure",
+    "certainly",
+    "actually",
+    "basically",
+    "really",
+    "simply",
 ];
 const FILLERS: &[&str] = &[
-    "just", "really", "basically", "actually", "simply", "literally",
-    "essentially", "merely",
+    "just",
+    "really",
+    "basically",
+    "actually",
+    "simply",
+    "literally",
+    "essentially",
+    "merely",
 ];
 const ARTICLES: &[&str] = &["a", "an", "the"];
 const HEDGES: &[&str] = &[
-    "maybe", "perhaps", "seems", "appears", "i think", "i believe",
-    "in my opinion", "might", "possibly",
+    "maybe",
+    "perhaps",
+    "seems",
+    "appears",
+    "i think",
+    "i believe",
+    "in my opinion",
+    "might",
+    "possibly",
 ];
 
 // Verbatim phrases -> short synonyms (applied before token dropping).
@@ -133,14 +160,26 @@ const CAUSAL_ARROWS: &[(&str, &str)] = &[
 
 // Auto-clarity: do not compress these (security / irreversible / ambiguous).
 const DESTRUCTIVE: &[&str] = &[
-    "warning", "permanently delete", "cannot be undone", "irreversible",
-    "drop column", "drop table", "rm -rf", "force push", "hard reset",
-    "delete all", "wipe", "danger", "caution",
+    "warning",
+    "permanently delete",
+    "cannot be undone",
+    "irreversible",
+    "drop column",
+    "drop table",
+    "rm -rf",
+    "force push",
+    "hard reset",
+    "delete all",
+    "wipe",
+    "danger",
+    "caution",
 ];
 
 /// True when `token` looks like technical content we must never rewrite.
 fn is_technical(token: &str) -> bool {
-    let bare = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-' && c != '.' && c != '/');
+    let bare = token.trim_matches(|c: char| {
+        !c.is_alphanumeric() && c != '_' && c != '-' && c != '.' && c != '/'
+    });
     if bare.is_empty() {
         return false;
     }
@@ -198,7 +237,7 @@ fn drop_words(prose: &str, drop: &[&str]) -> String {
             if d.contains(' ') {
                 return false;
             }
-            &lower == *d
+            lower == *d
         });
         if is_drop && !is_technical(token) {
             // Drop the bare word but keep its punctuation, attached to neighbors.
@@ -246,7 +285,9 @@ fn remove_phrases(prose: &str, phrases: &[&str]) -> String {
             .map(|w| {
                 let mut c = w.chars();
                 match c.next() {
-                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str().to_lowercase().as_str(),
+                    Some(f) => {
+                        f.to_uppercase().collect::<String>() + c.as_str().to_lowercase().as_str()
+                    }
                     None => String::new(),
                 }
             })
@@ -268,7 +309,8 @@ pub fn compress(text: &str, level: CavemanLevel) -> CavemanResult {
             output: text.to_string(),
             skipped: true,
             reason: Some(
-                "wenyan levels require a configured zh corpus (not available); returned verbatim".into(),
+                "wenyan levels require a configured zh corpus (not available); returned verbatim"
+                    .into(),
             ),
         };
     }
@@ -328,5 +370,221 @@ pub fn compress(text: &str, level: CavemanLevel) -> CavemanResult {
         output: result,
         skipped: false,
         reason: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_caveman_level_parse_all_variants() {
+        assert_eq!(CavemanLevel::parse("lite"), Some(CavemanLevel::Lite));
+        assert_eq!(
+            CavemanLevel::parse("caveman:lite"),
+            Some(CavemanLevel::Lite)
+        );
+        assert_eq!(CavemanLevel::parse("full"), Some(CavemanLevel::Full));
+        assert_eq!(
+            CavemanLevel::parse("caveman:full"),
+            Some(CavemanLevel::Full)
+        );
+        assert_eq!(CavemanLevel::parse(""), Some(CavemanLevel::Full));
+        assert_eq!(CavemanLevel::parse("ultra"), Some(CavemanLevel::Ultra));
+        assert_eq!(
+            CavemanLevel::parse("caveman:ultra"),
+            Some(CavemanLevel::Ultra)
+        );
+        assert_eq!(
+            CavemanLevel::parse("wenyan-lite"),
+            Some(CavemanLevel::WenyanLite)
+        );
+        assert_eq!(
+            CavemanLevel::parse("wenyan-full"),
+            Some(CavemanLevel::WenyanFull)
+        );
+        assert_eq!(
+            CavemanLevel::parse("wenyan-ultra"),
+            Some(CavemanLevel::WenyanUltra)
+        );
+    }
+
+    #[test]
+    fn test_caveman_level_parse_invalid() {
+        assert_eq!(CavemanLevel::parse("turbo"), None);
+        assert_eq!(CavemanLevel::parse("medium"), None);
+    }
+
+    #[test]
+    fn test_caveman_level_name_roundtrip() {
+        let l = CavemanLevel::Lite;
+        assert_eq!(CavemanLevel::parse(l.name()), Some(l));
+        let f = CavemanLevel::Full;
+        assert_eq!(CavemanLevel::parse(f.name()), Some(f));
+        let u = CavemanLevel::Ultra;
+        assert_eq!(CavemanLevel::parse(u.name()), Some(u));
+    }
+
+    #[test]
+    fn test_caveman_full_drops_articles() {
+        let r = compress("the quick brown fox", CavemanLevel::Full);
+        assert!(!r.skipped);
+        let words: Vec<&str> = r.output.split_whitespace().collect();
+        assert!(
+            !words.contains(&"the"),
+            "article 'the' should be dropped: {:?}",
+            r.output
+        );
+    }
+
+    #[test]
+    fn test_caveman_full_preserves_technical_identifiers() {
+        let r = compress("the user_database has config", CavemanLevel::Full);
+        assert!(!r.skipped);
+        assert!(
+            r.output.contains("user_database"),
+            "user_database must be preserved: {:?}",
+            r.output
+        );
+    }
+
+    #[test]
+    fn test_caveman_full_drops_pleasantries() {
+        let r = compress("sure, the tool works", CavemanLevel::Full);
+        assert!(!r.skipped);
+        assert!(
+            !r.output.to_lowercase().contains("sure"),
+            "pleasantery 'sure' should be dropped: {:?}",
+            r.output
+        );
+    }
+
+    #[test]
+    fn test_caveman_full_removes_multi_word_pleasantries() {
+        let r = compress("happy to help with the build", CavemanLevel::Full);
+        assert!(
+            !r.output.to_lowercase().contains("happy to"),
+            "multi-word pleasentry dropped: {:?}",
+            r.output
+        );
+    }
+
+    #[test]
+    fn test_caveman_full_synonym_replacement() {
+        let r = compress("in order to build the thing", CavemanLevel::Full);
+        assert!(!r.skipped);
+        assert!(
+            r.output.contains("to build"),
+            "synonym replacement applied: {:?}",
+            r.output
+        );
+    }
+
+    #[test]
+    fn test_caveman_ultra_adds_causal_arrows() {
+        let r = compress(
+            "the config changed because the test failed",
+            CavemanLevel::Ultra,
+        );
+        assert!(!r.skipped);
+        assert!(
+            r.output.contains('→'),
+            "causal arrow should appear: {:?}",
+            r.output
+        );
+    }
+
+    #[test]
+    fn test_caveman_ultra_abbreviates() {
+        let r = compress("the database configuration is set", CavemanLevel::Ultra);
+        assert!(!r.skipped);
+        assert!(
+            r.output.contains("DB"),
+            "database abbreviated to DB: {:?}",
+            r.output
+        );
+        assert!(
+            r.output.contains("config"),
+            "configuration abbreviated to config: {:?}",
+            r.output
+        );
+    }
+
+    #[test]
+    fn test_caveman_lite_keeps_articles() {
+        let r = compress("the user_database is ready", CavemanLevel::Lite);
+        assert!(!r.skipped);
+        let words: Vec<&str> = r.output.split_whitespace().collect();
+        assert!(
+            words.contains(&"the"),
+            "lite should keep articles: {:?}",
+            r.output
+        );
+    }
+
+    #[test]
+    fn test_caveman_skips_destructive_content() {
+        let r = compress("warning: permanently delete this file", CavemanLevel::Full);
+        assert!(r.skipped, "destructive content must be skipped");
+        assert_eq!(r.output, "warning: permanently delete this file");
+    }
+
+    #[test]
+    fn test_caveman_skips_wenyan_levels() {
+        let r = compress("anything goes here", CavemanLevel::WenyanLite);
+        assert!(r.skipped);
+        assert_eq!(r.reason.is_some(), true);
+    }
+
+    #[test]
+    fn test_caveman_preserves_code_blocks() {
+        let input = "the build failed:\n```rust\nfn main() {}\n```\n";
+        let r = compress(input, CavemanLevel::Full);
+        assert!(!r.skipped);
+        assert!(
+            r.output.contains("fn main() {}"),
+            "code block preserved: {:?}",
+            r.output
+        );
+        assert!(
+            r.output.contains("```rust"),
+            "fence marker preserved: {:?}",
+            r.output
+        );
+    }
+
+    #[test]
+    fn test_caveman_deterministic() {
+        let input = "the quick brown fox jumps over the lazy dog because it is slow";
+        let a = compress(input, CavemanLevel::Full);
+        let b = compress(input, CavemanLevel::Full);
+        assert_eq!(a.output, b.output, "caveman must be deterministic");
+    }
+
+    #[test]
+    fn test_caveman_empty_input() {
+        let r = compress("", CavemanLevel::Full);
+        assert!(!r.skipped);
+        assert_eq!(r.output, "");
+    }
+
+    #[test]
+    fn test_caveman_only_code_block() {
+        let input = "```\ncode only\n```";
+        let r = compress(input, CavemanLevel::Full);
+        assert!(!r.skipped);
+        assert_eq!(r.output, input, "all-code input unchanged");
+    }
+
+    #[test]
+    fn test_caveman_preserves_api_keys() {
+        let r = compress("the API_KEY is set in env", CavemanLevel::Full);
+        assert!(!r.skipped);
+        assert!(
+            r.output.contains("API_KEY"),
+            "API_KEY preserved: {:?}",
+            r.output
+        );
     }
 }

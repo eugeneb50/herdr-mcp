@@ -10,18 +10,15 @@ pub mod runner;
 pub mod stats;
 
 // Selective re-exports of the key public types (no glob `use X::*`)
-pub use pfc1::{CompressionKey, CompressionStats, compress_text, decompress_text};
 pub use caveman::{CavemanLevel, CavemanResult, compress as caveman_compress};
-pub use pipeline::{StageSpec, PipelineResult, StageResult};
-pub use runner::{PipelineRunner, MEMORY_FILE};
-pub use policy::{TrimPolicy, TrimDirection};
-pub use stats::{TrimStats, PaneStat, load_stats, save_stats};
+pub use eval::{trim_bench, trim_eval};
 pub use folder_key::{
-    FolderKey, FolderKeyOptions, FolderKeyStats,
-    build_folder_key, load_folder_key, save_folder_key,
-    save_central_key, list_central_keys,
-    load_master_key, learn_into_master,
-    decompress_with_folder_key, discover_folder_keys,
-    FOLDER_KEY_FILE, MASTER_KEY_FILE, CENTRAL_DIR,
+    CENTRAL_DIR, FOLDER_KEY_FILE, FolderKey, FolderKeyOptions, FolderKeyStats, MASTER_KEY_FILE,
+    build_folder_key, decompress_with_folder_key, discover_folder_keys, learn_into_master,
+    list_central_keys, load_folder_key, load_master_key, save_central_key, save_folder_key,
 };
-pub use eval::{trim_eval, trim_bench};
+pub use pfc1::{CompressionKey, CompressionStats, compress_text, decompress_text};
+pub use pipeline::{PipelineResult, StageResult, StageSpec};
+pub use policy::{TrimDirection, TrimPolicy};
+pub use runner::{MEMORY_FILE, PipelineRunner};
+pub use stats::{PaneStat, TrimStats, load_stats, save_stats};

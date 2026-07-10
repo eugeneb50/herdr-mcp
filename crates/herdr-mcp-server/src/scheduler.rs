@@ -1,16 +1,17 @@
-use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use dashmap::DashMap;
 use std::str::FromStr;
+use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::persistence::Persistence;
-use crate::variables::ScheduledRecipe;
 use crate::variables::ExecutionResult;
 use crate::variables::ExecutionStatus;
+use crate::variables::ScheduledRecipe;
 
-pub type ExecutorFn = Arc<dyn Fn(Uuid) -> tokio::sync::oneshot::Receiver<ExecutionResult> + Send + Sync>;
+pub type ExecutorFn =
+    Arc<dyn Fn(Uuid) -> tokio::sync::oneshot::Receiver<ExecutionResult> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Scheduler {
@@ -48,7 +49,9 @@ impl Scheduler {
     pub async fn schedule_one(&self, s: ScheduledRecipe) -> anyhow::Result<()> {
         let cron = Schedule::from_str(&s.cron_schedule)
             .map_err(|e| anyhow::anyhow!("invalid cron: {e}"))?;
-        let next_run = cron.upcoming(Utc).next()
+        let next_run = cron
+            .upcoming(Utc)
+            .next()
             .ok_or_else(|| anyhow::anyhow!("cron never fires"))?;
         let active = ActiveSchedule {
             recipe_id: s.recipe_id,
@@ -75,7 +78,8 @@ impl Scheduler {
                 }
                 let now = Utc::now();
                 if active.next_run > now {
-                    let dur = (active.next_run - now).to_std()
+                    let dur = (active.next_run - now)
+                        .to_std()
                         .unwrap_or(std::time::Duration::from_secs(60));
                     tokio::time::sleep(dur).await;
                 }
@@ -90,17 +94,16 @@ impl Scheduler {
                     let sched_id = id;
                     tokio::spawn(async move {
                         let exec_rx = exec_fn(recipe_id);
-                        let result = exec_rx.await
-                            .unwrap_or_else(|_| ExecutionResult {
-                                id: Uuid::new_v4(),
-                                recipe_id,
-                                started_at: Utc::now(),
-                                completed_at: Some(Utc::now()),
-                                status: ExecutionStatus::Failed,
-                                results: Default::default(),
-                                variables: Default::default(),
-                                error: Some("executor dropped channel".into()),
-                            });
+                        let result = exec_rx.await.unwrap_or_else(|_| ExecutionResult {
+                            id: Uuid::new_v4(),
+                            recipe_id,
+                            started_at: Utc::now(),
+                            completed_at: Some(Utc::now()),
+                            status: ExecutionStatus::Failed,
+                            results: Default::default(),
+                            variables: Default::default(),
+                            error: Some("executor dropped channel".into()),
+                        });
                         let _ = persistence.save_execution(&result).await;
                         // update schedule last_run
                         if let Ok(Some(mut sched)) = persistence.load_schedule(&sched_id).await {
@@ -148,7 +151,8 @@ impl Scheduler {
     }
 
     pub async fn list(&self) -> Vec<ScheduledRecipe> {
-        self.inner.schedules
+        self.inner
+            .schedules
             .iter()
             .map(|entry| {
                 let id = *entry.key();
@@ -164,5 +168,90 @@ impl Scheduler {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn scheduled() -> ScheduledRecipe {
+        ScheduledRecipe {
+            id: Uuid::new_v4(),
+            recipe_id: Uuid::new_v4(),
+            cron_schedule: "0 0 0 1 1 *".into(), // far future (2027-01-01), won't fire during test
+            next_run: None,
+            last_run: None,
+            enabled: true,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_empty_initially() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let sched = Scheduler::new(std::sync::Arc::new(p));
+        assert!(sched.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_schedule_one_and_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let sched = Scheduler::new(std::sync::Arc::new(p));
+        let s = scheduled();
+        sched.schedule_one(s.clone()).await.unwrap();
+        let list = sched.list().await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, s.id);
+    }
+
+    #[tokio::test]
+    async fn test_schedule_one_invalid_cron_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let sched = Scheduler::new(std::sync::Arc::new(p));
+        let mut s = scheduled();
+        s.cron_schedule = "not a cron".into();
+        assert!(sched.schedule_one(s).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_remove_schedule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let sched = Scheduler::new(std::sync::Arc::new(p));
+        let s = scheduled();
+        sched.schedule_one(s.clone()).await.unwrap();
+        assert!(sched.remove(s.id).await.unwrap());
+        assert!(sched.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_set_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let sched = Scheduler::new(std::sync::Arc::new(p));
+        let s = scheduled();
+        sched.schedule_one(s.clone()).await.unwrap();
+        assert!(sched.set_enabled(s.id, false).await.unwrap());
+        let loaded = sched
+            .inner
+            .persistence
+            .load_schedule(&s.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!loaded.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_set_enabled_missing_returns_false() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let sched = Scheduler::new(std::sync::Arc::new(p));
+        assert!(!sched.set_enabled(Uuid::new_v4(), false).await.unwrap());
     }
 }

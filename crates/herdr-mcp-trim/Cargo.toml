@@ -14,3 +14,9 @@ chrono = { workspace = true, features = ["serde"] }
 schemars = { workspace = true }
 walkdir = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = { workspace = true }
+pretty_assertions = { workspace = true }
+rstest = { workspace = true }

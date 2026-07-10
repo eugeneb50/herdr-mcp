@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use schemars::JsonSchema;
 
-use crate::pipeline::{parse_stage_spec, StageSpec};
+use crate::pipeline::{StageSpec, parse_stage_spec};
 
 /// When to apply a trim policy to an agent's traffic.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -63,5 +63,113 @@ pub fn outbound_with_ack(stages: Vec<String>) -> TrimPolicy {
     TrimPolicy {
         stages,
         direction: TrimDirection::OutboundWithAck,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::StageSpec;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_policy_inactive_when_empty_stages() {
+        let p = TrimPolicy {
+            stages: vec![],
+            direction: TrimDirection::OutboundWithAck,
+        };
+        assert!(!p.is_active());
+    }
+
+    #[test]
+    fn test_policy_inactive_when_none_direction() {
+        let p = TrimPolicy {
+            stages: vec!["pfc1".into()],
+            direction: TrimDirection::None,
+        };
+        assert!(!p.is_active());
+    }
+
+    #[test]
+    fn test_policy_active_when_stages_and_direction() {
+        let p = TrimPolicy {
+            stages: vec!["caveman:full".into(), "pfc1".into()],
+            direction: TrimDirection::Outbound,
+        };
+        assert!(p.is_active());
+    }
+
+    #[test]
+    fn test_parse_stages_default_emit_header() {
+        let p = TrimPolicy {
+            stages: vec!["pfc1".into()],
+            direction: TrimDirection::Outbound,
+        };
+        let specs = p.parse_stages().unwrap();
+        assert_eq!(specs.len(), 1);
+        match &specs[0] {
+            StageSpec::Pfc1 { emit_header } => {
+                assert!(*emit_header, "default emit_header should be true")
+            }
+            _ => panic!("expected pfc1"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stages_with_header_true() {
+        let p = TrimPolicy {
+            stages: vec!["pfc1".into()],
+            direction: TrimDirection::Outbound,
+        };
+        let specs = p.parse_stages_with(true).unwrap();
+        match &specs[0] {
+            StageSpec::Pfc1 { emit_header } => assert!(*emit_header),
+            _ => panic!("expected pfc1"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stages_with_header_false() {
+        let p = TrimPolicy {
+            stages: vec!["pfc1".into()],
+            direction: TrimDirection::Outbound,
+        };
+        let specs = p.parse_stages_with(false).unwrap();
+        match &specs[0] {
+            StageSpec::Pfc1 { emit_header } => assert!(!*emit_header),
+            _ => panic!("expected pfc1"),
+        }
+    }
+
+    #[test]
+    fn test_parse_stages_unknown_stage_errors() {
+        let p = TrimPolicy {
+            stages: vec!["bogus".into()],
+            direction: TrimDirection::Outbound,
+        };
+        assert!(p.parse_stages().is_err());
+    }
+
+    #[test]
+    fn test_parse_stages_mixed() {
+        let p = TrimPolicy {
+            stages: vec!["caveman:full".into(), "pfc1".into()],
+            direction: TrimDirection::OutboundWithAck,
+        };
+        let specs = p.parse_stages().unwrap();
+        assert_eq!(specs.len(), 2);
+        assert!(matches!(specs[0], StageSpec::Caveman(_)));
+        assert!(matches!(specs[1], StageSpec::Pfc1 { .. }));
+    }
+
+    #[test]
+    fn test_serde_roundtrip() {
+        let p = TrimPolicy {
+            stages: vec!["caveman:ultra".into(), "pfc1".into()],
+            direction: TrimDirection::OutboundWithAck,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: TrimPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, back);
     }
 }

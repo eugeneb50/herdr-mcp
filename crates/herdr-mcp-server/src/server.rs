@@ -1,17 +1,16 @@
 use rmcp::{
+    ErrorData as McpError, ServerHandler,
     handler::server::wrapper::Parameters,
     model::{CallToolResult, Content},
-    schemars,
-    tool, tool_handler, tool_router,
-    ErrorData as McpError, ServerHandler,
+    schemars, tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::herdr_client::AgentRegistry;
 use crate::persistence::Persistence;
 use crate::scheduler::Scheduler;
 use crate::templates as tmpl;
-use crate::variables::{Recipe, RecipeStep, ExecutionResult, ExecutionStatus, ScheduledRecipe};
-use crate::herdr_client::AgentRegistry;
+use crate::variables::{ExecutionResult, ExecutionStatus, Recipe, RecipeStep, ScheduledRecipe};
 use herdr_mcp_trim::pfc1::CompressionKey;
 use herdr_mcp_trim::pipeline;
 use herdr_mcp_trim::policy::TrimPolicy;
@@ -626,8 +625,8 @@ impl HerdrMcpServer {
         explicit: Option<&Vec<String>>,
     ) -> String {
         // 1. Explicit per-call stages win.
-        if let Some(specs) = explicit {
-            if !specs.is_empty() {
+        if let Some(specs) = explicit
+            && !specs.is_empty() {
                 let stages = match pipeline::parse_stage_specs(specs) {
                     Ok(s) => s,
                     Err(e) => {
@@ -640,10 +639,9 @@ impl HerdrMcpServer {
                 self.record_trim_result(pane, &r).await;
                 return r.output;
             }
-        }
         // 2. Fall back to the target's per-pane policy.
-        if let Some(policy) = self.registry.get_trim_policy(pane).await {
-            if policy.is_active() {
+        if let Some(policy) = self.registry.get_trim_policy(pane).await
+            && policy.is_active() {
                 let stages = match policy.parse_stages_with(false) {
                     Ok(s) => s,
                     Err(e) => {
@@ -654,15 +652,14 @@ impl HerdrMcpServer {
                 let ws = self.registry.get(pane).await.map(|h| h.workspace_id);
                 let base = self.base_key_for(ws.as_deref()).await;
                 let r = pipeline::run(text, &stages, &base);
-                if let Some(last) = r.stages.iter().rev().find_map(|s| s.pfc1_key.clone()) {
-                    if let Some(ws) = ws {
-                        self.save_pfc1_key(&ws, &last).await;
-                    }
+                if let Some(last) = r.stages.iter().rev().find_map(|s| s.pfc1_key.clone())
+                    && let Some(ws) = ws
+                {
+                    self.save_pfc1_key(&ws, &last).await;
                 }
                 self.record_trim_result(pane, &r).await;
                 return r.output;
             }
-        }
         text.to_string()
     }
 
@@ -694,8 +691,8 @@ impl HerdrMcpServer {
         }
         let badge = format!("-{net_pct}%");
         for h in self.registry.list_for_ws(ws).await {
-            if let Some(ref policy) = h.trim_policy {
-                if policy.is_active() {
+            if let Some(ref policy) = h.trim_policy
+                && policy.is_active() {
                     let _ = herdr_cli(&[
                         "pane",
                         "report-metadata",
@@ -709,7 +706,6 @@ impl HerdrMcpServer {
                     ])
                     .await;
                 }
-            }
         }
     }
 
@@ -776,7 +772,9 @@ impl HerdrMcpServer {
         run_herdr_json(&["pane", "get", &pid]).await
     }
 
-    #[tool(description = "Get details about a specific agent by target — terminal ID, agent name, or pane ID")]
+    #[tool(
+        description = "Get details about a specific agent by target — terminal ID, agent name, or pane ID"
+    )]
     async fn get_agent(
         &self,
         Parameters(GetAgentParams { target }): Parameters<GetAgentParams>,
@@ -789,7 +787,11 @@ impl HerdrMcpServer {
     #[tool(description = "Create a new workspace, optionally in a directory with a label")]
     async fn create_workspace(
         &self,
-        Parameters(CreateWorkspaceParams { cwd, label, no_focus }): Parameters<CreateWorkspaceParams>,
+        Parameters(CreateWorkspaceParams {
+            cwd,
+            label,
+            no_focus,
+        }): Parameters<CreateWorkspaceParams>,
     ) -> Result<CallToolResult, McpError> {
         let mut args = vec!["workspace", "create"];
         if let Some(ref path) = cwd {
@@ -804,10 +806,16 @@ impl HerdrMcpServer {
         run_herdr_json(&args).await
     }
 
-    #[tool(description = "Create a new tab in a workspace, optionally with a label and working directory")]
+    #[tool(
+        description = "Create a new tab in a workspace, optionally with a label and working directory"
+    )]
     async fn create_tab(
         &self,
-        Parameters(CreateTabParams { workspace_id, label, cwd }): Parameters<CreateTabParams>,
+        Parameters(CreateTabParams {
+            workspace_id,
+            label,
+            cwd,
+        }): Parameters<CreateTabParams>,
     ) -> Result<CallToolResult, McpError> {
         let mut args = vec!["tab", "create"];
         if let Some(ref wid) = workspace_id {
@@ -825,7 +833,13 @@ impl HerdrMcpServer {
     #[tool(description = "Split a pane right or down. Returns the new pane's info.")]
     async fn split_pane(
         &self,
-        Parameters(SplitPaneParams { pane_id, label, direction, cwd, no_focus }): Parameters<SplitPaneParams>,
+        Parameters(SplitPaneParams {
+            pane_id,
+            label,
+            direction,
+            cwd,
+            no_focus,
+        }): Parameters<SplitPaneParams>,
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         let mut args = vec!["pane", "split", &pid];
@@ -850,10 +864,19 @@ impl HerdrMcpServer {
         run_herdr_json(&["pane", "close", &pid]).await
     }
 
-    #[tool(description = "Start an agent in a new pane. Pass the agent name and any arguments after '--'")]
+    #[tool(
+        description = "Start an agent in a new pane. Pass the agent name and any arguments after '--'"
+    )]
     async fn start_agent(
         &self,
-        Parameters(StartAgentParams { name, args, cwd, workspace_id, tab_id, split }): Parameters<StartAgentParams>,
+        Parameters(StartAgentParams {
+            name,
+            args,
+            cwd,
+            workspace_id,
+            tab_id,
+            split,
+        }): Parameters<StartAgentParams>,
     ) -> Result<CallToolResult, McpError> {
         let mut cli = vec!["agent", "start"];
         if let Some(ref path) = cwd {
@@ -878,10 +901,17 @@ impl HerdrMcpServer {
 
     // ── Read ───────────────────────────────────────────────────────────
 
-    #[tool(description = "Read text output from a pane. Source: visible (current screen), recent (scrollback with wrapping), or recent-unwrapped (scrollback without soft wrapping, best for logs)")]
+    #[tool(
+        description = "Read text output from a pane. Source: visible (current screen), recent (scrollback with wrapping), or recent-unwrapped (scrollback without soft wrapping, best for logs)"
+    )]
     async fn read_pane(
         &self,
-        Parameters(ReadPaneParams { pane_id, label, source, lines }): Parameters<ReadPaneParams>,
+        Parameters(ReadPaneParams {
+            pane_id,
+            label,
+            source,
+            lines,
+        }): Parameters<ReadPaneParams>,
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         let lines_str = lines.map(|n| n.to_string());
@@ -895,10 +925,16 @@ impl HerdrMcpServer {
         run_herdr_text(&args).await
     }
 
-    #[tool(description = "Read text output from an agent. Source: visible (current screen), recent (scrollback with wrapping), or recent-unwrapped (scrollback without soft wrapping, best for logs)")]
+    #[tool(
+        description = "Read text output from an agent. Source: visible (current screen), recent (scrollback with wrapping), or recent-unwrapped (scrollback without soft wrapping, best for logs)"
+    )]
     async fn read_agent(
         &self,
-        Parameters(ReadAgentParams { target, source, lines }): Parameters<ReadAgentParams>,
+        Parameters(ReadAgentParams {
+            target,
+            source,
+            lines,
+        }): Parameters<ReadAgentParams>,
     ) -> Result<CallToolResult, McpError> {
         let lines_str = lines.map(|n| n.to_string());
         let mut args = vec!["agent", "read", &target];
@@ -913,19 +949,31 @@ impl HerdrMcpServer {
 
     // ── Write ──────────────────────────────────────────────────────────
 
-    #[tool(description = "Send text to a pane (without pressing Enter). Use run_command to send text+Enter atomically.")]
+    #[tool(
+        description = "Send text to a pane (without pressing Enter). Use run_command to send text+Enter atomically."
+    )]
     async fn send_text(
         &self,
-        Parameters(SendTextParams { pane_id, label, text }): Parameters<SendTextParams>,
+        Parameters(SendTextParams {
+            pane_id,
+            label,
+            text,
+        }): Parameters<SendTextParams>,
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         run_herdr_json(&["pane", "send-text", &pid, &text]).await
     }
 
-    #[tool(description = "Send key presses to a pane. Common keys: Enter, Escape, Tab, Backspace, Ctrl+c, Ctrl+d, ArrowUp, ArrowDown")]
+    #[tool(
+        description = "Send key presses to a pane. Common keys: Enter, Escape, Tab, Backspace, Ctrl+c, Ctrl+d, ArrowUp, ArrowDown"
+    )]
     async fn send_keys(
         &self,
-        Parameters(SendKeysParams { pane_id, label, keys }): Parameters<SendKeysParams>,
+        Parameters(SendKeysParams {
+            pane_id,
+            label,
+            keys,
+        }): Parameters<SendKeysParams>,
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         let mut args = vec!["pane", "send-keys", &pid];
@@ -935,10 +983,16 @@ impl HerdrMcpServer {
         run_herdr_json(&args).await
     }
 
-    #[tool(description = "Run a command in a pane (sends text + Enter atomically). Prefer this over send_text + send_keys Enter for commands.")]
+    #[tool(
+        description = "Run a command in a pane (sends text + Enter atomically). Prefer this over send_text + send_keys Enter for commands."
+    )]
     async fn run_command(
         &self,
-        Parameters(RunCommandParams { pane_id, label, command }): Parameters<RunCommandParams>,
+        Parameters(RunCommandParams {
+            pane_id,
+            label,
+            command,
+        }): Parameters<RunCommandParams>,
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         run_herdr_json(&["pane", "run", &pid, &command]).await
@@ -954,10 +1008,19 @@ impl HerdrMcpServer {
 
     // ── Synchronize ────────────────────────────────────────────────────
 
-    #[tool(description = "Wait for specific text to appear in a pane. Blocks until matched or timeout. Supports --regex for pattern matching. Returns the matching output on success.")]
+    #[tool(
+        description = "Wait for specific text to appear in a pane. Blocks until matched or timeout. Supports --regex for pattern matching. Returns the matching output on success."
+    )]
     async fn wait_output(
         &self,
-        Parameters(WaitOutputParams { pane_id, label, match_text, timeout_ms, source, use_regex }): Parameters<WaitOutputParams>,
+        Parameters(WaitOutputParams {
+            pane_id,
+            label,
+            match_text,
+            timeout_ms,
+            source,
+            use_regex,
+        }): Parameters<WaitOutputParams>,
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         let timeout_str = timeout_ms.map(|ms| ms.to_string());
@@ -974,10 +1037,17 @@ impl HerdrMcpServer {
         run_herdr_json(&args).await
     }
 
-    #[tool(description = "Wait for a pane's agent to reach a specific status. Statuses: idle, working, blocked, done, unknown. Blocks until status reached or timeout.")]
+    #[tool(
+        description = "Wait for a pane's agent to reach a specific status. Statuses: idle, working, blocked, done, unknown. Blocks until status reached or timeout."
+    )]
     async fn wait_pane_agent_status(
         &self,
-        Parameters(WaitPaneAgentStatusParams { pane_id, label, status, timeout_ms }): Parameters<WaitPaneAgentStatusParams>,
+        Parameters(WaitPaneAgentStatusParams {
+            pane_id,
+            label,
+            status,
+            timeout_ms,
+        }): Parameters<WaitPaneAgentStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         let timeout_str = timeout_ms.map(|ms| ms.to_string());
@@ -988,10 +1058,16 @@ impl HerdrMcpServer {
         run_herdr_json(&args).await
     }
 
-    #[tool(description = "Wait for an agent (by target) to reach a specific status. Statuses: idle, working, blocked, done, unknown. Blocks until status reached or timeout.")]
+    #[tool(
+        description = "Wait for an agent (by target) to reach a specific status. Statuses: idle, working, blocked, done, unknown. Blocks until status reached or timeout."
+    )]
     async fn wait_agent_status(
         &self,
-        Parameters(WaitAgentStatusParams { target, status, timeout_ms }): Parameters<WaitAgentStatusParams>,
+        Parameters(WaitAgentStatusParams {
+            target,
+            status,
+            timeout_ms,
+        }): Parameters<WaitAgentStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         let timeout_str = timeout_ms.map(|ms| ms.to_string());
         let mut args = vec!["agent", "wait", &target, "--status", &status];
@@ -1008,7 +1084,9 @@ impl HerdrMcpServer {
     // output become another agent's input. Usable both as recipe steps
     // (conductor) and as standalone MCP tools (peer-to-peer).
 
-    #[tool(description = "Spawn an agent in a new pane and register it under `role` in the live agent registry. Optionally waits for `needs` targets (role or pane id) to be idle first, then captures the agent's work product. Returns {pane_id, role, agent, status, output}.")]
+    #[tool(
+        description = "Spawn an agent in a new pane and register it under `role` in the live agent registry. Optionally waits for `needs` targets (role or pane id) to be idle first, then captures the agent's work product. Returns {pane_id, role, agent, status, output}."
+    )]
     async fn agent_spawn(
         &self,
         Parameters(AgentSpawnParams {
@@ -1061,8 +1139,8 @@ impl HerdrMcpServer {
             cli.push(a);
         }
         let raw = herdr_cli(&cli).await?;
-        let value: serde_json::Value = serde_json::from_str(&raw)
-            .unwrap_or_else(|_| serde_json::json!({ "raw": raw }));
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({ "raw": raw }));
         let pane_id = extract_pane_id(&value).unwrap_or_default();
         let ws = workspace_id
             .clone()
@@ -1092,17 +1170,22 @@ impl HerdrMcpServer {
             self.registry.set_output(&pane_id, output.clone()).await;
         }
 
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "pane_id": pane_id,
-            "workspace_id": ws,
-            "role": role,
-            "agent": agent,
-            "status": status,
-            "output": output,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "pane_id": pane_id,
+                "workspace_id": ws,
+                "role": role,
+                "agent": agent,
+                "status": status,
+                "output": output,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
-    #[tool(description = "Send a message (text) to another agent's stream. `target` may be a role or pane id. The text may interpolate {{role.output}} / {{pane_id.output}} from the session registry. Optional `compress` lists trim stages (e.g. [\"caveman:full\",\"pfc1\"]) applied to the wire bytes; if absent, the target's per-pane trim policy is used (default off).")]
+    #[tool(
+        description = "Send a message (text) to another agent's stream. `target` may be a role or pane id. The text may interpolate {{role.output}} / {{pane_id.output}} from the session registry. Optional `compress` lists trim stages (e.g. [\"caveman:full\",\"pfc1\"]) applied to the wire bytes; if absent, the target's per-pane trim policy is used (default off)."
+    )]
     async fn agent_message(
         &self,
         Parameters(AgentMessageParams {
@@ -1112,11 +1195,15 @@ impl HerdrMcpServer {
         }): Parameters<AgentMessageParams>,
     ) -> Result<CallToolResult, McpError> {
         let pane = resolve_target_pane(self, &target).await?;
-        let wire = self.apply_outbound_trim(&pane, &text, compress.as_ref()).await;
+        let wire = self
+            .apply_outbound_trim(&pane, &text, compress.as_ref())
+            .await;
         run_herdr_json(&["agent", "send", &pane, &wire]).await
     }
 
-    #[tool(description = "Read an agent's output and store it as its work product in the registry. Returns {pane_id, role, agent, status, output}. `target` may be a role or pane id. `decompress` (default true) reverses any PFC1 header on the read so {{role.output}} stays byte-faithful.")]
+    #[tool(
+        description = "Read an agent's output and store it as its work product in the registry. Returns {pane_id, role, agent, status, output}. `target` may be a role or pane id. `decompress` (default true) reverses any PFC1 header on the read so {{role.output}} stays byte-faithful."
+    )]
     async fn agent_read(
         &self,
         Parameters(AgentReadParams {
@@ -1152,19 +1239,28 @@ impl HerdrMcpServer {
         if let Some(ref h) = handle {
             self.push_badge_for_workspace(&h.workspace_id).await;
         }
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "pane_id": pane,
-            "role": handle.as_ref().map(|h| h.role.clone()).unwrap_or_default(),
-            "agent": handle.as_ref().map(|h| h.agent.clone()).unwrap_or_default(),
-            "status": handle.as_ref().map(|h| h.status.clone()).unwrap_or_default(),
-            "output": stored,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "pane_id": pane,
+                "role": handle.as_ref().map(|h| h.role.clone()).unwrap_or_default(),
+                "agent": handle.as_ref().map(|h| h.agent.clone()).unwrap_or_default(),
+                "status": handle.as_ref().map(|h| h.status.clone()).unwrap_or_default(),
+                "output": stored,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
-    #[tool(description = "Wait for an agent to reach a status (default idle). `target` may be a role or pane id.")]
+    #[tool(
+        description = "Wait for an agent to reach a status (default idle). `target` may be a role or pane id."
+    )]
     async fn agent_wait(
         &self,
-        Parameters(AgentWaitParams { target, status, timeout_ms }): Parameters<AgentWaitParams>,
+        Parameters(AgentWaitParams {
+            target,
+            status,
+            timeout_ms,
+        }): Parameters<AgentWaitParams>,
     ) -> Result<CallToolResult, McpError> {
         let pane = resolve_target_pane(self, &target).await?;
         self.wait_agent_status(Parameters(WaitAgentStatusParams {
@@ -1175,7 +1271,9 @@ impl HerdrMcpServer {
         .await
     }
 
-    #[tool(description = "List registered agents in the live registry, filtered by workspace id. Each entry has pane_id, role, agent, status, and last captured output.")]
+    #[tool(
+        description = "List registered agents in the live registry, filtered by workspace id. Each entry has pane_id, role, agent, status, and last captured output."
+    )]
     async fn agent_list(
         &self,
         Parameters(AgentListParams { workspace_id }): Parameters<AgentListParams>,
@@ -1186,9 +1284,9 @@ impl HerdrMcpServer {
         } else {
             self.registry.list_for_ws(&workspace_id).await
         };
-        Ok(CallToolResult::success(vec![Content::json(
-            serde_json::json!({ "agents": handles }),
-        ).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({ "agents": handles })).map_err(to_mcp_err)?,
+        ]))
     }
 
     #[tool(description = "Get a session variable (scoped to a herdr workspace id).")]
@@ -1196,51 +1294,84 @@ impl HerdrMcpServer {
         &self,
         Parameters(VarGetParams { session_id, key }): Parameters<VarGetParams>,
     ) -> Result<CallToolResult, McpError> {
-        let vars = self.persistence.load_session_vars(&session_id).await.map_err(to_mcp_err)?;
-        let value = vars.variables.get(&key).cloned().unwrap_or(serde_json::Value::Null);
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "session_id": session_id,
-            "key": key,
-            "value": value,
-        })).map_err(to_mcp_err)?]))
+        let vars = self
+            .persistence
+            .load_session_vars(&session_id)
+            .await
+            .map_err(to_mcp_err)?;
+        let value = vars
+            .variables
+            .get(&key)
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "session_id": session_id,
+                "key": key,
+                "value": value,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
-    #[tool(description = "Set a session variable (scoped to a herdr workspace id). Persisted for chaining across recipe runs.")]
+    #[tool(
+        description = "Set a session variable (scoped to a herdr workspace id). Persisted for chaining across recipe runs."
+    )]
     async fn var_set(
         &self,
-        Parameters(VarSetParams { session_id, key, value }): Parameters<VarSetParams>,
+        Parameters(VarSetParams {
+            session_id,
+            key,
+            value,
+        }): Parameters<VarSetParams>,
     ) -> Result<CallToolResult, McpError> {
-        let mut vars = self.persistence.load_session_vars(&session_id).await.map_err(to_mcp_err)?;
+        let mut vars = self
+            .persistence
+            .load_session_vars(&session_id)
+            .await
+            .map_err(to_mcp_err)?;
         vars.variables.insert(key.clone(), value.clone());
         vars.updated_at = chrono::Utc::now();
-        self.persistence.save_session_vars(&vars).await.map_err(to_mcp_err)?;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "session_id": session_id,
-            "key": key,
-            "value": value,
-        })).map_err(to_mcp_err)?]))
+        self.persistence
+            .save_session_vars(&vars)
+            .await
+            .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "session_id": session_id,
+                "key": key,
+                "value": value,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
     // ── Message-trim tools ─────────────────────────────────────────────
     // Two non-colliding compressors (caveman style + pfc1 phonetic) exposed
     // as MCP tools and usable as recipe steps. See `compressorplan.md`.
 
-    #[tool(description = "Compress text via an ordered pipeline of trim stages (e.g. [\"caveman:full\",\"pfc1\"]). Returns input/output sizes, per-stage stats, and the compressed payload with its PFC1 header.")]
+    #[tool(
+        description = "Compress text via an ordered pipeline of trim stages (e.g. [\"caveman:full\",\"pfc1\"]). Returns input/output sizes, per-stage stats, and the compressed payload with its PFC1 header."
+    )]
     async fn compress(
         &self,
-        Parameters(CompressParams { text, stages, workspace_id }): Parameters<CompressParams>,
+        Parameters(CompressParams {
+            text,
+            stages,
+            workspace_id,
+        }): Parameters<CompressParams>,
     ) -> Result<CallToolResult, McpError> {
         let parsed = pipeline::parse_stage_specs(&stages).map_err(to_mcp_err)?;
         let runner = herdr_mcp_trim::runner::PipelineRunner::new(&self.data_dir).await;
         let r = runner.run(&text, &parsed).await;
         // Optionally attribute this trim to a workspace's running stats.
-        if let Some(ref ws) = workspace_id {
-            if r.input.len().saturating_sub(r.output.len()) > 0 {
-                let mut s = stats::load_stats(&self.data_dir, ws).await;
-                s.record_trim("cli", r.input.len(), r.output.len(), r.total_header_bytes);
-                let _ = stats::save_stats(&self.data_dir, ws, &s).await;
-                self.push_badge_for_workspace(ws).await;
-            }
+        if let Some(ref ws) = workspace_id
+            && r.input.len().saturating_sub(r.output.len()) > 0
+        {
+            let mut s = stats::load_stats(&self.data_dir, ws).await;
+            s.record_trim("cli", r.input.len(), r.output.len(), r.total_header_bytes);
+            let _ = stats::save_stats(&self.data_dir, ws, &s).await;
+            self.push_badge_for_workspace(ws).await;
         }
         let stage_reports: Vec<serde_json::Value> = r
             .stages
@@ -1254,72 +1385,98 @@ impl HerdrMcpServer {
                 })
             })
             .collect();
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "input_bytes": r.input.len(),
-            "output_bytes": r.output.len(),
-            "total_savings_bytes": r.total_savings_bytes,
-            "total_ratio_pct": r.total_ratio,
-            "stages": stage_reports,
-            "output": r.output,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "input_bytes": r.input.len(),
+                "output_bytes": r.output.len(),
+                "total_savings_bytes": r.total_savings_bytes,
+                "total_ratio_pct": r.total_ratio,
+                "stages": stage_reports,
+                "output": r.output,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
-    #[tool(description = "Decompress text produced by `compress`. If the input carries a PFC1 header it is expanded; otherwise the input is returned unchanged.")]
+    #[tool(
+        description = "Decompress text produced by `compress`. If the input carries a PFC1 header it is expanded; otherwise the input is returned unchanged."
+    )]
     async fn decompress(
         &self,
         Parameters(DecompressParams { text }): Parameters<DecompressParams>,
     ) -> Result<CallToolResult, McpError> {
         let out = pipeline::decompress_pfc1(&text, None);
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "decompressed": out,
-            "changed": out != text,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "decompressed": out,
+                "changed": out != text,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
-    #[tool(description = "Attach (or clear with `policy: null`) a message-trim policy to a target agent (role or pane id). Policy = ordered stages + direction (none/outbound/outbound_with_ack). Default off.")]
+    #[tool(
+        description = "Attach (or clear with `policy: null`) a message-trim policy to a target agent (role or pane id). Policy = ordered stages + direction (none/outbound/outbound_with_ack). Default off."
+    )]
     async fn trim_policy_set(
         &self,
         Parameters(TrimPolicySetParams { target, policy }): Parameters<TrimPolicySetParams>,
     ) -> Result<CallToolResult, McpError> {
         let pane = resolve_target_pane(self, &target).await?;
         self.registry.set_trim_policy(&pane, policy.clone()).await;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "pane_id": pane,
-            "policy": policy,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "pane_id": pane,
+                "policy": policy,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
-    #[tool(description = "Read the message-trim policy attached to a target agent (role or pane id). Returns null if none.")]
+    #[tool(
+        description = "Read the message-trim policy attached to a target agent (role or pane id). Returns null if none."
+    )]
     async fn trim_policy_get(
         &self,
         Parameters(TrimPolicyGetParams { target }): Parameters<TrimPolicyGetParams>,
     ) -> Result<CallToolResult, McpError> {
         let pane = resolve_target_pane(self, &target).await?;
         let policy = self.registry.get_trim_policy(&pane).await;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "pane_id": pane,
-            "policy": policy,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "pane_id": pane,
+                "policy": policy,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
-    #[tool(description = "Evaluate trim savings for a single text offline. Returns byte + token estimates and per-stage stats — lets the model verify its own compression.")]
+    #[tool(
+        description = "Evaluate trim savings for a single text offline. Returns byte + token estimates and per-stage stats — lets the model verify its own compression."
+    )]
     async fn trim_eval(
         &self,
         Parameters(TrimEvalParams { text, stages }): Parameters<TrimEvalParams>,
     ) -> Result<CallToolResult, McpError> {
         let runner = herdr_mcp_trim::runner::PipelineRunner::new(&self.data_dir).await;
         let report = herdr_mcp_trim::eval::trim_eval(&text, &stages, runner.base_key());
-        Ok(CallToolResult::success(vec![Content::json(report).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(report).map_err(to_mcp_err)?,
+        ]))
     }
 
-    #[tool(description = "Sweep a corpus file and report a trim savings distribution for a level (comma-separated stages, e.g. \"caveman:full,pfc1\").")]
+    #[tool(
+        description = "Sweep a corpus file and report a trim savings distribution for a level (comma-separated stages, e.g. \"caveman:full,pfc1\")."
+    )]
     async fn trim_bench(
         &self,
         Parameters(TrimBenchParams { corpus, level }): Parameters<TrimBenchParams>,
     ) -> Result<CallToolResult, McpError> {
         let runner = herdr_mcp_trim::runner::PipelineRunner::new(&self.data_dir).await;
         let report = herdr_mcp_trim::eval::trim_bench(&corpus, &level, runner.base_key());
-        Ok(CallToolResult::success(vec![Content::json(report).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(report).map_err(to_mcp_err)?,
+        ]))
     }
 
     /// Aggregate trim savings across a workspace (or all workspaces). Shared by
@@ -1358,16 +1515,17 @@ impl HerdrMcpServer {
             for (pane, ps) in &s.per_pane {
                 let key = format!("{w}:{pane}");
                 let entry = resp.per_pane.entry(key).or_default();
-                entry.gross_saved_bytes = entry.gross_saved_bytes.saturating_add(ps.gross_saved_bytes);
+                entry.gross_saved_bytes =
+                    entry.gross_saved_bytes.saturating_add(ps.gross_saved_bytes);
                 entry.net_saved_bytes = entry.net_saved_bytes.saturating_add(ps.net_saved_bytes);
                 entry.messages_trimmed = entry.messages_trimmed.saturating_add(ps.messages_trimmed);
             }
             for h in self.registry.list_for_ws(w).await {
-                if let Some(ref policy) = h.trim_policy {
-                    if policy.is_active() {
-                        resp.active_policies
-                            .insert(h.pane_id.clone(), policy.stages.clone());
-                    }
+                if let Some(ref policy) = h.trim_policy
+                    && policy.is_active()
+                {
+                    resp.active_policies
+                        .insert(h.pane_id.clone(), policy.stages.clone());
                 }
             }
         }
@@ -1389,15 +1547,16 @@ impl HerdrMcpServer {
         resp
     }
 
-    #[tool(description = "Aggregate trim savings for a workspace (or all). Returns net/savings %, per-pane breakdown, and active policies.")]
+    #[tool(
+        description = "Aggregate trim savings for a workspace (or all). Returns net/savings %, per-pane breakdown, and active policies."
+    )]
     async fn trim_status(
         &self,
         Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         let resp = self.aggregate_trim_status(workspace_id.as_deref()).await;
         Ok(CallToolResult::success(vec![
-            Content::json(serde_json::to_value(&resp).map_err(to_mcp_err)?)
-                .map_err(to_mcp_err)?,
+            Content::json(serde_json::to_value(&resp).map_err(to_mcp_err)?).map_err(to_mcp_err)?,
         ]))
     }
 
@@ -1405,7 +1564,8 @@ impl HerdrMcpServer {
     /// and the `/api/trim/diagnose` HTTP route).
     async fn build_diagnose_report(&self, ws: Option<&str>) -> DiagnoseReport {
         // 1. Round-trip test: compress then decompress a fixed sample.
-        let sample = "The quick brown fox jumps over the lazy dog. The fox is quick and the dog is lazy.";
+        let sample =
+            "The quick brown fox jumps over the lazy dog. The fox is quick and the dog is lazy.";
         let stages = pipeline::parse_stage_specs(&["caveman:full".to_string(), "pfc1".to_string()])
             .unwrap_or_default();
         let base = self.base_key_for(None).await;
@@ -1427,19 +1587,29 @@ impl HerdrMcpServer {
             .is_some();
 
         // 3. Active policy count.
-        let active_policies = if let Some(ref w) = ws {
+        let active_policies = if let Some(w) = ws {
             self.registry
                 .list_for_ws(w)
                 .await
                 .iter()
-                .filter(|h| h.trim_policy.as_ref().map(|p| p.is_active()).unwrap_or(false))
+                .filter(|h| {
+                    h.trim_policy
+                        .as_ref()
+                        .map(|p| p.is_active())
+                        .unwrap_or(false)
+                })
                 .count()
         } else {
             self.registry
                 .inner_snapshot()
                 .await
                 .iter()
-                .filter(|h| h.trim_policy.as_ref().map(|p| p.is_active()).unwrap_or(false))
+                .filter(|h| {
+                    h.trim_policy
+                        .as_ref()
+                        .map(|p| p.is_active())
+                        .unwrap_or(false)
+                })
                 .count()
         };
 
@@ -1460,7 +1630,9 @@ impl HerdrMcpServer {
         }
     }
 
-    #[tool(description = "End-to-end trim readiness check: pipeline round-trip integrity, PFC1 memory validity, active policy count, and badge reachability.")]
+    #[tool(
+        description = "End-to-end trim readiness check: pipeline round-trip integrity, PFC1 memory validity, active policy count, and badge reachability."
+    )]
     async fn trim_diagnose(
         &self,
         Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
@@ -1482,14 +1654,15 @@ impl HerdrMcpServer {
             "Session savings: {:.1}% net ({} messages, {} bytes net saved)",
             resp.workspace_savings_pct, resp.messages_trimmed, resp.net_saved_bytes
         );
-        let raw = herdr_cli(&["notification", "show", "herdr-mcp trim", "--body", &body])
-            .await?;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "sent": true,
-            "body": body,
-            "herdr_output": raw,
-        }))
-        .map_err(to_mcp_err)?]))
+        let raw = herdr_cli(&["notification", "show", "herdr-mcp trim", "--body", &body]).await?;
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "sent": true,
+                "body": body,
+                "herdr_output": raw,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
     #[tool(description = "Open a herdr split pane running the live trim dashboard.")]
@@ -1516,25 +1689,32 @@ impl HerdrMcpServer {
         let cmd = format!("herdr-mcp dashboard --data-dir {data_dir}");
         let _ = herdr_cli(&["pane", "send-text", &pane_id, &cmd]).await;
         let _ = herdr_cli(&["pane", "send-keys", &pane_id, "Enter"]).await;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "pane_id": pane_id,
-            "title": "trim-dashboard",
-        }))
-        .map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "pane_id": pane_id,
+                "title": "trim-dashboard",
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
     // ── Recipe templates ───────────────────────────────────────────────
 
-    #[tool(description = "List the bundled recipe templates (e.g. dev-watch, git-status, build-and-test). Each has variables you fill in before instantiating.")]
+    #[tool(
+        description = "List the bundled recipe templates (e.g. dev-watch, git-status, build-and-test). Each has variables you fill in before instantiating."
+    )]
     async fn list_templates(
         &self,
         Parameters(_): Parameters<ListTemplatesParams>,
     ) -> Result<CallToolResult, McpError> {
         let templates = tmpl::list_templates();
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "count": templates.len(),
-            "templates": templates,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "count": templates.len(),
+                "templates": templates,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
     #[tool(description = "Get a single recipe template by id (variables + steps).")]
@@ -1543,8 +1723,9 @@ impl HerdrMcpServer {
         Parameters(GetTemplateParams { template_id }): Parameters<GetTemplateParams>,
     ) -> Result<CallToolResult, McpError> {
         match tmpl::find_template(&template_id) {
-            Some(t) => Ok(CallToolResult::success(vec![Content::json(serde_json::json!(t))
-                .map_err(to_mcp_err)?])),
+            Some(t) => Ok(CallToolResult::success(vec![
+                Content::json(serde_json::json!(t)).map_err(to_mcp_err)?,
+            ])),
             None => Err(McpError {
                 code: rmcp::model::ErrorCode(-32602),
                 message: format!("template not found: {template_id}").into(),
@@ -1553,33 +1734,47 @@ impl HerdrMcpServer {
         }
     }
 
-    #[tool(description = "Instantiate a template into a runnable recipe and auto-save it to the recipe library. Returns the saved recipe (with its id) ready to run or edit.")]
+    #[tool(
+        description = "Instantiate a template into a runnable recipe and auto-save it to the recipe library. Returns the saved recipe (with its id) ready to run or edit."
+    )]
     async fn instantiate_template(
         &self,
-        Parameters(InstantiateTemplateParams { template_id, variables, name }): Parameters<InstantiateTemplateParams>,
+        Parameters(InstantiateTemplateParams {
+            template_id,
+            variables,
+            name,
+        }): Parameters<InstantiateTemplateParams>,
     ) -> Result<CallToolResult, McpError> {
-        let recipe = tmpl::instantiate(&template_id, variables, name)
-            .ok_or_else(|| McpError {
-                code: rmcp::model::ErrorCode(-32602),
-                message: format!("template not found: {template_id}").into(),
-                data: None,
-            })?;
+        let recipe = tmpl::instantiate(&template_id, variables, name).ok_or_else(|| McpError {
+            code: rmcp::model::ErrorCode(-32602),
+            message: format!("template not found: {template_id}").into(),
+            data: None,
+        })?;
         self.persistence
             .save_recipe(&recipe)
             .await
             .map_err(to_mcp_err)?;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "saved": true,
-            "recipe": recipe,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "saved": true,
+                "recipe": recipe,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
     // ── Scheduler ──────────────────────────────────────────────────────
 
-    #[tool(description = "Schedule a persisted recipe to run on a cron expression. Returns the created schedule (with its id). Persisted across restarts.")]
+    #[tool(
+        description = "Schedule a persisted recipe to run on a cron expression. Returns the created schedule (with its id). Persisted across restarts."
+    )]
     async fn schedule_recipe(
         &self,
-        Parameters(ScheduleRecipeParams { recipe_id, cron_schedule, enabled }): Parameters<ScheduleRecipeParams>,
+        Parameters(ScheduleRecipeParams {
+            recipe_id,
+            cron_schedule,
+            enabled,
+        }): Parameters<ScheduleRecipeParams>,
     ) -> Result<CallToolResult, McpError> {
         let recipe_id = uuid::Uuid::parse_str(&recipe_id).map_err(to_mcp_err)?;
         let schedule = ScheduledRecipe {
@@ -1595,22 +1790,30 @@ impl HerdrMcpServer {
             .schedule_one(schedule.clone())
             .await
             .map_err(to_mcp_err)?;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "scheduled": true,
-            "schedule": schedule,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "scheduled": true,
+                "schedule": schedule,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
-    #[tool(description = "List all active recipe schedules, with their next run time and enabled state.")]
+    #[tool(
+        description = "List all active recipe schedules, with their next run time and enabled state."
+    )]
     async fn list_schedules(
         &self,
         Parameters(_): Parameters<ListSchedulesParams>,
     ) -> Result<CallToolResult, McpError> {
         let schedules = self.scheduler.list().await;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "count": schedules.len(),
-            "schedules": schedules,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "count": schedules.len(),
+                "schedules": schedules,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
     #[tool(description = "Delete a recipe schedule by id.")]
@@ -1620,10 +1823,13 @@ impl HerdrMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let id = uuid::Uuid::parse_str(&id).map_err(to_mcp_err)?;
         let removed = self.scheduler.remove(id).await.map_err(to_mcp_err)?;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "removed": removed,
-            "id": id,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "removed": removed,
+                "id": id,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
     #[tool(description = "Enable or disable an existing recipe schedule.")]
@@ -1632,17 +1838,26 @@ impl HerdrMcpServer {
         Parameters(EnableScheduleParams { id, enabled }): Parameters<EnableScheduleParams>,
     ) -> Result<CallToolResult, McpError> {
         let id = uuid::Uuid::parse_str(&id).map_err(to_mcp_err)?;
-        let ok = self.scheduler.set_enabled(id, enabled).await.map_err(to_mcp_err)?;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "updated": ok,
-            "id": id,
-            "enabled": enabled,
-        })).map_err(to_mcp_err)?]))
+        let ok = self
+            .scheduler
+            .set_enabled(id, enabled)
+            .await
+            .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "updated": ok,
+                "id": id,
+                "enabled": enabled,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
     // ── Folder-key (PFC1) tools ─────────────────────────────────────────
 
-    #[tool(description = "Scan a folder for text/markdown files, learn the domain's most compressible terms + phrases, and write a self-contained PFC1 key to <folder>/.pfc1_key.json. Skips code blocks; reuses the cached key when files are unchanged (mtime).")]
+    #[tool(
+        description = "Scan a folder for text/markdown files, learn the domain's most compressible terms + phrases, and write a self-contained PFC1 key to <folder>/.pfc1_key.json. Skips code blocks; reuses the cached key when files are unchanged (mtime)."
+    )]
     async fn build_folder_key(
         &self,
         Parameters(BuildFolderKeyParams {
@@ -1674,16 +1889,21 @@ impl HerdrMcpServer {
         let key = herdr_mcp_trim::folder_key::build_folder_key(root, &opts, &self.data_dir)
             .await
             .map_err(to_mcp_err)?;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "built": true,
-            "folder": key.folder,
-            "seeded_from_master": key.seeded_from_master,
-            "stats": key.stats,
-            "key": key.key,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "built": true,
+                "folder": key.folder,
+                "seeded_from_master": key.seeded_from_master,
+                "stats": key.stats,
+                "key": key.key,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
-    #[tool(description = "Load the PFC1 folder key for a folder (discovered by walking up the directory tree). Returns null if none exists.")]
+    #[tool(
+        description = "Load the PFC1 folder key for a folder (discovered by walking up the directory tree). Returns null if none exists."
+    )]
     async fn get_folder_key(
         &self,
         Parameters(GetFolderKeyParams { folder_path }): Parameters<GetFolderKeyParams>,
@@ -1692,10 +1912,13 @@ impl HerdrMcpServer {
         // Walk up from the folder (and its parents) to find the nearest key.
         let keys = herdr_mcp_trim::folder_key::discover_folder_keys(root).await;
         let key = keys.into_iter().next();
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "folder": folder_path,
-            "key": key,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "folder": folder_path,
+                "key": key,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
     #[tool(description = "List all folder keys in the central registry (data_dir/folder_keys).")]
@@ -1703,25 +1926,34 @@ impl HerdrMcpServer {
         &self,
         Parameters(_): Parameters<ListFolderKeysParams>,
     ) -> Result<CallToolResult, McpError> {
-        let keys = herdr_mcp_trim::folder_key::list_central_keys(&self.data_dir)
-            .await;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "count": keys.len(),
-            "keys": keys,
-        })).map_err(to_mcp_err)?]))
+        let keys = herdr_mcp_trim::folder_key::list_central_keys(&self.data_dir).await;
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "count": keys.len(),
+                "keys": keys,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
-    #[tool(description = "Decompress text using a folder's PFC1 key (header-less, trusted a2a). Returns the input unchanged if no key is found.")]
+    #[tool(
+        description = "Decompress text using a folder's PFC1 key (header-less, trusted a2a). Returns the input unchanged if no key is found."
+    )]
     async fn decompress_with_folder_key(
         &self,
-        Parameters(DecompressWithFolderKeyParams { folder_path, text }): Parameters<DecompressWithFolderKeyParams>,
+        Parameters(DecompressWithFolderKeyParams { folder_path, text }): Parameters<
+            DecompressWithFolderKeyParams,
+        >,
     ) -> Result<CallToolResult, McpError> {
         let root = std::path::Path::new(&folder_path);
         let out = herdr_mcp_trim::folder_key::decompress_with_folder_key(root, &text).await;
-        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
-            "decompressed": out,
-            "changed": out != text,
-        })).map_err(to_mcp_err)?]))
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "decompressed": out,
+                "changed": out != text,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 }
 
@@ -1754,10 +1986,10 @@ fn to_mcp_err(e: impl std::fmt::Display) -> McpError {
 fn extract_string(value: &serde_json::Value, key: &str) -> Option<String> {
     match value {
         serde_json::Value::Object(map) => {
-            if let Some(v) = map.get(key) {
-                if let Some(s) = v.as_str() {
-                    return Some(s.to_string());
-                }
+            if let Some(v) = map.get(key)
+                && let Some(s) = v.as_str()
+            {
+                return Some(s.to_string());
             }
             for v in map.values() {
                 if let Some(found) = extract_string(v, key) {
@@ -1785,10 +2017,10 @@ fn extract_pane_id(value: &serde_json::Value) -> Option<String> {
 
 /// Resolve an a2a target (role or pane id) to a concrete pane id.
 async fn resolve_target_pane(server: &HerdrMcpServer, target: &str) -> Result<String, McpError> {
-    if !target.is_empty() {
-        if let Some(pane) = server.registry.resolve("", target).await {
-            return Ok(pane);
-        }
+    if !target.is_empty()
+        && let Some(pane) = server.registry.resolve("", target).await
+    {
+        return Ok(pane);
     }
     Err(McpError {
         code: rmcp::model::ErrorCode(-32000),
@@ -1801,7 +2033,9 @@ async fn resolve_target_pane(server: &HerdrMcpServer, target: &str) -> Result<St
 async fn read_pane_text(pane_id: &str) -> anyhow::Result<String> {
     let binary = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
     let output = tokio::process::Command::new(binary)
-        .args(["pane", "read", pane_id, "--source", "recent", "--lines", "200"])
+        .args([
+            "pane", "read", pane_id, "--source", "recent", "--lines", "200",
+        ])
         .output()
         .await?;
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -1884,11 +2118,13 @@ async fn resolve_pane_id(
                 message: format!("Failed to parse pane list: {e}").into(),
                 data: None,
             })?;
-            let panes = value["result"]["panes"].as_array().ok_or_else(|| McpError {
-                code: rmcp::model::ErrorCode(-32603),
-                message: "Unexpected pane list format".into(),
-                data: None,
-            })?;
+            let panes = value["result"]["panes"]
+                .as_array()
+                .ok_or_else(|| McpError {
+                    code: rmcp::model::ErrorCode(-32603),
+                    message: "Unexpected pane list format".into(),
+                    data: None,
+                })?;
 
             let labels: Vec<String> = panes
                 .iter()
@@ -1919,7 +2155,10 @@ async fn resolve_pane_id(
                 1 => Ok(matched[0].clone()),
                 _ => Err(McpError {
                     code: rmcp::model::ErrorCode(-32000),
-                    message: format!("Multiple panes found with label '{lbl}'. Use pane_id instead.").into(),
+                    message: format!(
+                        "Multiple panes found with label '{lbl}'. Use pane_id instead."
+                    )
+                    .into(),
                     data: None,
                 }),
             }
@@ -1937,10 +2176,10 @@ async fn resolve_pane_id(
 use std::collections::HashMap;
 
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
-    Json, Router,
 };
 use regex::Regex;
 use tower_http::cors::CorsLayer;
@@ -1952,16 +2191,33 @@ pub async fn start_http(server: HerdrMcpServer, port: u16) -> anyhow::Result<()>
         .route("/api/tools", get(list_tools_handler))
         .route("/api/tools/{name}", post(call_tool_handler))
         .route("/api/recipe", post(run_recipe_handler))
-        .route("/api/recipes", get(list_recipes_handler).post(create_recipe_handler))
-        .route("/api/recipes/{id}", get(get_recipe_handler).put(update_recipe_handler).delete(delete_recipe_handler))
+        .route(
+            "/api/recipes",
+            get(list_recipes_handler).post(create_recipe_handler),
+        )
+        .route(
+            "/api/recipes/{id}",
+            get(get_recipe_handler)
+                .put(update_recipe_handler)
+                .delete(delete_recipe_handler),
+        )
         .route("/api/recipes/{id}/run", post(run_recipe_by_id_handler))
-        .route("/api/variables", get(list_variables_handler).post(save_variable_handler))
-        .route("/api/variables/{key}", get(get_variable_handler).delete(delete_variable_handler))
+        .route(
+            "/api/variables",
+            get(list_variables_handler).post(save_variable_handler),
+        )
+        .route(
+            "/api/variables/{key}",
+            get(get_variable_handler).delete(delete_variable_handler),
+        )
         .route("/api/executions/{id}", get(get_execution_handler))
         .route("/api/trim/status", get(trim_status_http_handler))
         .route("/api/trim/diagnose", post(trim_diagnose_http_handler))
         .route("/api/trim/summary", post(trim_summary_http_handler))
-        .route("/api/trim/dashboard/open", post(trim_dashboard_open_http_handler))
+        .route(
+            "/api/trim/dashboard/open",
+            post(trim_dashboard_open_http_handler),
+        )
         .layer(CorsLayer::permissive())
         .with_state(server);
 
@@ -1992,10 +2248,7 @@ async fn call_tool_handler(
 }
 
 fn mcp_err_to_http(e: McpError) -> (StatusCode, String) {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        e.message.to_string(),
-    )
+    (StatusCode::INTERNAL_SERVER_ERROR, e.message.to_string())
 }
 
 fn bad_request(e: impl ToString) -> (StatusCode, String) {
@@ -2007,7 +2260,11 @@ async fn trim_status_http_handler(
     State(server): State<HerdrMcpServer>,
     Query(params): Query<TrimStatusParams>,
 ) -> Json<TrimStatusResponse> {
-    Json(server.aggregate_trim_status(params.workspace_id.as_deref()).await)
+    Json(
+        server
+            .aggregate_trim_status(params.workspace_id.as_deref())
+            .await,
+    )
 }
 
 /// `POST /api/trim/diagnose` — end-to-end readiness check.
@@ -2015,8 +2272,11 @@ async fn trim_diagnose_http_handler(
     State(server): State<HerdrMcpServer>,
     body: Option<Json<serde_json::Value>>,
 ) -> Json<DiagnoseReport> {
-    let ws = body
-        .and_then(|j| j.0.get("workspace_id").and_then(|v| v.as_str()).map(|s| s.to_string()));
+    let ws = body.and_then(|j| {
+        j.0.get("workspace_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    });
     Json(server.build_diagnose_report(ws.as_deref()).await)
 }
 
@@ -2063,245 +2323,332 @@ async fn dispatch_tool(
         "list_agents" => server.list_agents().await.map_err(mcp_err_to_http),
 
         "list_tabs" => {
-            let p: ListTabsParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.list_tabs(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: ListTabsParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .list_tabs(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "list_panes" => {
-            let p: ListPanesParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.list_panes(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: ListPanesParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .list_panes(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "get_pane" => {
-            let p: GetPaneParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.get_pane(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: GetPaneParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .get_pane(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "get_agent" => {
-            let p: GetAgentParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.get_agent(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: GetAgentParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .get_agent(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "create_workspace" => {
-            let p: CreateWorkspaceParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.create_workspace(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: CreateWorkspaceParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .create_workspace(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "create_tab" => {
-            let p: CreateTabParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.create_tab(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: CreateTabParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .create_tab(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "split_pane" => {
-            let p: SplitPaneParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.split_pane(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: SplitPaneParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .split_pane(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "close_pane" => {
-            let p: ClosePaneParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.close_pane(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: ClosePaneParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .close_pane(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "start_agent" => {
-            let p: StartAgentParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.start_agent(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: StartAgentParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .start_agent(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "read_pane" => {
-            let p: ReadPaneParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.read_pane(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: ReadPaneParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .read_pane(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "read_agent" => {
-            let p: ReadAgentParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.read_agent(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: ReadAgentParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .read_agent(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "send_text" => {
-            let p: SendTextParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.send_text(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: SendTextParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .send_text(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "send_keys" => {
-            let p: SendKeysParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.send_keys(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: SendKeysParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .send_keys(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "run_command" => {
-            let p: RunCommandParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.run_command(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: RunCommandParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .run_command(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "send_agent" => {
-            let p: SendAgentParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.send_agent(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: SendAgentParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .send_agent(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "wait_output" => {
-            let p: WaitOutputParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.wait_output(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: WaitOutputParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .wait_output(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "wait_pane_agent_status" => {
-            let p: WaitPaneAgentStatusParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.wait_pane_agent_status(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: WaitPaneAgentStatusParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .wait_pane_agent_status(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "wait_agent_status" => {
-            let p: WaitAgentStatusParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.wait_agent_status(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: WaitAgentStatusParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .wait_agent_status(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
 
         "agent_spawn" => {
-            let p: AgentSpawnParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.agent_spawn(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: AgentSpawnParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .agent_spawn(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "agent_message" => {
-            let p: AgentMessageParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.agent_message(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: AgentMessageParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .agent_message(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "agent_read" => {
-            let p: AgentReadParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.agent_read(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: AgentReadParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .agent_read(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "agent_wait" => {
-            let p: AgentWaitParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.agent_wait(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: AgentWaitParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .agent_wait(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "agent_list" => {
-            let p: AgentListParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.agent_list(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: AgentListParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .agent_list(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "var_get" => {
-            let p: VarGetParams =
-                serde_json::from_value(body).map_err(bad_request)?;
+            let p: VarGetParams = serde_json::from_value(body).map_err(bad_request)?;
             server.var_get(Parameters(p)).await.map_err(mcp_err_to_http)
         }
         "var_set" => {
-            let p: VarSetParams =
-                serde_json::from_value(body).map_err(bad_request)?;
+            let p: VarSetParams = serde_json::from_value(body).map_err(bad_request)?;
             server.var_set(Parameters(p)).await.map_err(mcp_err_to_http)
         }
 
         // Recipe templates.
         "list_templates" => {
-            let p: ListTemplatesParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.list_templates(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: ListTemplatesParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .list_templates(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "get_template" => {
-            let p: GetTemplateParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.get_template(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: GetTemplateParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .get_template(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "instantiate_template" => {
-            let p: InstantiateTemplateParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.instantiate_template(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: InstantiateTemplateParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .instantiate_template(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
 
         // Message-trim tools.
         "compress" => {
-            let p: CompressParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.compress(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: CompressParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .compress(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "decompress" => {
-            let p: DecompressParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.decompress(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: DecompressParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .decompress(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "trim_policy_set" => {
-            let p: TrimPolicySetParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.trim_policy_set(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: TrimPolicySetParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .trim_policy_set(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "trim_policy_get" => {
-            let p: TrimPolicyGetParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.trim_policy_get(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: TrimPolicyGetParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .trim_policy_get(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "trim_eval" => {
-            let p: TrimEvalParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.trim_eval(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: TrimEvalParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .trim_eval(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "trim_bench" => {
-            let p: TrimBenchParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.trim_bench(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: TrimBenchParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .trim_bench(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
 
         // Aggregation / diagnostics tools.
         "trim_status" => {
-            let p: TrimStatusParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.trim_status(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: TrimStatusParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .trim_status(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "trim_diagnose" => {
-            let p: TrimStatusParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.trim_diagnose(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: TrimStatusParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .trim_diagnose(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "trim_summary" => {
-            let p: TrimStatusParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.trim_summary(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: TrimStatusParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .trim_summary(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "trim_dashboard_open" => {
-            let p: TrimStatusParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.trim_dashboard_open(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: TrimStatusParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .trim_dashboard_open(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
 
         // Scheduler.
         "schedule_recipe" => {
-            let p: ScheduleRecipeParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.schedule_recipe(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: ScheduleRecipeParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .schedule_recipe(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "list_schedules" => {
-            let p: ListSchedulesParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.list_schedules(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: ListSchedulesParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .list_schedules(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "delete_schedule" => {
-            let p: DeleteScheduleParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.delete_schedule(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: DeleteScheduleParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .delete_schedule(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "enable_schedule" => {
-            let p: EnableScheduleParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.enable_schedule(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: EnableScheduleParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .enable_schedule(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
 
         // Folder keys (PFC1).
         "build_folder_key" => {
-            let p: BuildFolderKeyParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.build_folder_key(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: BuildFolderKeyParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .build_folder_key(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "get_folder_key" => {
-            let p: GetFolderKeyParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.get_folder_key(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: GetFolderKeyParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .get_folder_key(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "list_folder_keys" => {
-            let p: ListFolderKeysParams =
-                serde_json::from_value(body).map_err(bad_request)?;
-            server.list_folder_keys(Parameters(p)).await.map_err(mcp_err_to_http)
+            let p: ListFolderKeysParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .list_folder_keys(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
         "decompress_with_folder_key" => {
             let p: DecompressWithFolderKeyParams =
                 serde_json::from_value(body).map_err(bad_request)?;
-            server.decompress_with_folder_key(Parameters(p)).await.map_err(mcp_err_to_http)
+            server
+                .decompress_with_folder_key(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
         }
 
         _ => Err((StatusCode::NOT_FOUND, format!("Unknown tool: {name}"))),
@@ -2367,14 +2714,14 @@ async fn execute_recipe(
                 // If the step returned an agent handle (pane_id + output),
                 // expose it under both the pane id and its role so downstream
                 // steps can interpolate `{{pane_id.output}}` or `{{role.output}}`.
-                if let Some(obj) = json_result.as_object() {
-                    if let Some(pane_id) = obj.get("pane_id").and_then(|v| v.as_str()) {
-                        accumulated.insert(pane_id.to_string(), json_result.clone());
-                        if let Some(role) = obj.get("role").and_then(|v| v.as_str()) {
-                            if !role.is_empty() {
-                                accumulated.insert(role.to_string(), json_result.clone());
-                            }
-                        }
+                if let Some(obj) = json_result.as_object()
+                    && let Some(pane_id) = obj.get("pane_id").and_then(|v| v.as_str())
+                {
+                    accumulated.insert(pane_id.to_string(), json_result.clone());
+                    if let Some(role) = obj.get("role").and_then(|v| v.as_str())
+                        && !role.is_empty()
+                    {
+                        accumulated.insert(role.to_string(), json_result.clone());
                     }
                 }
                 results.insert(step.id.clone(), json_result);
@@ -2441,8 +2788,7 @@ async fn run_recipe_handler(
 fn resolve_variables(value: &mut serde_json::Value, results: &HashMap<String, serde_json::Value>) {
     match value {
         serde_json::Value::String(s) => {
-            let re = Regex::new(r"\{\{([^}]+)\}\}")
-                .expect("regex pattern is valid");
+            let re = Regex::new(r"\{\{([^}]+)\}\}").expect("regex pattern is valid");
             *s = re
                 .replace_all(s, |caps: &regex::Captures| {
                     let path = caps[1].trim();
@@ -2536,7 +2882,8 @@ struct UpdateRecipeRequest {
 async fn list_recipes_handler(
     State(server): State<HerdrMcpServer>,
 ) -> Result<Json<Vec<Recipe>>, (StatusCode, String)> {
-    server.persistence
+    server
+        .persistence
         .list_recipes(None)
         .await
         .map(Json)
@@ -2552,24 +2899,29 @@ async fn create_recipe_handler(
         id: uuid::Uuid::new_v4(),
         name: req.name,
         description: req.description,
-        steps: req.steps.into_iter().map(|s| RecipeStep {
-            id: s.id,
-            tool: s.tool,
-            params: s.params,
-            description: s.description,
-        }).collect(),
+        steps: req
+            .steps
+            .into_iter()
+            .map(|s| RecipeStep {
+                id: s.id,
+                tool: s.tool,
+                params: s.params,
+                description: s.description,
+            })
+            .collect(),
         variables: req.variables,
         created_at: now,
         updated_at: now,
         is_template: false,
         category: req.category,
     };
-    
-    server.persistence
+
+    server
+        .persistence
         .save_recipe(&recipe)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    
+
     Ok(Json(recipe))
 }
 
@@ -2577,7 +2929,8 @@ async fn get_recipe_handler(
     State(server): State<HerdrMcpServer>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<Recipe>, (StatusCode, String)> {
-    server.persistence
+    server
+        .persistence
         .load_recipe(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -2590,12 +2943,13 @@ async fn update_recipe_handler(
     Path(id): Path<uuid::Uuid>,
     Json(req): Json<UpdateRecipeRequest>,
 ) -> Result<Json<Recipe>, (StatusCode, String)> {
-    let mut recipe = server.persistence
+    let mut recipe = server
+        .persistence
         .load_recipe(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Recipe not found".to_string()))?;
-    
+
     if let Some(name) = req.name {
         recipe.name = name;
     }
@@ -2603,23 +2957,27 @@ async fn update_recipe_handler(
         recipe.description = Some(desc);
     }
     if let Some(steps) = req.steps {
-        recipe.steps = steps.into_iter().map(|s| RecipeStep {
-            id: s.id,
-            tool: s.tool,
-            params: s.params,
-            description: s.description,
-        }).collect();
+        recipe.steps = steps
+            .into_iter()
+            .map(|s| RecipeStep {
+                id: s.id,
+                tool: s.tool,
+                params: s.params,
+                description: s.description,
+            })
+            .collect();
     }
     if let Some(vars) = req.variables {
         recipe.variables = vars;
     }
     recipe.updated_at = chrono::Utc::now();
-    
-    server.persistence
+
+    server
+        .persistence
         .save_recipe(&recipe)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    
+
     Ok(Json(recipe))
 }
 
@@ -2627,7 +2985,8 @@ async fn delete_recipe_handler(
     State(server): State<HerdrMcpServer>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    server.persistence
+    server
+        .persistence
         .delete_recipe(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
@@ -2639,24 +2998,25 @@ async fn run_recipe_by_id_handler(
     State(server): State<HerdrMcpServer>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<ExecutionResult>, (StatusCode, String)> {
-    let recipe = server.persistence
+    let recipe = server
+        .persistence
         .load_recipe(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Recipe not found".to_string()))?;
-    
+
     let execution_id = uuid::Uuid::new_v4();
     let started_at = chrono::Utc::now();
-    
+
     let mut results = HashMap::new();
     let mut accumulated = recipe.variables.clone();
     let mut status = ExecutionStatus::Running;
     let mut error_msg: Option<String> = None;
-    
+
     for step in &recipe.steps {
         let mut resolved = step.params.clone();
         resolve_variables(&mut resolved, &accumulated);
-        
+
         match dispatch_tool(&server, &step.tool, resolved).await {
             Ok(result) => {
                 let json_result = serde_json::to_value(&result).unwrap_or_default();
@@ -2679,11 +3039,11 @@ async fn run_recipe_by_id_handler(
             }
         }
     }
-    
+
     if status == ExecutionStatus::Running {
         status = ExecutionStatus::Completed;
     }
-    
+
     let execution = ExecutionResult {
         id: execution_id,
         recipe_id: id,
@@ -2694,12 +3054,13 @@ async fn run_recipe_by_id_handler(
         variables: accumulated.clone(),
         error: error_msg,
     };
-    
-    server.persistence
+
+    server
+        .persistence
         .save_execution(&execution)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    
+
     Ok(Json(execution))
 }
 
@@ -2708,7 +3069,8 @@ async fn run_recipe_by_id_handler(
 async fn list_variables_handler(
     State(server): State<HerdrMcpServer>,
 ) -> Result<Json<Vec<crate::persistence::VariableStore>>, (StatusCode, String)> {
-    server.persistence
+    server
+        .persistence
         .load_variables(None, None)
         .await
         .map(Json)
@@ -2719,7 +3081,8 @@ async fn save_variable_handler(
     State(server): State<HerdrMcpServer>,
     Json(req): Json<crate::persistence::VariableStore>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    server.persistence
+    server
+        .persistence
         .save_variable(&req)
         .await
         .map(|()| StatusCode::CREATED)
@@ -2730,11 +3093,12 @@ async fn get_variable_handler(
     State(server): State<HerdrMcpServer>,
     Path(key): Path<String>,
 ) -> Result<Json<crate::persistence::VariableStore>, (StatusCode, String)> {
-    let vars = server.persistence
+    let vars = server
+        .persistence
         .load_variables(None, None)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    
+
     vars.into_iter()
         .find(|v| v.key == key)
         .map(Json)
@@ -2754,10 +3118,176 @@ async fn get_execution_handler(
     State(server): State<HerdrMcpServer>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<ExecutionResult>, (StatusCode, String)> {
-    server.persistence
+    server
+        .persistence
         .load_execution(&id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .map(Json)
         .ok_or((StatusCode::NOT_FOUND, "Execution not found".into()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
+
+    fn sample_results() -> HashMap<String, serde_json::Value> {
+        let mut m = HashMap::new();
+        m.insert(
+            "step1".to_string(),
+            serde_json::json!({
+                "result": { "content": ["alpha", "beta"], "text": "hello" },
+                "pane_id": "p1"
+            }),
+        );
+        m.insert(
+            "step2".to_string(),
+            serde_json::json!({ "output": "world", "n": 42 }),
+        );
+        m
+    }
+
+    #[test]
+    fn test_resolve_json_path_top_level() {
+        let root = sample_results();
+        let v = resolve_json_path(&root, "step2.output");
+        assert_eq!(v, Some(serde_json::json!("world")));
+    }
+
+    #[test]
+    fn test_resolve_json_path_nested() {
+        let root = sample_results();
+        let v = resolve_json_path(&root, "step1.result.text");
+        assert_eq!(v, Some(serde_json::json!("hello")));
+    }
+
+    #[test]
+    fn test_resolve_json_path_array_index() {
+        let root = sample_results();
+        let v = resolve_json_path(&root, "step1.result.content[0]");
+        assert_eq!(v, Some(serde_json::json!("alpha")));
+    }
+
+    #[test]
+    fn test_resolve_json_path_array_nested() {
+        let root = sample_results();
+        let v = resolve_json_path(&root, "step1.result.content[1]");
+        assert_eq!(v, Some(serde_json::json!("beta")));
+    }
+
+    #[test]
+    fn test_resolve_json_path_missing_returns_none() {
+        let root = sample_results();
+        assert_eq!(resolve_json_path(&root, "step1.nope"), None);
+        assert_eq!(resolve_json_path(&root, "nope.field"), None);
+    }
+
+    #[test]
+    fn test_resolve_json_path_single_segment_returns_none() {
+        // resolve_json_path requires a dotted path (step.field); a bare key returns None.
+        let root = sample_results();
+        assert_eq!(resolve_json_path(&root, "step2"), None);
+    }
+
+    #[test]
+    fn test_resolve_variables_simple_substitution() {
+        let results = sample_results();
+        let mut value = serde_json::json!({ "text": "{{ step2.output }}" });
+        resolve_variables(&mut value, &results);
+        assert_eq!(value, serde_json::json!({ "text": "world" }));
+    }
+
+    #[test]
+    fn test_resolve_variables_nested_object() {
+        let results = sample_results();
+        let mut value = serde_json::json!({ "a": { "b": "{{ step1.result.text }}" } });
+        resolve_variables(&mut value, &results);
+        assert_eq!(value, serde_json::json!({ "a": { "b": "hello" } }));
+    }
+
+    #[test]
+    fn test_resolve_variables_array() {
+        let results = sample_results();
+        let mut value = serde_json::json!(["{{ step2.output }}", "literal"]);
+        resolve_variables(&mut value, &results);
+        assert_eq!(value, serde_json::json!(["world", "literal"]));
+    }
+
+    #[test]
+    fn test_resolve_variables_unknown_kept() {
+        let results = sample_results();
+        let mut value = serde_json::json!({ "text": "{{ unknown.path }}" });
+        resolve_variables(&mut value, &results);
+        // Unknown variable left unchanged
+        assert_eq!(value, serde_json::json!({ "text": "{{ unknown.path }}" }));
+    }
+
+    #[test]
+    fn test_resolve_variables_whitespace_in_braces() {
+        let results = sample_results();
+        let mut value = serde_json::json!({ "text": "{{  step2.output  }}" });
+        resolve_variables(&mut value, &results);
+        assert_eq!(value, serde_json::json!({ "text": "world" }));
+    }
+
+    #[test]
+    fn test_resolve_variables_multiple_in_string() {
+        let results = sample_results();
+        let mut value = serde_json::json!({ "text": "{{ step1.result.text }} {{ step2.output }}" });
+        resolve_variables(&mut value, &results);
+        assert_eq!(value, serde_json::json!({ "text": "hello world" }));
+    }
+
+    #[test]
+    fn test_resolve_variables_string_value_inserted() {
+        let results = sample_results();
+        let mut value = serde_json::json!({ "t": "hi {{ step2.output }}" });
+        resolve_variables(&mut value, &results);
+        assert_eq!(value, serde_json::json!({ "t": "hi world" }));
+    }
+
+    #[test]
+    fn test_resolve_variables_number_value_inserted() {
+        let results = sample_results();
+        let mut value = serde_json::json!({ "t": "n={{ step2.n }}" });
+        resolve_variables(&mut value, &results);
+        assert_eq!(value, serde_json::json!({ "t": "n=42" }));
+    }
+
+    #[test]
+    fn test_resolve_variables_object_value_to_string() {
+        let results = sample_results();
+        let mut value = serde_json::json!({ "t": "{{ step1.result }}" });
+        resolve_variables(&mut value, &results);
+        // Object serializes to its JSON string form
+        assert_eq!(
+            value,
+            serde_json::json!({ "t": "{\"content\":[\"alpha\",\"beta\"],\"text\":\"hello\"}" })
+        );
+    }
+
+    #[test]
+    fn test_resolve_variables_no_substitution() {
+        let results = sample_results();
+        let mut value = serde_json::json!({ "t": "no placeholders here" });
+        resolve_variables(&mut value, &results);
+        assert_eq!(value, serde_json::json!({ "t": "no placeholders here" }));
+    }
+
+    #[test]
+    fn test_json_value_to_string_null() {
+        assert_eq!(json_value_to_string(&serde_json::Value::Null), "");
+    }
+
+    #[test]
+    fn test_json_value_to_string_string() {
+        assert_eq!(json_value_to_string(&serde_json::json!("x")), "x");
+    }
+
+    #[test]
+    fn test_json_value_to_string_number() {
+        assert_eq!(json_value_to_string(&serde_json::json!(7)), "7");
+    }
 }

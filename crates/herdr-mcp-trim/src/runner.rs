@@ -47,15 +47,10 @@ impl PipelineRunner {
     /// it is merged into persistent memory.
     pub async fn run(&self, text: &str, stages: &[StageSpec]) -> pipeline::PipelineResult {
         let result = pipeline::run(text, stages, &self.base_key);
-        if let Some(path) = &self.memory_path {
-            if let Some(last) = result
-                .stages
-                .iter()
-                .rev()
-                .find_map(|s| s.pfc1_key.clone())
-            {
-                save_memory(path, &last).await;
-            }
+        if let Some(path) = &self.memory_path
+            && let Some(last) = result.stages.iter().rev().find_map(|s| s.pfc1_key.clone())
+        {
+            save_memory(path, &last).await;
         }
         result
     }
@@ -88,5 +83,64 @@ pub async fn save_memory(path: &Path, key: &CompressionKey) {
     }
     if let Ok(s) = serde_json::to_string_pretty(&merged) {
         let _ = tokio::fs::write(path, s).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline::parse_stage_specs;
+    use pretty_assertions::assert_eq;
+
+    #[tokio::test]
+    async fn test_runner_new_and_base_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = PipelineRunner::new(tmp.path()).await;
+        // base key should be seeded with the default key entries
+        assert!(!runner.base_key().is_empty());
+        assert!(runner.base_key().contains_key("Ꮜ"));
+    }
+
+    #[tokio::test]
+    async fn test_runner_run_returns_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = PipelineRunner::new(tmp.path()).await;
+        let stages = parse_stage_specs(&["caveman:full".to_string(), "pfc1".to_string()]).unwrap();
+        let text = "the quick brown fox jumps over the lazy dog because it is slow";
+        let result = runner.run(text, &stages).await;
+        assert_eq!(result.input, text);
+        assert!(!result.stages.is_empty());
+        assert!(result.output.len() <= text.len());
+    }
+
+    #[tokio::test]
+    async fn test_runner_decompress_headerless_unchanged() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = PipelineRunner::new(tmp.path()).await;
+        let plain = "this is plain text with no header";
+        assert_eq!(runner.decompress(plain), plain);
+    }
+
+    #[tokio::test]
+    async fn test_runner_run_saves_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runner = PipelineRunner::new(tmp.path()).await;
+        let stages = parse_stage_specs(&["pfc1".to_string()]).unwrap();
+        // Use a long text with repeated technical terms so PFC1 produces a key.
+        let text = "configuration session gateway profile ".repeat(50);
+        let _ = runner.run(&text, &stages).await;
+        let mem_path = tmp.path().join(MEMORY_FILE);
+        assert!(tokio::fs::try_exists(&mem_path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_load_save_memory_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mem.json");
+        let mut key = CompressionKey::new();
+        key.insert("Ꮜ".to_string(), "session".to_string());
+        save_memory(&path, &key).await;
+        let loaded = load_memory(&path).await.unwrap();
+        assert_eq!(loaded.get("Ꮜ").map(|s| s.as_str()), Some("session"));
     }
 }
