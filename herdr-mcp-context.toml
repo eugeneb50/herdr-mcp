@@ -7,10 +7,12 @@ objective = "herdr-mcp migrated from a monolith into a 4-crate workspace; compre
 edition = "2024"
 binary_name = "herdr-mcp"
 cli_subcommands = ["serve", "trim", "dashboard", "folder-key"]
+tool_count = 34
 
 [architecture]
 crates = ["herdr-mcp-core", "herdr-mcp-trim", "herdr-mcp-server", "herdr-mcp-cli"]
 note = "The herdr-mcp-folder-key crate was eliminated; folder-key logic lives in herdr-mcp-trim/src/folder_key.rs."
+docs = ["docs/ARCHITECTURE.md (comprehensive reference)", "docs/PRD.md", "AGENTS.md (zeroclaw-style conventions)", "compressorplan.md", "a2a.md", "TEST_PLAN.md"]
 
 [dev_dependencies]
 tempfile = "3"
