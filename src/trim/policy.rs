@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use schemars::JsonSchema;
 
-use crate::trim::pipeline::{parse_stage_spec, parse_stage_specs, StageSpec};
+use crate::trim::pipeline::{parse_stage_spec, StageSpec};
 
 /// When to apply a trim policy to an agent's traffic.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -37,6 +37,7 @@ impl TrimPolicy {
 
     /// Parse `stages` into [`StageSpec`]s, failing on an unknown stage.
     /// PFC1 stages default to `emit_header = true` (self-describing).
+    #[allow(dead_code)]
     pub fn parse_stages(&self) -> Result<Vec<StageSpec>, String> {
         self.parse_stages_with(true)
     }

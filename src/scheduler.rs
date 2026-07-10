@@ -2,7 +2,6 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -44,20 +43,6 @@ impl Scheduler {
                 handles: tokio::sync::Mutex::new(Vec::new()),
             }),
         }
-    }
-
-    pub async fn set_executor(&self, exec: ExecutorFn) {
-        *self.inner.executor.write().await = Some(exec);
-    }
-
-    pub async fn load_from_disk(&self) -> anyhow::Result<()> {
-        let schedules = self.inner.persistence.list_schedules().await?;
-        for s in schedules {
-            if let Err(e) = self.schedule_one(s.clone()).await {
-                tracing::warn!("failed to schedule {}: {e}", s.id);
-            }
-        }
-        Ok(())
     }
 
     pub async fn schedule_one(&self, s: ScheduledRecipe) -> anyhow::Result<()> {

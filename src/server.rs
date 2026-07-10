@@ -614,47 +614,6 @@ impl HerdrMcpServer {
         }
     }
 
-    pub async fn bootstrap(&self) {
-        let exec_fn: crate::scheduler::ExecutorFn = {
-            let s = self.clone();
-            std::sync::Arc::new(move |recipe_id: uuid::Uuid| {
-                let s = std::sync::Arc::new(s.clone());
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                tokio::spawn(async move {
-                    let result = run_recipe_by_id(s.clone(), recipe_id).await;
-                    let _ = tx.send(result);
-                });
-                rx
-            })
-        };
-        self.scheduler.set_executor(exec_fn).await;
-        let _ = self.scheduler.load_from_disk().await;
-
-        // Trim badge poller: every 20s, scan workspace stats and refresh pane
-        // badges so the savings % stays fresh even without live traffic.
-        // Best-effort: never crashes the loop on I/O or RPC errors.
-        let poller = self.clone();
-        tokio::spawn(async move {
-            const POLL_SECS: u64 = 20;
-            loop {
-                tokio::time::sleep(std::time::Duration::from_secs(POLL_SECS)).await;
-                let sessions = poller.data_dir.join("sessions");
-                let mut entries = match tokio::fs::read_dir(&sessions).await {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let fname = entry.file_name().to_string_lossy().to_string();
-                    if !fname.ends_with(".trim_stats.json") {
-                        continue;
-                    }
-                    let ws = fname.trim_end_matches(".trim_stats.json");
-                    poller.push_badge_for_workspace(ws).await;
-                }
-            }
-        });
-    }
-
     // ── Trim helpers ─────────────────────────────────────────────────
 
     /// Apply outbound trim to `text` destined for `pane`. Explicit per-call
@@ -2479,46 +2438,6 @@ async fn run_recipe_handler(
     let response = execute_recipe(&server, &req.steps, session).await;
     Json(response)
 }
-
-/// Run a persisted recipe by id (used by the scheduler). The server carries
-/// the shared agent registry so cross-pane chaining still works.
-async fn run_recipe_by_id(
-    server: std::sync::Arc<HerdrMcpServer>,
-    recipe_id: uuid::Uuid,
-) -> ExecutionResult {
-    let Some(recipe) = server.persistence.load_recipe(&recipe_id).await.ok().flatten() else {
-        return ExecutionResult {
-            id: uuid::Uuid::new_v4(),
-            recipe_id,
-            started_at: chrono::Utc::now(),
-            completed_at: Some(chrono::Utc::now()),
-            status: ExecutionStatus::Failed,
-            results: HashMap::new(),
-            variables: HashMap::new(),
-            error: Some("Recipe not found".into()),
-        };
-    };
-
-    let session = recipe.variables.get("session_id").and_then(|v| v.as_str());
-    let response = execute_recipe(&server, &recipe.steps, session).await;
-    ExecutionResult {
-        id: uuid::Uuid::new_v4(),
-        recipe_id,
-        started_at: chrono::Utc::now(),
-        completed_at: Some(chrono::Utc::now()),
-        status: if response.status == "completed" {
-            ExecutionStatus::Completed
-        } else {
-            ExecutionStatus::Failed
-        },
-        results: response.results,
-        variables: HashMap::new(),
-        error: response.error,
-    }
-}
-
-/// Resolve `{{ stepId.result.nested[0].field }}` templates in a JSON value
-/// by looking up paths in the accumulated results map.
 fn resolve_variables(value: &mut serde_json::Value, results: &HashMap<String, serde_json::Value>) {
     match value {
         serde_json::Value::String(s) => {

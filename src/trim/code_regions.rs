@@ -45,6 +45,7 @@ pub struct CodeRegion {
     /// Whether this region is code (true) or prose (false).
     pub is_code: bool,
     /// The specific type of region.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub region_type: RegionType,
     /// The region content (for convenience; `text[start..end]` is identical).
     pub content: String,
@@ -58,10 +59,6 @@ impl CodeRegion {
     /// Length in bytes.
     pub fn len(&self) -> usize {
         self.end - self.start
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.start == self.end
     }
 }
 
@@ -80,9 +77,6 @@ pub enum DetectMode {
 /// They run in priority order (higher priority first), and regions from higher-
 /// priority detectors take precedence on overlap.
 pub trait CodeDetector: Send + Sync {
-    /// Unique name for debugging.
-    fn name(&self) -> &'static str;
-
     /// Priority for overlap resolution (higher = runs first, wins on conflict).
     fn priority(&self) -> i32;
 
@@ -221,7 +215,7 @@ fn build_default_registry() -> CodeRegionRegistry {
 }
 
 /// Split `text` into (is_code, content) segments using the given regions.
-pub fn split_by_regions(text: &str, regions: &[CodeRegion]) -> Vec<(bool, String)> {
+pub fn split_by_regions(_text: &str, regions: &[CodeRegion]) -> Vec<(bool, String)> {
     regions.iter()
         .map(|r| (r.is_code, r.content.clone()))
         .collect()
@@ -235,10 +229,6 @@ pub fn split_by_regions(text: &str, regions: &[CodeRegion]) -> Vec<(bool, String
 pub struct FencedCodeDetector;
 
 impl CodeDetector for FencedCodeDetector {
-    fn name(&self) -> &'static str {
-        "fenced"
-    }
-
     fn priority(&self) -> i32 {
         100 // Highest: fenced blocks are structural, win on any overlap
     }
@@ -332,10 +322,6 @@ fn find_line_end(text: &str, start: usize) -> usize {
 pub struct InlineCodeDetector;
 
 impl CodeDetector for InlineCodeDetector {
-    fn name(&self) -> &'static str {
-        "inline"
-    }
-
     fn priority(&self) -> i32 {
         50 // Lower than fenced
     }
@@ -361,7 +347,7 @@ fn detect_inline_code(text: &str) -> Vec<CodeRegion> {
             i += 1; // skip opening backtick
 
             // Find closing backtick
-            let mut code_start = i;
+            let code_start = i;
             while i < bytes.len() && bytes[i] != b'`' {
                 i += 1;
             }
@@ -387,10 +373,6 @@ fn detect_inline_code(text: &str) -> Vec<CodeRegion> {
 pub struct BracketedCodeDetector;
 
 impl CodeDetector for BracketedCodeDetector {
-    fn name(&self) -> &'static str {
-        "bracketed"
-    }
-
     fn priority(&self) -> i32 {
         30 // Lower than inline
     }

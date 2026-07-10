@@ -164,32 +164,6 @@ impl Persistence {
         Ok(())
     }
 
-    pub async fn load_session_blob(
-        &self,
-        ws: &str,
-        name: &str,
-    ) -> anyhow::Result<Option<serde_json::Value>> {
-        let path = self
-            .data_dir
-            .join("sessions")
-            .join(format!("{ws}.{name}.json"));
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(None);
-        }
-        let content = fs::read_to_string(path).await?;
-        Ok(Some(serde_json::from_str(&content)?))
-    }
-
-    pub async fn delete_session(&self, session_id: &str) -> anyhow::Result<bool> {
-        let path = self.data_dir.join("sessions").join(format!("{}.json", session_id));
-        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            fs::remove_file(path).await?;
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
     pub async fn save_execution(&self, result: &ExecutionResult) -> anyhow::Result<()> {
         let path = self.data_dir.join("executions").join(format!("{}.json", result.id));
         let json = serde_json::to_string_pretty(result)?;
@@ -221,22 +195,6 @@ impl Persistence {
         let content = fs::read_to_string(path).await?;
         let schedule: ScheduledRecipe = serde_json::from_str(&content)?;
         Ok(Some(schedule))
-    }
-
-    pub async fn list_schedules(&self) -> anyhow::Result<Vec<ScheduledRecipe>> {
-        let dir = self.data_dir.join("schedules");
-        if !tokio::fs::try_exists(&dir).await.unwrap_or(false) {
-            return Ok(Vec::new());
-        }
-        let mut schedules = Vec::new();
-        let mut entries = fs::read_dir(dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            if entry.path().extension().is_some_and(|ext| ext == "json") {
-                let content = fs::read_to_string(entry.path()).await?;
-                schedules.push(serde_json::from_str(&content)?);
-            }
-        }
-        Ok(schedules)
     }
 
     pub async fn delete_schedule(&self, id: &Uuid) -> anyhow::Result<bool> {

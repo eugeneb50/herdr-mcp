@@ -35,6 +35,7 @@ impl PipelineRunner {
     }
 
     /// Build a runner with an explicit in-memory base key (no persistence).
+    #[allow(dead_code)]
     pub fn with_base_key(base_key: CompressionKey) -> Self {
         PipelineRunner {
             base_key,

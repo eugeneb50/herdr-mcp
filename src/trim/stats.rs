@@ -38,6 +38,7 @@ pub struct TrimStats {
 
 impl TrimStats {
     /// Efficiency: what fraction of gross savings survived the header tax.
+    #[allow(dead_code)]
     pub fn workspace_net_pct(&self) -> f64 {
         if self.gross_saved_bytes == 0 {
             0.0
@@ -80,6 +81,7 @@ impl TrimStats {
 }
 
 impl PaneStat {
+    #[allow(dead_code)]
     pub fn net_pct(&self) -> f64 {
         if self.gross_saved_bytes == 0 {
             0.0

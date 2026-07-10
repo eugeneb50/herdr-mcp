@@ -128,7 +128,7 @@ StageSpec::Pfc1 { emit_header } => {
                     String::new()
                 };
                 let candidate = format!("{}{}", header, body);
-                let header_bytes = header.len();
+                let _header_bytes = header.len();
                 // Adaptive gate: never expand the wire bytes. If compression
                 // isn't beneficial (e.g. a short message drowned by the header),
                 // pass the original through untouched.

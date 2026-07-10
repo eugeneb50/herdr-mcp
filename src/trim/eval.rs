@@ -2,7 +2,7 @@
 
 use serde_json::json;
 
-use crate::trim::pfc1::{self, CompressionKey};
+use crate::trim::pfc1::CompressionKey;
 use crate::trim::pipeline::{parse_stage_specs, run};
 
 /// Run the pipeline over `text` and return a JSON report with byte + token
@@ -112,12 +112,4 @@ pub fn trim_bench(corpus_path: &str, level: &str, base_key: &CompressionKey) -> 
         "min_ratio_pct": min,
         "max_ratio_pct": max,
     })
-}
-
-/// Convenience: build a base key from the PFC1 default plus an optional seeded key.
-pub fn base_key(seed: Option<&CompressionKey>) -> CompressionKey {
-    match seed {
-        Some(s) => pfc1::merge_keys(&pfc1::default_key(), s),
-        None => pfc1::default_key(),
-    }
 }

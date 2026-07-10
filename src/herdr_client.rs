@@ -168,14 +168,6 @@ impl AgentRegistry {
         self.persist(&ws).await;
     }
 
-    pub async fn remove(&self, pane_id: &str) {
-        let mut map = self.inner.write().await;
-        if let Some(h) = map.remove(pane_id) {
-            drop(map);
-            self.persist(&h.workspace_id).await;
-        }
-    }
-
     pub async fn get(&self, pane_id: &str) -> Option<AgentHandle> {
         self.inner.read().await.get(pane_id).cloned()
     }
@@ -218,15 +210,6 @@ impl AgentRegistry {
         };
         self.persist(&ws).await;
         // Note: caller should call `herdr pane rename` via herdr_cli if needed
-    }
-
-    /// Read the label for a pane, if any.
-    pub async fn get_label(&self, pane_id: &str) -> Option<String> {
-        self.inner
-            .read()
-            .await
-            .get(pane_id)
-            .and_then(|h| if h.label.is_empty() { None } else { Some(h.label.clone()) })
     }
 
     /// Resolve a target (role, pane id, or label) to a pane id within a workspace.
@@ -293,21 +276,6 @@ impl AgentRegistry {
             tracing::debug!("failed to persist agent registry for {ws}: {e}");
         }
     }
-
-    /// Load agent handles for a workspace from disk into the live registry.
-    pub async fn load_from_disk(&self, ws: &str) {
-        match self.persistence.load_session_blob(ws, "agents").await {
-            Ok(Some(value)) => {
-                if let Ok(handles) = serde_json::from_value::<Vec<AgentHandle>>(value) {
-                    let mut map = self.inner.write().await;
-                    for h in handles {
-                        map.insert(h.pane_id.clone(), h);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 /// Thin client that owns the registry and runs the event subscriber.
@@ -346,8 +314,8 @@ impl HerdrClient {
         {
             use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-            let mut stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
-            let (mut read_half, mut write_half) = stream.into_split();
+            let stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
+            let (read_half, mut write_half) = stream.into_split();
 
             // Channel to push additional subscribe requests (e.g. when a new
             // workspace appears and we must (re)subscribe its panes).

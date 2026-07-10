@@ -196,15 +196,10 @@ pub async fn build_folder_key(
         }
         let term_len = term.len();
         let h = pfc1::calculate_heuristic_benefit(term, effective);
-        let score = (effective as i64) * ((term_len as i64).saturating_sub(3));
         pairs.push(PhoneticPair {
             term: term.clone(),
-            frequency: effective,
             length: term_len,
-            compression_score: term_len * effective,
-            net_benefit: score as isize,
-            key_cost: h.key_cost,
-            space_saved_per_occurrence: h.space_saved_per_occurrence,
+            net_benefit: h.net_benefit,
         });
     }
 
