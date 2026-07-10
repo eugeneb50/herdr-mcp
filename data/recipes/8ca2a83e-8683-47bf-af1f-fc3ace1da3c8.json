@@ -1,0 +1,18 @@
+{
+  "id": "8ca2a83e-8683-47bf-af1f-fc3ace1da3c8",
+  "name": "test",
+  "description": null,
+  "steps": [
+    {
+      "id": "s1",
+      "tool": "status",
+      "params": {},
+      "description": null
+    }
+  ],
+  "variables": {},
+  "created_at": "2026-07-10T06:55:10.542022025Z",
+  "updated_at": "2026-07-10T06:55:10.542022025Z",
+  "is_template": false,
+  "category": null
+}

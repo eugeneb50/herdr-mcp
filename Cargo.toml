@@ -1,31 +1,15 @@
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
-panic = "abort"
-strip = true
+[workspace]
+resolver = "2"
+members = [
+    "crates/herdr-mcp-core",
+    "crates/herdr-mcp-trim",
+    "crates/herdr-mcp-server",
+    "crates/herdr-mcp-cli",
+]
 
-[profile.dev]
-opt-level = 0
-debug = true
-
-[profile.dev.package."*"]
-opt-level = 3
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(HERDR_BIN)"] }
-
-[package]
-name = "herdr-mcp"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.96"
-description = "MCP server that exposes herdr terminal multiplexer as tools"
-
-[dependencies]
+[workspace.dependencies]
 rmcp = { version = "1.7", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
@@ -39,8 +23,23 @@ regex = "1"
 walkdir = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-tower = "0.4"
 cron = "0.12"
 dashmap = "6"
 lazy_static = "1"
 crossterm = "0.28"
+dirs = "5"
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.dev.package."*"]
+opt-level = 3

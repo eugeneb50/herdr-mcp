@@ -1,0 +1,20 @@
+[package]
+name = "herdr-mcp-cli"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "herdr-mcp"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+rmcp = { workspace = true, features = ["server", "transport-io", "macros"] }
+serde_json = { workspace = true }
+
+herdr-mcp-server = { path = "../herdr-mcp-server" }
+herdr-mcp-trim = { path = "../herdr-mcp-trim" }

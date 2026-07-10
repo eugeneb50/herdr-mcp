@@ -1,0 +1,23 @@
+[package]
+name = "herdr-mcp-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rmcp = { workspace = true, features = ["server", "transport-io", "macros"] }
+tokio = { workspace = true, features = ["full"] }
+axum = { workspace = true }
+tower-http = { workspace = true, features = ["cors"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }
+chrono = { workspace = true, features = ["serde"] }
+cron = { workspace = true }
+dashmap = { workspace = true }
+regex = { workspace = true }
+lazy_static = { workspace = true }
+
+herdr-mcp-trim = { path = "../herdr-mcp-trim" }
