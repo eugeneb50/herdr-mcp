@@ -8,6 +8,8 @@
 //! PFC1's Cherokee syllabary (U+13A0–U+13FF), so the two compressors
 //! never collide and compose cleanly (caveman first, then pfc1).
 
+use crate::trim::code_regions::{detect_all_regions, split_by_regions, DetectMode};
+
 /// Intensity level. `wenyan-*` levels require a `zh` corpus and, without one,
 /// return `skipped = true` (see `CompressionPlan` Open Items §1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,38 +137,6 @@ const DESTRUCTIVE: &[&str] = &[
     "drop column", "drop table", "rm -rf", "force push", "hard reset",
     "delete all", "wipe", "danger", "caution",
 ];
-
-fn split_code_fences(text: &str) -> Vec<(bool, String)> {
-    // Returns segments: (is_code, content). A code fence (` ``` `) and its
-    // closing fence stay together in one code segment; prose is segmented by
-    // line so blank lines and code boundaries are preserved.
-    let mut out = Vec::new();
-    let mut in_code = false;
-    let mut buf = String::new();
-    for line in text.split('\n') {
-        let is_fence = line.trim_start().starts_with("```");
-        if is_fence {
-            buf.push_str(line);
-            buf.push('\n');
-            if in_code {
-                out.push((true, std::mem::take(&mut buf)));
-                in_code = false;
-            } else {
-                in_code = true;
-            }
-            continue;
-        }
-        buf.push_str(line);
-        buf.push('\n');
-        if !in_code && !buf.trim().is_empty() {
-            out.push((false, std::mem::take(&mut buf)));
-        }
-    }
-    if !buf.is_empty() {
-        out.push((in_code, buf));
-    }
-    out
-}
 
 /// True when `token` looks like technical content we must never rewrite.
 fn is_technical(token: &str) -> bool {
@@ -312,7 +282,7 @@ pub fn compress(text: &str, level: CavemanLevel) -> CavemanResult {
         };
     }
 
-    let segments = split_code_fences(text);
+    let segments = split_by_regions(text, &detect_all_regions(text, DetectMode::FencedOnly));
     let mut out = String::with_capacity(text.len());
 
     for (is_code, content) in segments {

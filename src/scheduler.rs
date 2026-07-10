@@ -147,6 +147,21 @@ impl Scheduler {
         Ok(removed)
     }
 
+    /// Update the enabled flag of an existing schedule. Persists the change so
+    /// it survives restarts, and updates the live runner via the in-memory map.
+    pub async fn set_enabled(&self, id: Uuid, enabled: bool) -> anyhow::Result<bool> {
+        if let Some(mut sched) = self.inner.persistence.load_schedule(&id).await? {
+            sched.enabled = enabled;
+            self.inner.persistence.save_schedule(&sched).await?;
+            if let Some(mut active) = self.inner.schedules.get_mut(&id) {
+                active.enabled = enabled;
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub async fn list(&self) -> Vec<ScheduledRecipe> {
         self.inner.schedules
             .iter()
@@ -165,16 +180,4 @@ impl Scheduler {
             })
             .collect()
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScheduleRequest {
-    pub recipe_id: Uuid,
-    pub cron_schedule: String,
-    #[serde(default = "default_enabled")]
-    pub enabled: bool,
-}
-
-fn default_enabled() -> bool {
-    true
 }

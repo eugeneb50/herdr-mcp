@@ -8,10 +8,16 @@
 //! and the a2a primitives (`agent_message` / `agent_read`) via per-pane
 //! [`policy`]. [`eval`] lets the model verify its own savings. [`stats`]
 //! tracks cumulative savings per workspace. [`runner`] provides the CLI entry.
+//!
+//! [`code_regions`] provides a unified, pluggable code-region detection engine
+//! shared by both compressors. New detectors can be registered via
+//! [`CodeDetector`] for language-specific or format-specific needs.
 
 pub mod caveman;
+pub mod code_regions;
 pub mod dashboard;
 pub mod eval;
+pub mod folder_key;
 pub mod pfc1;
 pub mod pipeline;
 pub mod policy;

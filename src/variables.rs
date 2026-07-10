@@ -1,27 +1,7 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub struct Variable {
-    pub key: String,
-    pub value: serde_json::Value,
-    pub source: VariableSource,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-pub enum VariableSource {
-    Result,
-    User,
-    Auto,
-    Template,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recipe {
@@ -66,7 +46,6 @@ pub struct ExecutionResult {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct ScheduledRecipe {
     pub id: Uuid,
     pub recipe_id: Uuid,
@@ -76,9 +55,6 @@ pub struct ScheduledRecipe {
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
 }
-
-#[allow(dead_code)]
-pub type Variables = Arc<std::sync::RwLock<HashMap<String, serde_json::Value>>>;
 
 pub fn extract_variables(result: &serde_json::Value) -> HashMap<String, serde_json::Value> {
     let mut vars = HashMap::new();

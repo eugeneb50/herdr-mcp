@@ -32,19 +32,19 @@ pub struct CompressionStats {
 pub const CHEROKEE_SYMBOLS_STR: &str =
     "ᎠᎡᎢᎣᎤᎥᎦᎧᎨᎩᎪᎫᎬᎭᎮᎯᎰᎱᎲᎳᎴᎵᎶᎷᎸᎹᎺᎻᎼᎽᎾᎿ\
      ᏀᏁᏂᏃᏄᏅᏆᏇᏈᏉᏊᏋᏌᏍᏎᏏᏐᏑᏒᏓᏔᏕᏖᏗᏘᏙᏚᏛᏜᏝᏞᏟ\
-     ᏠᏡᏢᏣᏤᏥᏦᏧᏨᏩᏪᏫᏬᏭᏮᏯ";
+     ᏠᏡᏢᏣᏤᏥᏦᏧᏨᏩᏪᏫᏬᏭᏮᏯᏰᏱᏲᏳᏴ";
 
 pub fn cherokee_symbols() -> Vec<char> {
     let syms: Vec<char> = CHEROKEE_SYMBOLS_STR.chars().collect();
     // Safety net: a duplicate or out-of-range symbol would silently corrupt
-    // decompression. Assert 85 unique symbols in the Cherokee syllabary block.
+    // decompression. Assert 85 unique symbols in the Cherokee syllabary block
+    // (U+13A0..=U+13FF).
     debug_assert_eq!(syms.len(), 85, "expected 85 Cherokee symbols");
+    let lo = std::char::from_u32(0x13A0).unwrap();
+    let hi = std::char::from_u32(0x13FF).unwrap();
     let mut seen = std::collections::HashSet::new();
     for &c in &syms {
-        debug_assert!(
-            ('Ꭰ'..='Ꮿ').contains(&c),
-            "symbol {c} is outside U+13A0..=U+13FF"
-        );
+        debug_assert!(lo <= c && c <= hi, "symbol {c} is outside U+13A0..=U+13FF");
         debug_assert!(seen.insert(c), "duplicate Cherokee symbol {c}");
     }
     syms
@@ -115,6 +115,11 @@ pub struct CompressionOptions {
     pub filter_stopwords: bool,
     pub allow_three_char_terms: bool,
     pub allow_intra_word_substitution: bool,
+    // Phrase (n-gram) compression options
+    pub enable_phrases: bool,
+    pub min_phrase_words: usize,
+    pub max_phrase_words: usize,
+    pub min_phrase_frequency: usize,
 }
 
 impl Default for CompressionOptions {
@@ -126,6 +131,11 @@ impl Default for CompressionOptions {
             filter_stopwords: false,
             allow_three_char_terms: false,
             allow_intra_word_substitution: false,
+            // Phrase compression defaults
+            enable_phrases: true,
+            min_phrase_words: 2,
+            max_phrase_words: 4,
+            min_phrase_frequency: 2,
         }
     }
 }
@@ -160,6 +170,7 @@ pub struct HeuristicBenefit {
     pub total_space_saved: usize,
 }
 
+#[derive(Debug, Clone)]
 pub struct PhoneticPair {
     pub term: String,
     pub frequency: usize,
@@ -170,11 +181,52 @@ pub struct PhoneticPair {
     pub space_saved_per_occurrence: usize,
 }
 
-/// Analyze `text` for repeated technical terms worth keying.
+/// Phrase (n-gram) candidate for compression.
+#[derive(Debug, Clone)]
+pub struct PhrasePair {
+    pub phrase: String,
+    pub frequency: usize,
+    pub word_count: usize,
+    pub length: usize,
+    pub net_benefit: isize,
+    pub key_cost: usize,
+    pub space_saved_per_occurrence: usize,
+}
+
+/// Container for both single tokens and phrases from analysis.
+#[derive(Debug, Clone, Default)]
+pub struct AnalyzedTerms {
+    pub tokens: Vec<PhoneticPair>,
+    pub phrases: Vec<PhrasePair>,
+}
+
+/// Heuristic benefit for a phrase.
+/// Key cost: symbol(3) + '='(1) + phrase.len() + '\n'(1) = phrase.len() + 5
+/// Space saved per occurrence: phrase.len() - 3 (Cherokee symbol = 3 UTF-8 bytes)
+/// Net benefit: frequency * (len - 3) - (len + 5)
+pub fn calculate_phrase_benefit(phrase: &str, frequency: usize) -> HeuristicBenefit {
+    const SYMBOL_UTF8_BYTES: usize = 3;
+    const KEY_OVERHEAD: usize = 5; // "=\n" plus formatting overhead
+
+    let phrase_length = phrase.len();
+    let key_cost = KEY_OVERHEAD + phrase_length;
+    let space_saved_per_occurrence = phrase_length.saturating_sub(SYMBOL_UTF8_BYTES);
+    let total_space_saved = frequency * space_saved_per_occurrence;
+    let net_benefit = total_space_saved as isize - key_cost as isize;
+
+    HeuristicBenefit {
+        net_benefit,
+        key_cost,
+        space_saved_per_occurrence,
+        total_space_saved,
+    }
+}
+
+/// Analyze `text` for repeated technical terms and phrases worth keying.
 ///
-/// Mirrors `analyzePhoneticPairs`: extract `[a-zA-Z0-9_-]{3,}` tokens, count
-/// frequencies, keep `len >= min_length && freq >= min_frequency`, filter by the
-/// net-benefit heuristic, and sort by net benefit (highest first).
+/// Extracts tokens `[a-zA-Z0-9_-]{3,}` and phrases (n-grams of 2-4 words with
+/// exact punctuation/case preserved), counts frequencies, filters by net-benefit
+/// heuristic, and returns both sorted by net benefit (highest first).
 lazy_static! {
     static ref TOKEN_RE: regex::Regex = regex::Regex::new(r"[a-zA-Z0-9_-]{3,}").unwrap();
 }
@@ -185,7 +237,7 @@ pub fn analyze_phonetic_pairs(
     min_frequency: usize,
     enable_heuristic: bool,
     options: CompressionOptions,
-) -> Vec<PhoneticPair> {
+) -> AnalyzedTerms {
     let effective_min_length = if options.allow_three_char_terms {
         min_length.min(3)
     } else {
@@ -228,13 +280,99 @@ pub fn analyze_phonetic_pairs(
         pairs.retain(|p| p.net_benefit > 0);
     }
     pairs.sort_by(|a, b| b.net_benefit.cmp(&a.net_benefit));
-    pairs
+
+    // Extract phrases if enabled
+    let mut phrases: Vec<PhrasePair> = Vec::new();
+    if options.enable_phrases {
+        let phrase_counts = extract_phrases(
+            text,
+            options.min_phrase_words,
+            options.max_phrase_words,
+            options.min_phrase_frequency,
+        );
+
+        for (phrase, frequency) in phrase_counts {
+            let h = calculate_phrase_benefit(&phrase, frequency);
+            let word_count = phrase.split_whitespace().count();
+            let phrase_len = phrase.len();
+            if h.net_benefit > 0 || !enable_heuristic {
+                phrases.push(PhrasePair {
+                    phrase,
+                    frequency,
+                    word_count,
+                    length: phrase_len,
+                    net_benefit: h.net_benefit,
+                    key_cost: h.key_cost,
+                    space_saved_per_occurrence: h.space_saved_per_occurrence,
+                });
+            }
+        }
+
+        phrases.sort_by(|a, b| b.net_benefit.cmp(&a.net_benefit));
+    }
+
+    AnalyzedTerms { tokens: pairs, phrases }
 }
 
-/// Build a compression key from analyzed pairs, seeded with `existing_key`.
+/// Extract word tokens preserving case and punctuation boundaries.
+/// Returns (words, original_text) where words are alphanumeric tokens.
+fn tokenize_words(text: &str) -> (Vec<String>, String) {
+    let word_re = regex::Regex::new(r"[a-zA-Z0-9_-]+").unwrap();
+    let words: Vec<String> = word_re.find_iter(text).map(|m| m.as_str().to_string()).collect();
+    (words, text.to_string())
+}
+
+/// Extract phrases (n-grams) from text with exact punctuation and case preservation.
+/// Returns HashMap of phrase -> frequency.
+fn extract_phrases(
+    text: &str,
+    min_words: usize,
+    max_words: usize,
+    min_frequency: usize,
+) -> HashMap<String, usize> {
+    // Tokenize: split into words and non-words (punctuation/whitespace)
+    // We track word positions to reconstruct exact phrases with original punctuation
+    let word_re = regex::Regex::new(r"[a-zA-Z0-9_-]+").unwrap();
+    let mut word_positions = Vec::new();
+    for m in word_re.find_iter(text) {
+        word_positions.push((m.start(), m.end(), m.as_str().to_string()));
+    }
+
+    let mut phrase_counts: HashMap<String, usize> = HashMap::new();
+
+    // Generate n-grams from word positions
+    if word_positions.len() >= min_words {
+        for window_size in min_words..=max_words {
+            if word_positions.len() < window_size {
+                continue;
+            }
+            for i in 0..=word_positions.len() - window_size {
+                let window = &word_positions[i..i + window_size];
+
+            // Reconstruct phrase with exact original text including punctuation between words
+            let start = window[0].0;
+            let end = window[window_size - 1].1;
+            let phrase = text[start..end].to_string();
+
+            // Filter out phrases that are just punctuation/whitespace
+            if phrase.trim().is_empty() {
+                continue;
+            }
+
+            *phrase_counts.entry(phrase).or_insert(0) += 1;
+            }
+        }
+    }
+
+    // Filter by minimum frequency
+    phrase_counts.retain(|_, &mut freq| freq >= min_frequency);
+    phrase_counts
+}
+
+/// Build a compression key from analyzed terms (tokens + phrases), seeded with `existing_key`.
 /// Assigns unused Cherokee symbols to the highest-benefit terms (max 80 total).
 pub fn generate_compression_key(
-    pairs: &[PhoneticPair],
+    terms: &AnalyzedTerms,
     existing_key: &CompressionKey,
     max_terms: usize,
 ) -> CompressionKey {
@@ -250,17 +388,25 @@ pub fn generate_compression_key(
         return key;
     }
 
-    let beneficial: Vec<&PhoneticPair> = pairs
-        .iter()
-        .filter(|p| p.net_benefit > 0)
-        .take(max_new)
-        .collect();
+    // Combine tokens and phrases, sort by net benefit (highest first)
+    let mut all_terms: Vec<(&str, isize)> = Vec::new();
+    for token in &terms.tokens {
+        if token.net_benefit > 0 {
+            all_terms.push((&token.term, token.net_benefit));
+        }
+    }
+    for phrase in &terms.phrases {
+        if phrase.net_benefit > 0 {
+            all_terms.push((&phrase.phrase, phrase.net_benefit));
+        }
+    }
+    all_terms.sort_by(|a, b| b.1.cmp(&a.1));
 
-    for (i, pair) in beneficial.iter().enumerate() {
-        if i >= available.len() {
+    for (i, (term, _)) in all_terms.iter().enumerate() {
+        if i >= available.len() || i >= max_new {
             break;
         }
-        key.insert(available[i].to_string(), pair.term.clone());
+        key.insert(available[i].to_string(), term.to_string());
     }
     key
 }
@@ -311,7 +457,10 @@ pub fn replace_whole_words(text: &str, expansion: &str, symbol: &str) -> String 
 
 /// Compress `text` using `key` (symbol -> term). Longest expansions first so
 /// overlapping terms resolve correctly.
-pub fn compress_text(text: &str, key: &CompressionKey) -> String {
+///
+/// Returns a tuple of (compressed_text, used_symbols) where `used_symbols`
+/// contains only the symbols that were actually substituted.
+pub fn compress_text(text: &str, key: &CompressionKey) -> (String, Vec<String>) {
     let mut sorted: Vec<(String, String)> = key
         .iter()
         .filter(|(_, term)| !term.is_empty())
@@ -320,10 +469,20 @@ pub fn compress_text(text: &str, key: &CompressionKey) -> String {
     sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
 
     let mut result = text.to_string();
+    let mut used_symbols = Vec::new();
     for (symbol, expansion) in sorted {
+        let before = result.len();
         result = replace_whole_words(&result, &expansion, &symbol);
+        if result.len() != before {
+            used_symbols.push(symbol);
+        }
     }
-    result
+    (result, used_symbols)
+}
+
+/// Compress `text` using `key` without tracking used symbols (legacy API).
+pub fn compress_text_simple(text: &str, key: &CompressionKey) -> String {
+    compress_text(text, key).0
 }
 
 /// Decompress `text` using `key` (symbol -> term). Symbol order is irrelevant.
@@ -341,7 +500,8 @@ pub fn decompress_with_key(text: &str, key: &CompressionKey) -> String {
 }
 
 /// Build the ASCII header prepended to compressed payloads.
-pub fn generate_header(key: &CompressionKey) -> String {
+/// Only includes symbols that were actually used in compression.
+pub fn generate_header(key: &CompressionKey, used_symbols: &[String]) -> String {
     let mut header = String::from(
         "PFC1|PHONETIC FREQ COMPRESSION\n\
          To read: replace each symbol with its expansion from KEY.\n\
@@ -349,10 +509,15 @@ pub fn generate_header(key: &CompressionKey) -> String {
          Expansion is substring-safe: Ꮜs=session, Ꮜ_send=session_send\n\n\
          KEY:\n",
     );
-    let entries: Vec<(String, String)> = key.iter().map(|(s, t)| (s.clone(), t.clone())).collect();
-    for chunk in entries.chunks(5) {
+    let used_set: std::collections::HashSet<&String> = used_symbols.iter().collect();
+    let entries: Vec<(String, String)> = key
+        .iter()
+        .filter(|(s, _)| used_set.contains(s))
+        .map(|(s, t)| (s.clone(), t.clone()))
+        .collect();
+    for chunk in entries.chunks(1) {
         let line: Vec<String> = chunk.iter().map(|(s, t)| format!("{s}={t}")).collect();
-        header.push_str(&line.join(" "));
+        header.push_str(&line.join("\n"));
         header.push('\n');
     }
     header.push_str("---\n\n");
@@ -391,11 +556,9 @@ pub fn parse_header(text: &str) -> Option<(CompressionKey, String)> {
             body_start = line_as_ptr_offset(after_key, line);
             break;
         }
-        for token in trimmed.split_whitespace() {
-            if let Some((sym, term)) = token.split_once('=') {
-                if !sym.is_empty() && !term.is_empty() {
-                    key.insert(sym.to_string(), term.to_string());
-                }
+        if let Some((sym, term)) = trimmed.split_once('=') {
+            if !sym.is_empty() && !term.is_empty() {
+                key.insert(sym.to_string(), term.to_string());
             }
         }
     }
@@ -436,7 +599,7 @@ pub fn calculate_stats(original: &str, compressed: &str, key: &CompressionKey) -
 
 /// Convenience: analyze `text`, seed with `seed`, and return a ready key.
 pub fn analyze_and_build(text: &str, seed: &CompressionKey) -> CompressionKey {
-    let pairs = analyze_phonetic_pairs(text, 4, 2, true, CompressionOptions::default());
-    generate_compression_key(&pairs, seed, 80)
+    let terms = analyze_phonetic_pairs(text, 4, 2, true, CompressionOptions::default());
+    generate_compression_key(&terms, seed, 80)
 }
 

@@ -8,7 +8,7 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 
 use crate::persistence::Persistence;
-use crate::scheduler::{Scheduler, ScheduleRequest};
+use crate::scheduler::Scheduler;
 use crate::templates as tmpl;
 use crate::variables::{Recipe, RecipeStep, ExecutionResult, ExecutionStatus, ScheduledRecipe};
 use crate::herdr_client::AgentRegistry;
@@ -16,84 +16,6 @@ use crate::trim::pfc1::CompressionKey;
 use crate::trim::pipeline;
 use crate::trim::policy::TrimPolicy;
 use crate::trim::stats;
-
-// ── Type-safe IDs ────────────────────────────────────────────────────────
-
-/// A pane identifier in the herdr session.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-#[must_use]
-#[allow(dead_code)]
-pub struct PaneId(pub String);
-
-/// An agent target: terminal ID, agent name, or pane ID.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-#[must_use]
-#[allow(dead_code)]
-pub struct AgentTarget(pub String);
-
-/// A workspace identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-#[must_use]
-#[allow(dead_code)]
-pub struct WorkspaceId(pub String);
-
-/// A tab identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-#[must_use]
-#[allow(dead_code)]
-pub struct TabId(pub String);
-
-impl From<String> for PaneId {
-    fn from(id: String) -> Self {
-        PaneId(id)
-    }
-}
-
-impl From<String> for AgentTarget {
-    fn from(target: String) -> Self {
-        AgentTarget(target)
-    }
-}
-
-impl From<String> for WorkspaceId {
-    fn from(id: String) -> Self {
-        WorkspaceId(id)
-    }
-}
-
-impl From<String> for TabId {
-    fn from(id: String) -> Self {
-        TabId(id)
-    }
-}
-
-impl std::fmt::Display for PaneId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::fmt::Display for AgentTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::fmt::Display for WorkspaceId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::fmt::Display for TabId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 // ── Parameter structs ────────────────────────────────────────────────
 
@@ -447,6 +369,119 @@ pub struct CompressParams {
 #[must_use]
 pub struct DecompressParams {
     /// Text to decompress (optionally carrying a PFC1 header).
+    pub text: String,
+}
+
+/// Parameters for the `list_templates` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct ListTemplatesParams {}
+
+/// Parameters for the `get_template` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct GetTemplateParams {
+    /// Template id, e.g. `dev-watch`.
+    pub template_id: String,
+}
+
+/// Parameters for the `instantiate_template` tool. The resulting recipe is
+/// auto-saved so it shows up in the recipe library immediately.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct InstantiateTemplateParams {
+    /// Template id to instantiate, e.g. `dev-watch`.
+    pub template_id: String,
+    /// Values for the template's variables. Missing keys fall back to the
+    /// template's `default_value` (or null).
+    #[serde(default)]
+    pub variables: std::collections::HashMap<String, serde_json::Value>,
+    /// Optional override for the generated recipe name.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+/// Parameters for the `schedule_recipe` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct ScheduleRecipeParams {
+    /// Id of the persisted recipe to run on the schedule.
+    pub recipe_id: String,
+    /// Cron expression, e.g. `0 * * * *` (every hour).
+    pub cron_schedule: String,
+    /// Whether the schedule is active on creation (default true).
+    #[serde(default = "default_true_bool")]
+    pub enabled: bool,
+}
+
+/// Parameters for the `list_schedules` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct ListSchedulesParams {}
+
+/// Parameters for the `delete_schedule` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct DeleteScheduleParams {
+    /// Schedule id returned by `schedule_recipe` / `list_schedules`.
+    pub id: String,
+}
+
+/// Parameters for the `enable_schedule` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct EnableScheduleParams {
+    /// Schedule id to update.
+    pub id: String,
+    /// New enabled state.
+    pub enabled: bool,
+}
+
+// ── Folder-key (PFC1) parameters ──────────────────────────────────────
+
+/// Parameters for the `build_folder_key` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct BuildFolderKeyParams {
+    /// Folder to scan recursively for text/markdown files.
+    pub folder_path: String,
+    /// Minimum term frequency to qualify (default 3).
+    #[serde(default)]
+    pub min_frequency: Option<usize>,
+    /// Minimum term length in bytes (default 4).
+    #[serde(default)]
+    pub min_length: Option<usize>,
+    /// Maximum symbols in the produced key (default 85).
+    #[serde(default)]
+    pub max_terms: Option<usize>,
+    /// Also write the key to the central registry.
+    #[serde(default)]
+    pub persist_central: Option<bool>,
+    /// Fold accepted terms into the persistent master key.
+    #[serde(default)]
+    pub learn_master: Option<bool>,
+}
+
+/// Parameters for the `get_folder_key` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct GetFolderKeyParams {
+    /// Folder whose key should be loaded (discovered by walking up the tree).
+    pub folder_path: String,
+}
+
+/// Parameters for the `list_folder_keys` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct ListFolderKeysParams {}
+
+/// Parameters for the `decompress_with_folder_key` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct DecompressWithFolderKeyParams {
+    /// Folder whose key should be used to decompress `text`.
+    pub folder_path: String,
+    /// PFC1-compressed text (header-less, trusted a2a).
     pub text: String,
 }
 
@@ -1528,6 +1563,207 @@ impl HerdrMcpServer {
         }))
         .map_err(to_mcp_err)?]))
     }
+
+    // ── Recipe templates ───────────────────────────────────────────────
+
+    #[tool(description = "List the bundled recipe templates (e.g. dev-watch, git-status, build-and-test). Each has variables you fill in before instantiating.")]
+    async fn list_templates(
+        &self,
+        Parameters(_): Parameters<ListTemplatesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let templates = tmpl::list_templates();
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "count": templates.len(),
+            "templates": templates,
+        })).map_err(to_mcp_err)?]))
+    }
+
+    #[tool(description = "Get a single recipe template by id (variables + steps).")]
+    async fn get_template(
+        &self,
+        Parameters(GetTemplateParams { template_id }): Parameters<GetTemplateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match tmpl::find_template(&template_id) {
+            Some(t) => Ok(CallToolResult::success(vec![Content::json(serde_json::json!(t))
+                .map_err(to_mcp_err)?])),
+            None => Err(McpError {
+                code: rmcp::model::ErrorCode(-32602),
+                message: format!("template not found: {template_id}").into(),
+                data: None,
+            }),
+        }
+    }
+
+    #[tool(description = "Instantiate a template into a runnable recipe and auto-save it to the recipe library. Returns the saved recipe (with its id) ready to run or edit.")]
+    async fn instantiate_template(
+        &self,
+        Parameters(InstantiateTemplateParams { template_id, variables, name }): Parameters<InstantiateTemplateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let recipe = tmpl::instantiate(&template_id, variables, name)
+            .ok_or_else(|| McpError {
+                code: rmcp::model::ErrorCode(-32602),
+                message: format!("template not found: {template_id}").into(),
+                data: None,
+            })?;
+        self.persistence
+            .save_recipe(&recipe)
+            .await
+            .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "saved": true,
+            "recipe": recipe,
+        })).map_err(to_mcp_err)?]))
+    }
+
+    // ── Scheduler ──────────────────────────────────────────────────────
+
+    #[tool(description = "Schedule a persisted recipe to run on a cron expression. Returns the created schedule (with its id). Persisted across restarts.")]
+    async fn schedule_recipe(
+        &self,
+        Parameters(ScheduleRecipeParams { recipe_id, cron_schedule, enabled }): Parameters<ScheduleRecipeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let recipe_id = uuid::Uuid::parse_str(&recipe_id).map_err(to_mcp_err)?;
+        let schedule = ScheduledRecipe {
+            id: uuid::Uuid::new_v4(),
+            recipe_id,
+            cron_schedule: cron_schedule.clone(),
+            next_run: None,
+            last_run: None,
+            enabled,
+            created_at: chrono::Utc::now(),
+        };
+        self.scheduler
+            .schedule_one(schedule.clone())
+            .await
+            .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "scheduled": true,
+            "schedule": schedule,
+        })).map_err(to_mcp_err)?]))
+    }
+
+    #[tool(description = "List all active recipe schedules, with their next run time and enabled state.")]
+    async fn list_schedules(
+        &self,
+        Parameters(_): Parameters<ListSchedulesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let schedules = self.scheduler.list().await;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "count": schedules.len(),
+            "schedules": schedules,
+        })).map_err(to_mcp_err)?]))
+    }
+
+    #[tool(description = "Delete a recipe schedule by id.")]
+    async fn delete_schedule(
+        &self,
+        Parameters(DeleteScheduleParams { id }): Parameters<DeleteScheduleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = uuid::Uuid::parse_str(&id).map_err(to_mcp_err)?;
+        let removed = self.scheduler.remove(id).await.map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "removed": removed,
+            "id": id,
+        })).map_err(to_mcp_err)?]))
+    }
+
+    #[tool(description = "Enable or disable an existing recipe schedule.")]
+    async fn enable_schedule(
+        &self,
+        Parameters(EnableScheduleParams { id, enabled }): Parameters<EnableScheduleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = uuid::Uuid::parse_str(&id).map_err(to_mcp_err)?;
+        let ok = self.scheduler.set_enabled(id, enabled).await.map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "updated": ok,
+            "id": id,
+            "enabled": enabled,
+        })).map_err(to_mcp_err)?]))
+    }
+
+    // ── Folder-key (PFC1) tools ─────────────────────────────────────────
+
+    #[tool(description = "Scan a folder for text/markdown files, learn the domain's most compressible terms + phrases, and write a self-contained PFC1 key to <folder>/.pfc1_key.json. Skips code blocks; reuses the cached key when files are unchanged (mtime).")]
+    async fn build_folder_key(
+        &self,
+        Parameters(BuildFolderKeyParams {
+            folder_path,
+            min_frequency,
+            min_length,
+            max_terms,
+            persist_central,
+            learn_master,
+        }): Parameters<BuildFolderKeyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = std::path::Path::new(&folder_path);
+        let mut opts = crate::trim::folder_key::FolderKeyOptions::default();
+        if let Some(v) = min_frequency {
+            opts.min_frequency = v;
+        }
+        if let Some(v) = min_length {
+            opts.min_length = v;
+        }
+        if let Some(v) = max_terms {
+            opts.max_terms = v;
+        }
+        if let Some(v) = persist_central {
+            opts.persist_central = v;
+        }
+        if let Some(v) = learn_master {
+            opts.learn_master = v;
+        }
+        let key = crate::trim::folder_key::build_folder_key(root, &opts, &self.data_dir)
+            .await
+            .map_err(to_mcp_err)?;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "built": true,
+            "folder": key.folder,
+            "seeded_from_master": key.seeded_from_master,
+            "stats": key.stats,
+            "key": key.key,
+        })).map_err(to_mcp_err)?]))
+    }
+
+    #[tool(description = "Load the PFC1 folder key for a folder (discovered by walking up the directory tree). Returns null if none exists.")]
+    async fn get_folder_key(
+        &self,
+        Parameters(GetFolderKeyParams { folder_path }): Parameters<GetFolderKeyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = std::path::Path::new(&folder_path);
+        // Walk up from the folder (and its parents) to find the nearest key.
+        let keys = crate::trim::folder_key::discover_folder_keys(root).await;
+        let key = keys.into_iter().next();
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "folder": folder_path,
+            "key": key,
+        })).map_err(to_mcp_err)?]))
+    }
+
+    #[tool(description = "List all folder keys in the central registry (data_dir/folder_keys).")]
+    async fn list_folder_keys(
+        &self,
+        Parameters(_): Parameters<ListFolderKeysParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let keys = crate::trim::folder_key::list_central_keys(&self.data_dir)
+            .await;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "count": keys.len(),
+            "keys": keys,
+        })).map_err(to_mcp_err)?]))
+    }
+
+    #[tool(description = "Decompress text using a folder's PFC1 key (header-less, trusted a2a). Returns the input unchanged if no key is found.")]
+    async fn decompress_with_folder_key(
+        &self,
+        Parameters(DecompressWithFolderKeyParams { folder_path, text }): Parameters<DecompressWithFolderKeyParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = std::path::Path::new(&folder_path);
+        let out = crate::trim::folder_key::decompress_with_folder_key(root, &text).await;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "decompressed": out,
+            "changed": out != text,
+        })).map_err(to_mcp_err)?]))
+    }
 }
 
 #[tool_handler(
@@ -1994,6 +2230,23 @@ async fn dispatch_tool(
             server.var_set(Parameters(p)).await.map_err(mcp_err_to_http)
         }
 
+        // Recipe templates.
+        "list_templates" => {
+            let p: ListTemplatesParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.list_templates(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "get_template" => {
+            let p: GetTemplateParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.get_template(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "instantiate_template" => {
+            let p: InstantiateTemplateParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.instantiate_template(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+
         // Message-trim tools.
         "compress" => {
             let p: CompressParams =
@@ -2046,6 +2299,50 @@ async fn dispatch_tool(
             let p: TrimStatusParams =
                 serde_json::from_value(body).map_err(bad_request)?;
             server.trim_dashboard_open(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+
+        // Scheduler.
+        "schedule_recipe" => {
+            let p: ScheduleRecipeParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.schedule_recipe(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "list_schedules" => {
+            let p: ListSchedulesParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.list_schedules(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "delete_schedule" => {
+            let p: DeleteScheduleParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.delete_schedule(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "enable_schedule" => {
+            let p: EnableScheduleParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.enable_schedule(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+
+        // Folder keys (PFC1).
+        "build_folder_key" => {
+            let p: BuildFolderKeyParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.build_folder_key(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "get_folder_key" => {
+            let p: GetFolderKeyParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.get_folder_key(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "list_folder_keys" => {
+            let p: ListFolderKeysParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.list_folder_keys(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "decompress_with_folder_key" => {
+            let p: DecompressWithFolderKeyParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.decompress_with_folder_key(Parameters(p)).await.map_err(mcp_err_to_http)
         }
 
         _ => Err((StatusCode::NOT_FOUND, format!("Unknown tool: {name}"))),

@@ -6,6 +6,7 @@
 //! safe: style first, then the private-key dictionary.
 
 use crate::trim::caveman::{self, CavemanLevel};
+use crate::trim::code_regions::{detect_all_regions, split_by_regions, DetectMode};
 use crate::trim::pfc1::{self, CompressionKey, CompressionStats};
 
 /// A single stage in the trim pipeline.
@@ -98,11 +99,31 @@ pub fn run(text: &str, stages: &[StageSpec], base_key: &CompressionKey) -> Pipel
                 });
                 current = out;
             }
-            StageSpec::Pfc1 { emit_header } => {
+StageSpec::Pfc1 { emit_header } => {
                 let key = pfc1::analyze_and_build(&current, base_key);
-                let body = pfc1::compress_text(&current, &key);
+                
+                // Code-aware compression: detect all code regions (fenced, inline, bracketed)
+                // and only compress prose segments. Track which symbols are actually used.
+                let regions = detect_all_regions(&current, DetectMode::Full);
+                let segments = split_by_regions(&current, &regions);
+                
+                let mut compressed_body = String::with_capacity(current.len());
+                let mut used_symbols = Vec::new();
+                
+                for (is_code, content) in segments {
+                    if is_code {
+                        compressed_body.push_str(&content);
+                    } else {
+                        // Track which symbols were used during compression
+                        let (compressed, segment_used) = pfc1::compress_text(&content, &key);
+                        compressed_body.push_str(&compressed);
+                        used_symbols.extend(segment_used);
+                    }
+                }
+                
+                let body = compressed_body;
                 let header = if *emit_header {
-                    pfc1::generate_header(&key)
+                    pfc1::generate_header(&key, &used_symbols)
                 } else {
                     String::new()
                 };
@@ -120,10 +141,10 @@ pub fn run(text: &str, stages: &[StageSpec], base_key: &CompressionKey) -> Pipel
                         pfc1_key: None,
                         header_bytes: 0,
                     });
-} else {
+                } else {
                     let stats = pfc1::calculate_stats(&current, &candidate, &key);
                     let header_bytes = if *emit_header {
-                        pfc1::generate_header(&key).len()
+                        pfc1::generate_header(&key, &used_symbols).len()
                     } else {
                         0
                     };

@@ -72,6 +72,55 @@ enum Command {
         #[arg(long, default_value = "./data")]
         data_dir: std::path::PathBuf,
     },
+
+    /// Manage per-folder PFC1 phonetic keys (scan, list, decompress).
+    FolderKey {
+        #[command(subcommand)]
+        action: FolderKeyAction,
+    },
+}
+
+/// Subcommands for `herdr-mcp folder-key`.
+#[derive(Debug, Clone, clap::Subcommand)]
+enum FolderKeyAction {
+    /// Scan a folder and write a self-contained PFC1 key to `<folder>/.pfc1_key.json`.
+    Build {
+        /// Folder to scan recursively for text/markdown files.
+        folder: std::path::PathBuf,
+        /// Data directory (holds the master key + central registry).
+        #[arg(long, default_value = "./data")]
+        data_dir: std::path::PathBuf,
+        /// Minimum term frequency (default 3).
+        #[arg(long)]
+        min_frequency: Option<usize>,
+        /// Minimum term length in bytes (default 4).
+        #[arg(long)]
+        min_length: Option<usize>,
+        /// Maximum symbols in the key (default 85).
+        #[arg(long)]
+        max_terms: Option<usize>,
+        /// Also write the key to the central registry.
+        #[arg(long)]
+        persist_central: bool,
+        /// Fold accepted terms into the persistent master key (default on).
+        #[arg(long, default_value_t = true)]
+        learn_master: bool,
+    },
+    /// List all folder keys in the central registry.
+    List {
+        #[arg(long, default_value = "./data")]
+        data_dir: std::path::PathBuf,
+    },
+    /// Show a folder's key (discovered by walking up the tree).
+    Show {
+        folder: std::path::PathBuf,
+    },
+    /// Decompress text using a folder's key (header-less).
+    Decompress {
+        folder: std::path::PathBuf,
+        /// PFC1-compressed text to decode.
+        text: String,
+    },
 }
 
 #[tokio::main]
@@ -101,7 +150,64 @@ async fn main() -> Result<()> {
             herdr_socket,
         } => run_serve(http, http_only, data_dir, herdr_socket).await,
         Command::Dashboard { data_dir } => run_dashboard(&data_dir).await,
+        Command::FolderKey { action } => run_folder_key(action).await,
     }
+}
+
+/// Dispatch for `herdr-mcp folder-key`.
+async fn run_folder_key(action: FolderKeyAction) -> Result<()> {
+    match action {
+        FolderKeyAction::Build {
+            folder,
+            data_dir,
+            min_frequency,
+            min_length,
+            max_terms,
+            persist_central,
+            learn_master,
+        } => {
+            let mut opts = crate::trim::folder_key::FolderKeyOptions::default();
+            if let Some(v) = min_frequency {
+                opts.min_frequency = v;
+            }
+            if let Some(v) = min_length {
+                opts.min_length = v;
+            }
+            if let Some(v) = max_terms {
+                opts.max_terms = v;
+            }
+            opts.persist_central = persist_central;
+            opts.learn_master = learn_master;
+            let key = crate::trim::folder_key::build_folder_key(&folder, &opts, &data_dir).await?;
+            println!(
+                "Built key for {} — {} terms ({} phrases, {} code terms), {} files scanned",
+                folder.display(),
+                key.stats.terms_accepted,
+                key.stats.phrases_found,
+                key.stats.code_terms,
+                key.stats.files_scanned,
+            );
+            println!("Key file: {}", folder.join(crate::trim::folder_key::FOLDER_KEY_FILE).display());
+        }
+        FolderKeyAction::List { data_dir } => {
+            let keys = crate::trim::folder_key::list_central_keys(&data_dir).await;
+            println!("{} folder key(s) in registry:", keys.len());
+            for k in &keys {
+                println!("  {} — {} terms", k.folder.display(), k.key.len());
+            }
+        }
+        FolderKeyAction::Show { folder } => {
+            match crate::trim::folder_key::load_folder_key(&folder).await? {
+                Some(k) => println!("{}", serde_json::to_string_pretty(&k)?),
+                None => println!("No folder key found for {}", folder.display()),
+            }
+        }
+        FolderKeyAction::Decompress { folder, text } => {
+            let out = crate::trim::folder_key::decompress_with_folder_key(&folder, &text).await;
+            println!("{out}");
+        }
+    }
+    Ok(())
 }
 
 /// One-shot message-trim runner (CLI).
