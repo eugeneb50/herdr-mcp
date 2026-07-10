@@ -6,11 +6,14 @@
 //!
 //! They compose through an ordered [`pipeline`] and are wired into the MCP tools
 //! and the a2a primitives (`agent_message` / `agent_read`) via per-pane
-//! [`policy`]. [`eval`] lets the model verify its own savings.
+//! [`policy`]. [`eval`] lets the model verify its own savings. [`stats`]
+//! tracks cumulative savings per workspace. [`runner`] provides the CLI entry.
 
 pub mod caveman;
+pub mod dashboard;
 pub mod eval;
 pub mod pfc1;
 pub mod pipeline;
 pub mod policy;
 pub mod runner;
+pub mod stats;

@@ -65,6 +65,13 @@ enum Command {
         #[arg(trailing_var_arg = true, value_name = "TEXT")]
         text: Vec<String>,
     },
+
+    /// Open a live ANSI dashboard of trim savings across all workspaces.
+    Dashboard {
+        /// Data directory holding the per-workspace trim stats.
+        #[arg(long, default_value = "./data")]
+        data_dir: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -93,6 +100,7 @@ async fn main() -> Result<()> {
             data_dir,
             herdr_socket,
         } => run_serve(http, http_only, data_dir, herdr_socket).await,
+        Command::Dashboard { data_dir } => run_dashboard(&data_dir).await,
     }
 }
 
@@ -113,7 +121,7 @@ async fn run_trim(
         anyhow::bail!("no input: provide TEXT or --file");
     }
 
-    let runner = trim::runner::PipelineRunner::new(data_dir);
+    let runner = trim::runner::PipelineRunner::new(data_dir).await;
 
     if decompress {
         let out = runner.decompress(&input);
@@ -130,7 +138,7 @@ async fn run_trim(
             Err(e) => anyhow::bail!(e),
         }
     };
-    let result = runner.run(&input, &stages);
+    let result = runner.run(&input, &stages).await;
     let report = serde_json::json!({
         "input_bytes": result.input.len(),
         "output_bytes": result.output.len(),
@@ -146,6 +154,11 @@ async fn run_trim(
     });
     println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
+}
+
+/// Run the live trim-savings dashboard (TUI).
+async fn run_dashboard(data_dir: &std::path::Path) -> Result<()> {
+    trim::dashboard::run(data_dir).await
 }
 
 /// Run the herdr MCP server (stdio and/or HTTP).

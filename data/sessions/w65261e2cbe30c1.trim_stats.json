@@ -1,0 +1,14 @@
+{
+  "gross_saved_bytes": 14,
+  "net_saved_bytes": 14,
+  "messages_trimmed": 1,
+  "total_input_bytes": 128,
+  "per_pane": {
+    "w65261e2cbe30c1:p1": {
+      "gross_saved_bytes": 14,
+      "net_saved_bytes": 14,
+      "messages_trimmed": 1,
+      "last_trimmed_at": 1783637184
+    }
+  }
+}

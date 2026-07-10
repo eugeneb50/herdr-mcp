@@ -15,6 +15,7 @@ use crate::herdr_client::AgentRegistry;
 use crate::trim::pfc1::CompressionKey;
 use crate::trim::pipeline;
 use crate::trim::policy::TrimPolicy;
+use crate::trim::stats;
 
 // ── Type-safe IDs ────────────────────────────────────────────────────────
 
@@ -356,6 +357,10 @@ pub struct AgentSpawnParams {
     /// Wait for this agent to reach idle before returning (default true).
     #[serde(default = "default_true_bool")]
     pub wait_idle: bool,
+    /// Optional friendly label for this agent (addressable via `agent_message`
+    /// `target`). Renames the pane and stores the label in the registry.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 /// Parameters for the `agent_message` a2a step (agent-to-agent message).
@@ -431,6 +436,10 @@ pub struct CompressParams {
     /// Ordered stage list, e.g. `["caveman:full", "pfc1"]`.
     #[serde(default)]
     pub stages: Vec<String>,
+    /// Optional workspace id to attribute the trim stats to (surfaced in
+    /// `trim_status` / badge). If omitted, stats are not persisted.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
 }
 
 /// Parameters for the `decompress` trim tool.
@@ -481,6 +490,55 @@ pub struct TrimBenchParams {
 
 fn default_bench_level() -> String {
     "caveman:full,pfc1".to_string()
+}
+
+/// Parameters for the trim aggregate/diagnose tools.
+#[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct TrimStatusParams {
+    /// Workspace id to scope the query. If omitted, aggregates all workspaces.
+    #[serde(default)]
+    pub workspace_id: Option<String>,
+}
+
+/// Per-pane savings breakdown returned by `trim_status`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PaneStatus {
+    pub gross_saved_bytes: usize,
+    pub net_saved_bytes: usize,
+    pub messages_trimmed: u64,
+}
+
+/// Aggregate trim savings across a workspace (or all workspaces).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TrimStatusResponse {
+    pub workspace_net_pct: f64,
+    pub workspace_savings_pct: f64,
+    pub gross_saved_bytes: usize,
+    pub net_saved_bytes: usize,
+    pub total_input_bytes: usize,
+    pub messages_trimmed: u64,
+    pub per_pane: HashMap<String, PaneStatus>,
+    pub active_policies: HashMap<String, Vec<String>>,
+}
+
+/// A single round-trip sample used by `trim_diagnose`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SampleRoundtrip {
+    pub input: String,
+    pub compressed: String,
+    pub decompressed: String,
+    pub matches: bool,
+}
+
+/// End-to-end readiness report returned by `trim_diagnose`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnoseReport {
+    pub pipeline_roundtrip_ok: bool,
+    pub pfc1_memory_valid: bool,
+    pub active_policies: usize,
+    pub badge_reachable: bool,
+    pub sample_roundtrip: Option<SampleRoundtrip>,
 }
 
 fn default_true_bool() -> bool {
@@ -536,6 +594,30 @@ impl HerdrMcpServer {
         };
         self.scheduler.set_executor(exec_fn).await;
         let _ = self.scheduler.load_from_disk().await;
+
+        // Trim badge poller: every 20s, scan workspace stats and refresh pane
+        // badges so the savings % stays fresh even without live traffic.
+        // Best-effort: never crashes the loop on I/O or RPC errors.
+        let poller = self.clone();
+        tokio::spawn(async move {
+            const POLL_SECS: u64 = 20;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(POLL_SECS)).await;
+                let sessions = poller.data_dir.join("sessions");
+                let mut entries = match tokio::fs::read_dir(&sessions).await {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let fname = entry.file_name().to_string_lossy().to_string();
+                    if !fname.ends_with(".trim_stats.json") {
+                        continue;
+                    }
+                    let ws = fname.trim_end_matches(".trim_stats.json");
+                    poller.push_badge_for_workspace(ws).await;
+                }
+            }
+        });
     }
 
     // ── Trim helpers ─────────────────────────────────────────────────
@@ -560,7 +642,9 @@ impl HerdrMcpServer {
                     }
                 };
                 let base = self.base_key_for(None).await;
-                return pipeline::run(text, &stages, &base).output;
+                let r = pipeline::run(text, &stages, &base);
+                self.record_trim_result(pane, &r).await;
+                return r.output;
             }
         }
         // 2. Fall back to the target's per-pane policy.
@@ -581,23 +665,71 @@ impl HerdrMcpServer {
                         self.save_pfc1_key(&ws, &last).await;
                     }
                 }
+                self.record_trim_result(pane, &r).await;
                 return r.output;
             }
         }
         text.to_string()
     }
 
+    /// Record a pipeline result against the pane's workspace stats and refresh
+    /// its badge. Best-effort: stats I/O or badge push failures are logged,
+    /// never fatal. Only records when bytes were actually saved.
+    async fn record_trim_result(&self, pane: &str, r: &pipeline::PipelineResult) {
+        let Some(ws) = self.registry.get(pane).await.map(|h| h.workspace_id) else {
+            return;
+        };
+        if r.input.len().saturating_sub(r.output.len()) == 0 {
+            return; // nothing actually saved; don't pollute accounting
+        }
+        let mut s = stats::load_stats(&self.data_dir, &ws).await;
+        s.record_trim(pane, r.input.len(), r.output.len(), r.total_header_bytes);
+        if let Err(e) = stats::save_stats(&self.data_dir, &ws, &s).await {
+            tracing::warn!("trim: failed to save stats for {ws}: {e}");
+        }
+        self.push_badge_for_workspace(&ws).await;
+    }
+
+    /// Push a savings-% badge to every pane in `ws` that has an active trim
+    /// policy. Best-effort: `herdr pane report-metadata` failures are swallowed.
+    async fn push_badge_for_workspace(&self, ws: &str) {
+        let s = stats::load_stats(&self.data_dir, ws).await;
+        let net_pct = s.savings_pct().round() as i64;
+        if net_pct <= 0 {
+            return;
+        }
+        let badge = format!("-{net_pct}%");
+        for h in self.registry.list_for_ws(ws).await {
+            if let Some(ref policy) = h.trim_policy {
+                if policy.is_active() {
+                    let _ = herdr_cli(&[
+                        "pane",
+                        "report-metadata",
+                        &h.pane_id,
+                        "--source",
+                        "herdr-mcp",
+                        "--custom-status",
+                        &badge,
+                        "--ttl-ms",
+                        "25000",
+                    ])
+                    .await;
+                }
+            }
+        }
+    }
+
     /// Build the PFC1 base key: the default key merged with any persisted
     /// steady-state memory (shared across workspaces in the data dir).
     async fn base_key_for(&self, _ws: Option<&str>) -> CompressionKey {
-        let runner = crate::trim::runner::PipelineRunner::new(&self.data_dir);
+        let runner = crate::trim::runner::PipelineRunner::new(&self.data_dir).await;
         runner.base_key().clone()
     }
 
     /// Persist a PFC1 key as steady-state memory (union merge).
     async fn save_pfc1_key(&self, _ws: &str, key: &CompressionKey) {
         let path = self.data_dir.join(crate::trim::runner::MEMORY_FILE);
-        crate::trim::runner::save_memory(&path, key);
+        crate::trim::runner::save_memory(&path, key).await;
     }
 
     // ── Discovery ──────────────────────────────────────────────────────
@@ -895,6 +1027,7 @@ impl HerdrMcpServer {
             split,
             needs,
             wait_idle,
+            label,
         }): Parameters<AgentSpawnParams>,
     ) -> Result<CallToolResult, McpError> {
         // Wait for dependencies first (reliable: driven by herdr's agent state).
@@ -944,6 +1077,10 @@ impl HerdrMcpServer {
 
         if !pane_id.is_empty() {
             self.registry.upsert(&pane_id, &ws, "", &agent, &role).await;
+            if let Some(ref lbl) = label {
+                let _ = herdr_cli(&["pane", "rename", &pane_id, lbl]).await;
+                self.registry.set_label(&pane_id, lbl).await;
+            }
         }
 
         let mut status = "working".to_string();
@@ -1017,6 +1154,10 @@ impl HerdrMcpServer {
         };
         self.registry.set_output(&pane, stored.clone()).await;
         let handle = self.registry.get(&pane).await;
+        // Refresh the pane's savings badge (read-only; no stats recorded).
+        if let Some(ref h) = handle {
+            self.push_badge_for_workspace(&h.workspace_id).await;
+        }
         Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
             "pane_id": pane,
             "role": handle.as_ref().map(|h| h.role.clone()).unwrap_or_default(),
@@ -1093,11 +1234,20 @@ impl HerdrMcpServer {
     #[tool(description = "Compress text via an ordered pipeline of trim stages (e.g. [\"caveman:full\",\"pfc1\"]). Returns input/output sizes, per-stage stats, and the compressed payload with its PFC1 header.")]
     async fn compress(
         &self,
-        Parameters(CompressParams { text, stages }): Parameters<CompressParams>,
+        Parameters(CompressParams { text, stages, workspace_id }): Parameters<CompressParams>,
     ) -> Result<CallToolResult, McpError> {
         let parsed = pipeline::parse_stage_specs(&stages).map_err(to_mcp_err)?;
-        let runner = crate::trim::runner::PipelineRunner::new(&self.data_dir);
-        let r = runner.run(&text, &parsed);
+        let runner = crate::trim::runner::PipelineRunner::new(&self.data_dir).await;
+        let r = runner.run(&text, &parsed).await;
+        // Optionally attribute this trim to a workspace's running stats.
+        if let Some(ref ws) = workspace_id {
+            if r.input.len().saturating_sub(r.output.len()) > 0 {
+                let mut s = stats::load_stats(&self.data_dir, ws).await;
+                s.record_trim("cli", r.input.len(), r.output.len(), r.total_header_bytes);
+                let _ = stats::save_stats(&self.data_dir, ws, &s).await;
+                self.push_badge_for_workspace(ws).await;
+            }
+        }
         let stage_reports: Vec<serde_json::Value> = r
             .stages
             .iter()
@@ -1163,7 +1313,7 @@ impl HerdrMcpServer {
         &self,
         Parameters(TrimEvalParams { text, stages }): Parameters<TrimEvalParams>,
     ) -> Result<CallToolResult, McpError> {
-        let runner = crate::trim::runner::PipelineRunner::new(&self.data_dir);
+        let runner = crate::trim::runner::PipelineRunner::new(&self.data_dir).await;
         let report = crate::trim::eval::trim_eval(&text, &stages, runner.base_key());
         Ok(CallToolResult::success(vec![Content::json(report).map_err(to_mcp_err)?]))
     }
@@ -1173,9 +1323,210 @@ impl HerdrMcpServer {
         &self,
         Parameters(TrimBenchParams { corpus, level }): Parameters<TrimBenchParams>,
     ) -> Result<CallToolResult, McpError> {
-        let runner = crate::trim::runner::PipelineRunner::new(&self.data_dir);
+        let runner = crate::trim::runner::PipelineRunner::new(&self.data_dir).await;
         let report = crate::trim::eval::trim_bench(&corpus, &level, runner.base_key());
         Ok(CallToolResult::success(vec![Content::json(report).map_err(to_mcp_err)?]))
+    }
+
+    /// Aggregate trim savings across a workspace (or all workspaces). Shared by
+    /// the `trim_status` tool and the web dashboard.
+    async fn aggregate_trim_status(&self, ws: Option<&str>) -> TrimStatusResponse {
+        let mut resp = TrimStatusResponse::default();
+
+        // Determine the workspace set to scan.
+        let ws_list: Vec<String> = match ws {
+            Some(w) => vec![w.to_string()],
+            None => {
+                let sessions = self.data_dir.join("sessions");
+                let mut list = Vec::new();
+                if let Ok(mut entries) = tokio::fs::read_dir(&sessions).await {
+                    while let Ok(Some(e)) = entries.next_entry().await {
+                        let fname = e.file_name().to_string_lossy().to_string();
+                        if fname.ends_with(".trim_stats.json") {
+                            list.push(fname.trim_end_matches(".trim_stats.json").to_string());
+                        }
+                    }
+                }
+                list
+            }
+        };
+
+        let mut gross = 0usize;
+        let mut net = 0usize;
+        let mut total_in = 0usize;
+        let mut msgs = 0u64;
+        for w in &ws_list {
+            let s = stats::load_stats(&self.data_dir, w).await;
+            gross = gross.saturating_add(s.gross_saved_bytes);
+            net = net.saturating_add(s.net_saved_bytes);
+            total_in = total_in.saturating_add(s.total_input_bytes);
+            msgs = msgs.saturating_add(s.messages_trimmed);
+            for (pane, ps) in &s.per_pane {
+                let key = format!("{w}:{pane}");
+                let entry = resp.per_pane.entry(key).or_default();
+                entry.gross_saved_bytes = entry.gross_saved_bytes.saturating_add(ps.gross_saved_bytes);
+                entry.net_saved_bytes = entry.net_saved_bytes.saturating_add(ps.net_saved_bytes);
+                entry.messages_trimmed = entry.messages_trimmed.saturating_add(ps.messages_trimmed);
+            }
+            for h in self.registry.list_for_ws(w).await {
+                if let Some(ref policy) = h.trim_policy {
+                    if policy.is_active() {
+                        resp.active_policies
+                            .insert(h.pane_id.clone(), policy.stages.clone());
+                    }
+                }
+            }
+        }
+
+        resp.gross_saved_bytes = gross;
+        resp.net_saved_bytes = net;
+        resp.total_input_bytes = total_in;
+        resp.messages_trimmed = msgs;
+        resp.workspace_net_pct = if gross > 0 {
+            (net as f64 / gross as f64) * 100.0
+        } else {
+            0.0
+        };
+        resp.workspace_savings_pct = if total_in > 0 {
+            (gross as f64 / total_in as f64) * 100.0
+        } else {
+            0.0
+        };
+        resp
+    }
+
+    #[tool(description = "Aggregate trim savings for a workspace (or all). Returns net/savings %, per-pane breakdown, and active policies.")]
+    async fn trim_status(
+        &self,
+        Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self.aggregate_trim_status(workspace_id.as_deref()).await;
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::to_value(&resp).map_err(to_mcp_err)?)
+                .map_err(to_mcp_err)?,
+        ]))
+    }
+
+    /// Build the end-to-end readiness report (shared by `trim_diagnose` tool
+    /// and the `/api/trim/diagnose` HTTP route).
+    async fn build_diagnose_report(&self, ws: Option<&str>) -> DiagnoseReport {
+        // 1. Round-trip test: compress then decompress a fixed sample.
+        let sample = "The quick brown fox jumps over the lazy dog. The fox is quick and the dog is lazy.";
+        let stages = pipeline::parse_stage_specs(&["caveman:full".to_string(), "pfc1".to_string()])
+            .unwrap_or_default();
+        let base = self.base_key_for(None).await;
+        let r = pipeline::run(sample, &stages, &base);
+        let compressed_with_header = r.stages.iter().any(|s| s.pfc1_key.is_some());
+        let decompressed = pipeline::decompress_pfc1(&r.output, Some(&base));
+        let roundtrip_ok = if compressed_with_header {
+            decompressed == sample
+        } else {
+            true
+        };
+
+        // 2. PFC1 memory file validity.
+        let mem_path = self.data_dir.join(crate::trim::runner::MEMORY_FILE);
+        let pfc1_memory_valid = tokio::fs::read_to_string(&mem_path)
+            .await
+            .ok()
+            .and_then(|c| serde_json::from_str::<CompressionKey>(&c).ok())
+            .is_some();
+
+        // 3. Active policy count.
+        let active_policies = if let Some(ref w) = ws {
+            self.registry
+                .list_for_ws(w)
+                .await
+                .iter()
+                .filter(|h| h.trim_policy.as_ref().map(|p| p.is_active()).unwrap_or(false))
+                .count()
+        } else {
+            self.registry
+                .inner_snapshot()
+                .await
+                .iter()
+                .filter(|h| h.trim_policy.as_ref().map(|p| p.is_active()).unwrap_or(false))
+                .count()
+        };
+
+        // 4. Badge reachability: at least one registered pane exists.
+        let badge_reachable = !self.registry.inner_snapshot().await.is_empty();
+
+        DiagnoseReport {
+            pipeline_roundtrip_ok: roundtrip_ok,
+            pfc1_memory_valid,
+            active_policies,
+            badge_reachable,
+            sample_roundtrip: Some(SampleRoundtrip {
+                input: sample.to_string(),
+                compressed: r.output,
+                decompressed,
+                matches: roundtrip_ok,
+            }),
+        }
+    }
+
+    #[tool(description = "End-to-end trim readiness check: pipeline round-trip integrity, PFC1 memory validity, active policy count, and badge reachability.")]
+    async fn trim_diagnose(
+        &self,
+        Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let report = self.build_diagnose_report(workspace_id.as_deref()).await;
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::to_value(&report).map_err(to_mcp_err)?)
+                .map_err(to_mcp_err)?,
+        ]))
+    }
+
+    #[tool(description = "Fire a herdr notification summarizing the session's trim savings.")]
+    async fn trim_summary(
+        &self,
+        Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let resp = self.aggregate_trim_status(workspace_id.as_deref()).await;
+        let body = format!(
+            "Session savings: {:.1}% net ({} messages, {} bytes net saved)",
+            resp.workspace_savings_pct, resp.messages_trimmed, resp.net_saved_bytes
+        );
+        let raw = herdr_cli(&["notification", "show", "herdr-mcp trim", "--body", &body])
+            .await?;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "sent": true,
+            "body": body,
+            "herdr_output": raw,
+        }))
+        .map_err(to_mcp_err)?]))
+    }
+
+    #[tool(description = "Open a herdr split pane running the live trim dashboard.")]
+    async fn trim_dashboard_open(
+        &self,
+        Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut cli = vec!["pane", "split"];
+        if let Some(ref w) = workspace_id {
+            cli.extend(["--workspace", w]);
+        }
+        let raw = herdr_cli(&cli).await?;
+        let value: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
+        let pane_id = extract_pane_id(&value).unwrap_or_default();
+        if pane_id.is_empty() {
+            return Err(McpError {
+                code: rmcp::model::ErrorCode(-32000),
+                message: "trim: failed to open dashboard pane".into(),
+                data: None,
+            });
+        }
+        let data_dir = self.data_dir.display().to_string();
+        let cmd = format!("herdr-mcp dashboard --data-dir {data_dir}");
+        let _ = herdr_cli(&["pane", "send-text", &pane_id, &cmd]).await;
+        let _ = herdr_cli(&["pane", "send-keys", &pane_id, "Enter"]).await;
+        Ok(CallToolResult::success(vec![Content::json(serde_json::json!({
+            "pane_id": pane_id,
+            "title": "trim-dashboard",
+        }))
+        .map_err(to_mcp_err)?]))
     }
 }
 
@@ -1391,7 +1742,7 @@ async fn resolve_pane_id(
 use std::collections::HashMap;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
     Json, Router,
@@ -1412,6 +1763,10 @@ pub async fn start_http(server: HerdrMcpServer, port: u16) -> anyhow::Result<()>
         .route("/api/variables", get(list_variables_handler).post(save_variable_handler))
         .route("/api/variables/{key}", get(get_variable_handler).delete(delete_variable_handler))
         .route("/api/executions/{id}", get(get_execution_handler))
+        .route("/api/trim/status", get(trim_status_http_handler))
+        .route("/api/trim/diagnose", post(trim_diagnose_http_handler))
+        .route("/api/trim/summary", post(trim_summary_http_handler))
+        .route("/api/trim/dashboard/open", post(trim_dashboard_open_http_handler))
         .layer(CorsLayer::permissive())
         .with_state(server);
 
@@ -1450,6 +1805,54 @@ fn mcp_err_to_http(e: McpError) -> (StatusCode, String) {
 
 fn bad_request(e: impl ToString) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, e.to_string())
+}
+
+/// `GET /api/trim/status?workspace_id=w1` — aggregate trim savings.
+async fn trim_status_http_handler(
+    State(server): State<HerdrMcpServer>,
+    Query(params): Query<TrimStatusParams>,
+) -> Json<TrimStatusResponse> {
+    Json(server.aggregate_trim_status(params.workspace_id.as_deref()).await)
+}
+
+/// `POST /api/trim/diagnose` — end-to-end readiness check.
+async fn trim_diagnose_http_handler(
+    State(server): State<HerdrMcpServer>,
+    body: Option<Json<serde_json::Value>>,
+) -> Json<DiagnoseReport> {
+    let ws = body
+        .and_then(|j| j.0.get("workspace_id").and_then(|v| v.as_str()).map(|s| s.to_string()));
+    Json(server.build_diagnose_report(ws.as_deref()).await)
+}
+
+/// `POST /api/trim/summary` — fire a savings notification.
+async fn trim_summary_http_handler(
+    State(server): State<HerdrMcpServer>,
+    body: Option<Json<serde_json::Value>>,
+) -> Json<serde_json::Value> {
+    let p: TrimStatusParams = body
+        .and_then(|j| serde_json::from_value(j.0).ok())
+        .unwrap_or_default();
+    let json = match server.trim_summary(Parameters(p)).await {
+        Ok(res) => serde_json::to_value(&res).unwrap_or(serde_json::Value::Null),
+        Err(e) => serde_json::json!({ "error": e.message.to_string() }),
+    };
+    Json(json)
+}
+
+/// `POST /api/trim/dashboard/open` — open a live dashboard pane.
+async fn trim_dashboard_open_http_handler(
+    State(server): State<HerdrMcpServer>,
+    body: Option<Json<serde_json::Value>>,
+) -> Json<serde_json::Value> {
+    let p: TrimStatusParams = body
+        .and_then(|j| serde_json::from_value(j.0).ok())
+        .unwrap_or_default();
+    let json = match server.trim_dashboard_open(Parameters(p)).await {
+        Ok(res) => serde_json::to_value(&res).unwrap_or(serde_json::Value::Null),
+        Err(e) => serde_json::json!({ "error": e.message.to_string() }),
+    };
+    Json(json)
 }
 
 /// Dispatch a tool call by name, deserializing the JSON body into the appropriate
@@ -1621,6 +2024,28 @@ async fn dispatch_tool(
             let p: TrimBenchParams =
                 serde_json::from_value(body).map_err(bad_request)?;
             server.trim_bench(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+
+        // Aggregation / diagnostics tools.
+        "trim_status" => {
+            let p: TrimStatusParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.trim_status(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "trim_diagnose" => {
+            let p: TrimStatusParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.trim_diagnose(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "trim_summary" => {
+            let p: TrimStatusParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.trim_summary(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "trim_dashboard_open" => {
+            let p: TrimStatusParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.trim_dashboard_open(Parameters(p)).await.map_err(mcp_err_to_http)
         }
 
         _ => Err((StatusCode::NOT_FOUND, format!("Unknown tool: {name}"))),

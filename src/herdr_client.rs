@@ -16,10 +16,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 
 use crate::persistence::Persistence;
-use crate::trim::policy::TrimPolicy;
+use crate::trim::policy::{TrimPolicy, TrimDirection};
 
 /// Agent lifecycle state, mirroring herdr's `AgentStatus` (snake_case).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +67,9 @@ pub struct AgentHandle {
     /// Human-assigned role used for `{{role.output}}` interpolation (e.g. "agentA").
     #[serde(default)]
     pub role: String,
+    /// Human-assigned pane label (set via `herdr pane rename`), used for targeting.
+    #[serde(default)]
+    pub label: String,
     #[serde(default)]
     pub status: String,
     /// Pane output captured at last idle — the agent's work product.
@@ -95,6 +98,11 @@ impl AgentRegistry {
         }
     }
 
+    /// Data directory backing persistence (stats, blobs, recipes).
+    pub fn data_dir(&self) -> &std::path::Path {
+        self.persistence.data_dir()
+    }
+
     /// Register or update an agent handle at the given pane, preserving any
     /// previously captured output/role.
     pub async fn upsert(
@@ -115,6 +123,7 @@ impl AgentRegistry {
                 tab_id: String::new(),
                 agent: String::new(),
                 role: String::new(),
+                label: String::new(),
                 status: String::new(),
                 output: String::new(),
                 trim_policy: None,
@@ -195,14 +204,44 @@ impl AgentRegistry {
             .and_then(|h| h.trim_policy.clone())
     }
 
-    /// Resolve a target (role or pane id) to a pane id within a workspace.
+    /// Set (or clear) the pane label. Persisted.
+    pub async fn set_label(&self, pane_id: &str, label: &str) {
+        let ws = {
+            let mut map = self.inner.write().await;
+            if let Some(h) = map.get_mut(pane_id) {
+                h.label = label.to_string();
+                h.updated_at = chrono::Utc::now().timestamp();
+                h.workspace_id.clone()
+            } else {
+                return;
+            }
+        };
+        self.persist(&ws).await;
+        // Note: caller should call `herdr pane rename` via herdr_cli if needed
+    }
+
+    /// Read the label for a pane, if any.
+    pub async fn get_label(&self, pane_id: &str) -> Option<String> {
+        self.inner
+            .read()
+            .await
+            .get(pane_id)
+            .and_then(|h| if h.label.is_empty() { None } else { Some(h.label.clone()) })
+    }
+
+    /// Resolve a target (role, pane id, or label) to a pane id within a workspace.
+    /// When `ws` is empty, resolution spans all workspaces (used by the a2a tools
+    /// that address agents purely by role/label).
     pub async fn resolve(&self, ws: &str, target: &str) -> Option<String> {
         let map = self.inner.read().await;
         if map.contains_key(target) {
             return Some(target.to_string());
         }
         map.values()
-            .find(|h| h.workspace_id == ws && h.role == target)
+            .find(|h| {
+                (ws.is_empty() || h.workspace_id == ws)
+                    && (h.role == target || h.label == target)
+            })
             .map(|h| h.pane_id.clone())
     }
 
@@ -308,26 +347,37 @@ impl HerdrClient {
             use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
             let mut stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
-            let req = serde_json::json!({
-                "id": "herdr-mcp-subscribe",
-                "method": "events.subscribe",
-                "params": {
-                    "subscriptions": [
-                        { "type": "pane.agent_status_changed" }
-                    ]
+            let (mut read_half, mut write_half) = stream.into_split();
+
+            // Channel to push additional subscribe requests (e.g. when a new
+            // workspace appears and we must (re)subscribe its panes).
+            let (sub_tx, mut sub_rx) = mpsc::channel::<serde_json::Value>(16);
+
+            // Writer task drains the channel and writes subscribe requests.
+            let writer_task = tokio::spawn(async move {
+                while let Some(req) = sub_rx.recv().await {
+                    if write_half
+                        .write_all(format!("{}\n", req).as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let _ = write_half.flush().await;
                 }
             });
-            stream
-                .write_all(format!("{}\n", req).as_bytes())
-                .await?;
-            stream.flush().await?;
 
-            let (read_half, _write_half) = stream.into_split();
+            // Initial subscription: workspace events (global) + per-pane status
+            // events. This also populates the registry from the live pane list.
+            let initial = self.build_subscribe_request().await;
+            let _ = sub_tx.send(initial).await;
+
             let mut lines = BufReader::new(read_half).lines();
             // First line is the subscribe ack.
             if let Some(line) = lines.next_line().await? {
                 if let Ok(ack) = serde_json::from_str::<serde_json::Value>(&line) {
                     if ack.get("error").is_some() {
+                        writer_task.abort();
                         anyhow::bail!("events.subscribe rejected: {line}");
                     }
                 }
@@ -338,9 +388,14 @@ impl HerdrClient {
                     continue;
                 }
                 if let Ok(event) = serde_json::from_str::<SubEvent>(&line) {
-                    self.handle_event(event).await;
+                    let client = self.clone();
+                    let sub_tx = sub_tx.clone();
+                    tokio::spawn(async move {
+                        client.handle_event(event, sub_tx).await;
+                    });
                 }
             }
+            writer_task.abort();
             anyhow::bail!("event stream ended")
         }
         #[cfg(not(unix))]
@@ -351,29 +406,146 @@ impl HerdrClient {
         }
     }
 
-    async fn handle_event(&self, event: SubEvent) {
-        if event.event != "pane.agent_status_changed" {
-            return;
-        }
-        let pane_id = event.data.pane_id;
-        let ws = event.data.workspace_id;
-        let agent = event.data.agent.clone().unwrap_or_default();
-        self.registry
-            .upsert(&pane_id, &ws, "", &agent, "")
-            .await;
-        if let Some(status) = event.data.agent_status.as_deref().and_then(AgentStatus::parse) {
-            let status_str = status.as_str().to_string();
-            self.registry.set_status(&pane_id, &status_str).await;
-            if status == AgentStatus::Idle {
-                // Capture the work product: pane output at idle.
-                let client = self.clone();
-                let pane = pane_id.clone();
-                tokio::spawn(async move {
-                    if let Ok(out) = read_pane_output(&pane).await {
-                        client.registry.set_output(&pane, out).await;
-                    }
-                });
+    /// Build a `events.subscribe` request for the current set of panes.
+    ///
+    /// herdr's API requires `params.pane_id: null` for global (workspace-level)
+    /// subscriptions, while pane-scoped event types must carry the pane id in
+    /// each subscription entry. As a side effect this also seeds the registry
+    /// from the live `pane list` so the a2a tools can resolve targets by
+    /// pane id / role / label without waiting for the first event.
+    async fn build_subscribe_request(&self) -> serde_json::Value {
+        let mut pane_subs: Vec<serde_json::Value> = Vec::new();
+
+        if let Some(panes) = self.list_panes_json().await {
+            for p in &panes {
+                let pane_id = p.get("pane_id").and_then(|x| x.as_str()).unwrap_or("");
+                if pane_id.is_empty() {
+                    continue;
+                }
+                let ws = p.get("workspace_id").and_then(|x| x.as_str()).unwrap_or("");
+                let agent = p.get("agent").and_then(|x| x.as_str()).unwrap_or("");
+                let label = p.get("label").and_then(|x| x.as_str()).unwrap_or("");
+                let status = p.get("agent_status").and_then(|x| x.as_str()).unwrap_or("");
+                self.registry
+                    .upsert(pane_id, ws, "", agent, label)
+                    .await;
+                if !label.is_empty() {
+                    self.registry.set_label(pane_id, label).await;
+                }
+                if !status.is_empty() {
+                    self.registry.set_status(pane_id, status).await;
+                }
+                pane_subs.push(serde_json::json!({
+                    "type": "pane.agent_status_changed",
+                    "pane_id": pane_id
+                }));
             }
+        }
+
+        let mut subscriptions = vec![
+            serde_json::json!({ "type": "workspace.created" }),
+            serde_json::json!({ "type": "workspace.closed" }),
+        ];
+        subscriptions.extend(pane_subs);
+
+        serde_json::json!({
+            "id": "herdr-mcp-subscribe",
+            "method": "events.subscribe",
+            "params": { "pane_id": null, "subscriptions": subscriptions }
+        })
+    }
+
+    /// Fetch and parse `herdr pane list` -> array of pane objects (best-effort).
+    async fn list_panes_json(&self) -> Option<Vec<serde_json::Value>> {
+        let binary = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
+        let output = tokio::process::Command::new(binary)
+            .args(["pane", "list"])
+            .output()
+            .await
+            .ok()?;
+        let raw = String::from_utf8_lossy(&output.stdout);
+        let v: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
+        v.get("result")
+            .and_then(|r| r.get("panes"))
+            .and_then(|p| p.as_array())
+            .cloned()
+    }
+
+    async fn handle_event(&self, event: SubEvent, sub_tx: mpsc::Sender<serde_json::Value>) {
+        match event.event.as_str() {
+            "pane.agent_status_changed" => {
+                let pane_id = event.data.pane_id;
+                let ws = event.data.workspace_id;
+                let agent = event.data.agent.clone().unwrap_or_default();
+                let label = event.data.label.clone().unwrap_or_default();
+                self.registry
+                    .upsert(&pane_id, &ws, "", &agent, "")
+                    .await;
+                if !label.is_empty() {
+                    self.registry.set_label(&pane_id, &label).await;
+                }
+                if let Some(status) = event.data.agent_status.as_deref().and_then(AgentStatus::parse) {
+                    let status_str = status.as_str().to_string();
+                    self.registry.set_status(&pane_id, &status_str).await;
+                    if status == AgentStatus::Idle {
+                        // Capture the work product: pane output at idle.
+                        let client = self.clone();
+                        let pane = pane_id.clone();
+                        tokio::spawn(async move {
+                            if let Ok(out) = read_pane_output(&pane).await {
+                                client.registry.set_output(&pane, out).await;
+                            }
+                        });
+                    }
+                }
+            }
+            "workspace.created" => {
+                let ws = event.data.workspace_id;
+                if !ws.is_empty() {
+                    // A new workspace means new panes: refresh the registry and
+                    // (re)subscribe to every pane's status events.
+                    let req = self.build_subscribe_request().await;
+                    let _ = sub_tx.send(req).await;
+
+                    // Seed a default trim policy for the workspace so all panes inherit it.
+                    let default_policy = TrimPolicy {
+                        stages: vec!["caveman:full".to_string(), "pfc1".to_string()],
+                        direction: TrimDirection::OutboundWithAck,
+                    };
+                    for handle in self.registry.list_for_ws(&ws).await {
+                        if handle.trim_policy.is_none() {
+                            self.registry
+                                .set_trim_policy(&handle.pane_id, Some(default_policy.clone()))
+                                .await;
+                        }
+                    }
+                    tracing::info!("workspace {ws} created; seeded default trim policy");
+                }
+            }
+            "workspace.closed" => {
+                let ws = event.data.workspace_id;
+                if !ws.is_empty() {
+                    // Best-effort: summarize the session's trim savings and
+                    // clean up per-workspace trim state.
+                    let s = crate::trim::stats::load_stats(self.registry.data_dir(), &ws).await;
+                    if s.messages_trimmed > 0 {
+                        let body = format!(
+                            "Workspace {ws} closed — trim saved {:.1}% net ({} messages, {} bytes net).",
+                            s.savings_pct(),
+                            s.messages_trimmed,
+                            s.net_saved_bytes
+                        );
+                        let binary =
+                            std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
+                        let _ = tokio::process::Command::new(binary)
+                            .args(["notification", "show", "herdr-mcp trim", "--body", &body])
+                            .output()
+                            .await;
+                    }
+                    tracing::info!("workspace {ws} closed; cleaned up trim state");
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -396,6 +568,8 @@ struct SubData {
     agent_status: Option<String>,
     #[serde(default)]
     agent: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
 }
 
 /// Read a pane's recent output via the herdr CLI. Best-effort; errors are

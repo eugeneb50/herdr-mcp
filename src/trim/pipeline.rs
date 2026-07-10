@@ -56,6 +56,8 @@ pub struct StageResult {
     pub skipped: Option<String>,
     /// PFC1 key used (if any) so the caller can persist it as steady-state memory.
     pub pfc1_key: Option<CompressionKey>,
+    /// Header bytes added by this stage (for PFC1).
+    pub header_bytes: usize,
 }
 
 /// Whole-pipeline result.
@@ -66,6 +68,8 @@ pub struct PipelineResult {
     pub stages: Vec<StageResult>,
     pub total_savings_bytes: usize,
     pub total_ratio: f64,
+    /// Total header bytes added by PFC1 stages (for net savings calc).
+    pub total_header_bytes: usize,
 }
 
 /// Run `text` through `stages`, seeding PFC1 with `base_key` (typically the
@@ -90,17 +94,20 @@ pub fn run(text: &str, stages: &[StageSpec], base_key: &CompressionKey) -> Pipel
                     stats: None,
                     skipped: r.reason.clone(),
                     pfc1_key: None,
+                    header_bytes: 0,
                 });
                 current = out;
             }
             StageSpec::Pfc1 { emit_header } => {
                 let key = pfc1::analyze_and_build(&current, base_key);
                 let body = pfc1::compress_text(&current, &key);
-                let candidate = if *emit_header {
-                    format!("{}{}", pfc1::generate_header(&key), body)
+                let header = if *emit_header {
+                    pfc1::generate_header(&key)
                 } else {
-                    body.clone()
+                    String::new()
                 };
+                let candidate = format!("{}{}", header, body);
+                let header_bytes = header.len();
                 // Adaptive gate: never expand the wire bytes. If compression
                 // isn't beneficial (e.g. a short message drowned by the header),
                 // pass the original through untouched.
@@ -111,15 +118,22 @@ pub fn run(text: &str, stages: &[StageSpec], base_key: &CompressionKey) -> Pipel
                         stats: Some(pfc1::calculate_stats(&current, &current, &key)),
                         skipped: Some("no net benefit; skipped to avoid expansion".to_string()),
                         pfc1_key: None,
+                        header_bytes: 0,
                     });
-                } else {
+} else {
                     let stats = pfc1::calculate_stats(&current, &candidate, &key);
+                    let header_bytes = if *emit_header {
+                        pfc1::generate_header(&key).len()
+                    } else {
+                        0
+                    };
                     stage_results.push(StageResult {
                         stage: "pfc1".to_string(),
                         output: candidate.clone(),
                         stats: Some(stats),
                         skipped: None,
                         pfc1_key: Some(key),
+                        header_bytes,
                     });
                     current = candidate;
                 }
@@ -128,6 +142,7 @@ pub fn run(text: &str, stages: &[StageSpec], base_key: &CompressionKey) -> Pipel
     }
 
     let total_savings = text.len().saturating_sub(current.len());
+    let total_header = stage_results.iter().map(|s| s.header_bytes).sum();
     let total_ratio = if text.len() > 0 {
         (total_savings as f64 / text.len() as f64) * 100.0
     } else {
@@ -140,6 +155,7 @@ pub fn run(text: &str, stages: &[StageSpec], base_key: &CompressionKey) -> Pipel
         stages: stage_results,
         total_savings_bytes: total_savings,
         total_ratio,
+        total_header_bytes: total_header,
     }
 }
 

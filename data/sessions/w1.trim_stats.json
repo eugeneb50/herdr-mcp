@@ -1,0 +1,14 @@
+{
+  "gross_saved_bytes": 28,
+  "net_saved_bytes": 28,
+  "messages_trimmed": 1,
+  "total_input_bytes": 251,
+  "per_pane": {
+    "cli": {
+      "gross_saved_bytes": 28,
+      "net_saved_bytes": 28,
+      "messages_trimmed": 1,
+      "last_trimmed_at": 1783635526
+    }
+  }
+}

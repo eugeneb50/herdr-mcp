@@ -21,9 +21,9 @@ pub struct PipelineRunner {
 
 impl PipelineRunner {
     /// Build a runner rooted at `data_dir`, loading any existing memory.
-    pub fn new(data_dir: &Path) -> Self {
+    pub async fn new(data_dir: &Path) -> Self {
         let memory_path = data_dir.join(MEMORY_FILE);
-        let seed = load_memory(&memory_path);
+        let seed = load_memory(&memory_path).await;
         let base_key = match seed {
             Some(s) => pfc1::merge_keys(&pfc1::default_key(), &s),
             None => pfc1::default_key(),
@@ -44,7 +44,7 @@ impl PipelineRunner {
 
     /// Run `text` through the given stages. When a PFC1 stage produces a key,
     /// it is merged into persistent memory.
-    pub fn run(&self, text: &str, stages: &[StageSpec]) -> pipeline::PipelineResult {
+    pub async fn run(&self, text: &str, stages: &[StageSpec]) -> pipeline::PipelineResult {
         let result = pipeline::run(text, stages, &self.base_key);
         if let Some(path) = &self.memory_path {
             if let Some(last) = result
@@ -53,7 +53,7 @@ impl PipelineRunner {
                 .rev()
                 .find_map(|s| s.pfc1_key.clone())
             {
-                save_memory(path, &last);
+                save_memory(path, &last).await;
             }
         }
         result
@@ -71,21 +71,21 @@ impl PipelineRunner {
 }
 
 /// Load a saved PFC1 memory key (symbol -> term) from `path`, if present.
-pub fn load_memory(path: &Path) -> Option<CompressionKey> {
-    let content = std::fs::read_to_string(path).ok()?;
+pub async fn load_memory(path: &Path) -> Option<CompressionKey> {
+    let content = tokio::fs::read_to_string(path).await.ok()?;
     serde_json::from_str::<CompressionKey>(&content).ok()
 }
 
 /// Merge `key` into the memory at `path` (union; new symbols win) and write back.
-pub fn save_memory(path: &Path, key: &CompressionKey) {
-    let mut merged = load_memory(path).unwrap_or_default();
+pub async fn save_memory(path: &Path, key: &CompressionKey) {
+    let mut merged = load_memory(path).await.unwrap_or_default();
     for (k, v) in key {
         merged.insert(k.clone(), v.clone());
     }
     if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+        let _ = tokio::fs::create_dir_all(parent).await;
     }
     if let Ok(s) = serde_json::to_string_pretty(&merged) {
-        let _ = std::fs::write(path, s);
+        let _ = tokio::fs::write(path, s).await;
     }
 }

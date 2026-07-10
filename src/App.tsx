@@ -7,6 +7,7 @@ import { Install } from "./components/Install";
 import { Footer } from "./components/Footer";
 import { Documentation } from "./components/Documentation";
 import { Playground } from "./components/Playground";
+import { TrimDashboard } from "./components/TrimDashboard";
 import { VariablesPage } from "./components/VariablesPage";
 import { VariableProvider } from "./components/VariableStore";
 
@@ -31,6 +32,7 @@ export default function App() {
               <Route path="/" element={<><Hero /><Architecture /><Tools /><Install /></>} />
               <Route path="/docs" element={<Documentation />} />
               <Route path="/playground" element={<Playground />} />
+              <Route path="/trim" element={<TrimDashboard />} />
               <Route path="/variables" element={<VariablesPage />} />
             </Routes>
           </main>
@@ -67,6 +69,7 @@ function Header() {
           {link("/", "Home")}
           {link("/docs", "Docs")}
           {link("/playground", "Playground")}
+          {link("/trim", "Trim")}
           {link("/variables", "Variables")}
         </nav>
         <a
