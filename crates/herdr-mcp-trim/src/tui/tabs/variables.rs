@@ -1,18 +1,20 @@
-//! Variables tab: session variable store management.
+//! Variables tab: session variable store management. Bordered list + edit form.
 //!
-//! ↑/↓ navigate, `e` edit (key/value fields), Enter to save via HTTP.
-
-use std::fmt::Write;
+//! ↑/↓ navigate, `e`/`n` edit (key/value fields), `x` delete, Enter save.
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::tui::{App, EditField};
-use crate::tui::render::{bold, emerald, move_to, muted, red, truncate};
+use crate::tui::theme::{accent_style, dim_style, panel_block, selected_style};
 
-pub async fn handle_key(app: &mut App, code: KeyCode, _mods: KeyModifiers) -> Result<bool> {
+pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     if app.variables_state.editing {
-        return handle_edit(app, code).await;
+        return handle_edit(app, code, mods).await;
     }
     match code {
         KeyCode::Up => {
@@ -27,41 +29,39 @@ pub async fn handle_key(app: &mut App, code: KeyCode, _mods: KeyModifiers) -> Re
             }
             Ok(true)
         }
-        KeyCode::Char('e') => {
-            if let Some((k, v)) = app
+        KeyCode::Char('e') if mods.contains(KeyModifiers::CONTROL) => {
+            let (k, v) = app
                 .variables_state
                 .entries
                 .get(app.variables_state.selected)
                 .cloned()
-            {
-                app.variables_state.editing = true;
-                app.variables_state.edit_key = k;
-                app.variables_state.edit_value = v;
-                app.variables_state.edit_field = EditField::Key;
-            } else {
-                app.variables_state.editing = true;
-                app.variables_state.edit_key = String::new();
-                app.variables_state.edit_value = String::new();
-                app.variables_state.edit_field = EditField::Key;
-            }
+                .unwrap_or_default();
+            app.variables_state.editing = true;
+            app.variables_state.edit_key = k;
+            app.variables_state.edit_value = v;
+            app.variables_state.edit_field = EditField::Key;
             Ok(true)
         }
-        KeyCode::Char('n') => {
+        KeyCode::Char('n') if mods.contains(KeyModifiers::CONTROL) => {
             app.variables_state.editing = true;
             app.variables_state.edit_key = String::new();
             app.variables_state.edit_value = String::new();
             app.variables_state.edit_field = EditField::Key;
             Ok(true)
         }
-        KeyCode::Char('x') => {
-            if let Some((k, _)) = app.variables_state.entries.get(app.variables_state.selected).cloned() {
-                if let Some(http) = app.http.clone() {
-                    if let Err(e) = http.delete_variable(&k).await {
-                        app.status_msg = format!("delete failed: {e}");
-                    } else {
-                        app.status_msg = format!("deleted {k}");
-                        app.refresh().await;
-                    }
+        KeyCode::Char('x') if mods.contains(KeyModifiers::CONTROL) => {
+            if let Some((k, _)) = app
+                .variables_state
+                .entries
+                .get(app.variables_state.selected)
+                .cloned()
+                && let Some(http) = app.http.clone()
+            {
+                if let Err(e) = http.delete_variable(&k).await {
+                    app.status_msg = format!("delete failed: {e}");
+                } else {
+                    app.status_msg = format!("deleted {k}");
+                    app.refresh().await;
                 }
             }
             Ok(true)
@@ -70,7 +70,9 @@ pub async fn handle_key(app: &mut App, code: KeyCode, _mods: KeyModifiers) -> Re
     }
 }
 
-async fn handle_edit(app: &mut App, code: KeyCode) -> Result<bool> {
+async fn handle_edit(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
+    // Only insert a character when no Ctrl/Alt modifier is held.
+    let plain = !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT);
     match code {
         KeyCode::Tab => {
             app.variables_state.edit_field = match app.variables_state.edit_field {
@@ -96,7 +98,7 @@ async fn handle_edit(app: &mut App, code: KeyCode) -> Result<bool> {
             Ok(true)
         }
         KeyCode::Left | KeyCode::Right => Ok(true),
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if plain => {
             let buf = match app.variables_state.edit_field {
                 EditField::Key => &mut app.variables_state.edit_key,
                 EditField::Value => &mut app.variables_state.edit_value,
@@ -128,49 +130,105 @@ async fn save(app: &mut App) {
     }
 }
 
-pub fn render(f: &mut String, app: &App) {
-    let row = 4u16;
-    let _ = write!(f, "{}", move_to(2, row));
-    let _ = write!(f, "{}   {} (↑/↓ nav  e/n edit  x delete)\r\n", bold("Variables"), muted("session variables store"));
+pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
+    let header = Paragraph::new(Line::from(vec![
+        Span::styled("Variables", accent_style().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "  session variables store   (↑/↓ nav  Ctrl+e edit  Ctrl+n new  Ctrl+x delete)",
+            dim_style(),
+        ),
+    ]));
+    frame.render_widget(header, Rect::new(area.x, area.y, area.width, 1));
 
-    let state = &app.variables_state;
-    if state.editing {
-        render_edit(f, app, row + 2);
+    let body = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
+
+    if app.variables_state.editing {
+        render_edit(frame, body, app);
         return;
     }
 
-    if state.entries.is_empty() {
-        let _ = write!(f, "{}", move_to(2, row + 2));
-        let _ = write!(f, "{}\r\n", muted("(no variables — press n to add one)"));
-        return;
-    }
-    for (i, (k, v)) in state.entries.iter().take(18).enumerate() {
-        let _ = write!(f, "{}", move_to(2, row + 2 + i as u16));
-        let marker = if i == state.selected {
-            emerald("▸")
-        } else {
-            muted(" ")
-        };
-        let _ = write!(f, "{marker} {} = {}\r\n", bold(&truncate(k, 24)), muted(&truncate(v, 60)));
-    }
+    render_list(frame, body, app);
 }
 
-fn render_edit(f: &mut String, app: &App, row: u16) {
+fn render_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
+    let block = panel_block(" Variables ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if app.variables_state.entries.is_empty() {
+        let line = Line::from("(no variables — press n to add one)");
+        frame.render_widget(Paragraph::new(vec![line]).wrap(Wrap { trim: false }), inner);
+        return;
+    }
+
+    let items: Vec<ListItem> = app
+        .variables_state
+        .entries
+        .iter()
+        .take(inner.height as usize)
+        .enumerate()
+        .map(|(i, (k, v))| {
+            let style = if i == app.variables_state.selected {
+                selected_style()
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled("▸ ", accent_style()),
+                Span::styled(format!("{:>20} = ", truncate(k, 20)), dim_style()),
+                Span::styled(truncate(v, 50), Style::default()),
+            ]))
+            .style(style)
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    state.select(Some(app.variables_state.selected));
+    frame.render_stateful_widget(List::new(items), inner, &mut state);
+
+    app.var_list_inner.clone_from(&inner);
+}
+
+fn render_edit(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let block = panel_block(" Edit variable ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
     let state = &app.variables_state;
-    let _ = write!(f, "{}", move_to(2, row));
-    let _ = write!(f, "{} (Tab=switch field  Enter=save  Esc=cancel)\r\n", bold("Edit"));
-    let _ = write!(f, "{}", move_to(2, row + 1));
-    let k_cursor = if state.edit_field == EditField::Key {
-        red("_")
-    } else {
-        muted(" ")
-    };
-    let _ = write!(f, "  key:   {}{}\r\n", &state.edit_key, k_cursor);
-    let _ = write!(f, "{}", move_to(2, row + 2));
-    let v_cursor = if state.edit_field == EditField::Value {
-        red("_")
-    } else {
-        muted(" ")
-    };
-    let _ = write!(f, "  value: {}{}\r\n", &truncate(&state.edit_value, 60), v_cursor);
+    let k_focus = state.edit_field == EditField::Key;
+    let v_focus = state.edit_field == EditField::Value;
+
+    let k_cursor = if k_focus { "▌" } else { " " };
+    let v_cursor = if v_focus { "▌" } else { " " };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("  key:   ", dim_style()),
+            Span::styled(state.edit_key.clone(), if k_focus { accent_style() } else { Style::default() }),
+            Span::styled(k_cursor, accent_style()),
+        ]),
+        Line::from(vec![
+            Span::styled("  value: ", dim_style()),
+            Span::styled(truncate(&state.edit_value, 60), if v_focus { accent_style() } else { Style::default() }),
+            Span::styled(v_cursor, accent_style()),
+        ]),
+        Line::from(""),
+        Line::from("  Tab=switch field   Enter=save   Esc=cancel"),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut t = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i + 1 >= max {
+            t.push('…');
+            break;
+        }
+        t.push(c);
+    }
+    t
 }

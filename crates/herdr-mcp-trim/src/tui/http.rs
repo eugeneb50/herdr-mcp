@@ -27,6 +27,48 @@ impl HttpClient {
         })
     }
 
+    /// Retarget the client at a different bridge port.
+    pub fn set_port(&mut self, port: u16) {
+        self.base = format!("http://localhost:{port}");
+    }
+
+    /// Cheap liveness probe against `GET /api/health`.
+    pub async fn health(&self) -> Result<Value> {
+        let url = format!("{}/api/health", self.base);
+        let v = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .context("GET /api/health")?
+            .json::<Value>()
+            .await
+            .context("parsing /api/health body")?;
+        Ok(v)
+    }
+
+    /// Find a live herdr-mcp bridge by probing candidate ports.
+    ///
+    /// Tries `initial` first (the explicitly configured/overridden port), then
+    /// a small set of historical/default ports. Uses a short timeout so probing
+    /// several closed ports fails fast instead of hanging for minutes. Returns
+    /// the first port that answers `GET /api/health` with HTTP 200, or `None`.
+    pub async fn discover_bridge(initial: u16) -> Option<u16> {
+        let mut candidates: Vec<u16> = vec![initial, 8080, 7676, 5173];
+        candidates.dedup();
+        let probe = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .ok()?;
+        for port in candidates {
+            let url = format!("http://localhost:{port}/api/health");
+            if probe.get(&url).send().await.is_ok_and(|r| r.status().is_success()) {
+                return Some(port);
+            }
+        }
+        None
+    }
+
     /// List every MCP tool with its JSON schema.
     pub async fn list_tools(&self) -> Result<Value> {
         let url = format!("{}/api/tools", self.base);
@@ -191,5 +233,22 @@ impl HttpClient {
             .await
             .context("parsing /api/trim/diagnose body")?;
         Ok(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Discovery must finish quickly (the probe client uses a 500ms timeout per
+    // candidate port) rather than hanging for the full 30s client timeout.
+    #[tokio::test]
+    async fn discover_bridge_does_not_hang() {
+        let res = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            HttpClient::discover_bridge(1),
+        )
+        .await;
+        assert!(res.is_ok(), "discover_bridge hung");
     }
 }

@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 use rmcp::{ServiceExt, transport::stdio};
 use tracing_subscriber::EnvFilter;
 
+use herdr_mcp_core::{Config, CliOverrides};
 use herdr_mcp_server::{HerdrClient, HerdrMcpServer, Persistence, server::start_http};
 use herdr_mcp_trim::{dashboard, folder_key as fk, pipeline, runner::PipelineRunner};
 
@@ -49,7 +50,7 @@ enum Command {
         #[arg(long, default_value = "./data")]
         data_dir: std::path::PathBuf,
         /// HTTP bridge port the dashboard talks to (playground/recipe builder).
-        #[arg(long, default_value_t = 8080)]
+        #[arg(long, default_value_t = 7676)]
         http_port: u16,
         /// Run the legacy trim-only dashboard instead of the kitchen-sink TUI.
         #[arg(long)]
@@ -102,8 +103,40 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
+    // Load config with CLI overrides
+    let cli_overrides = match &args.command {
+        Some(Command::Serve {
+            http,
+            http_only,
+            data_dir,
+            herdr_socket,
+        }) => Some(CliOverrides {
+            data_dir: Some(data_dir.clone()),
+            http_port: *http,
+            http_only: Some(*http_only),
+            http_bind: None,
+            herdr_socket: herdr_socket.clone(),
+            log_level: None,
+            trim_stages: Vec::new(),
+        }),
+        Some(Command::Trim { .. }) => None,
+        Some(Command::Dashboard { .. }) => None,
+        Some(Command::FolderKey { .. }) => None,
+        None => Some(CliOverrides {
+            data_dir: None,
+            http_port: Some(7676),
+            http_only: Some(false),
+            http_bind: None,
+            herdr_socket: None,
+            log_level: None,
+            trim_stages: Vec::new(),
+        }),
+    };
+
+    let config = Config::load(cli_overrides)?;
+
     match args.command {
-        None => run_serve(Some(8080), false, std::path::PathBuf::from("./data"), None).await,
+        None => run_serve(&config).await,
         Some(Command::Trim {
             stage,
             decompress,
@@ -112,11 +145,11 @@ async fn main() -> Result<()> {
             text,
         }) => run_trim(stage, decompress, &data_dir, file, text).await,
         Some(Command::Serve {
-            http,
-            http_only,
-            data_dir,
-            herdr_socket,
-        }) => run_serve(http, http_only, data_dir, herdr_socket).await,
+            http: _,
+            http_only: _,
+            data_dir: _,
+            herdr_socket: _,
+        }) => run_serve(&config).await,
         Some(Command::Dashboard { data_dir, http_port, legacy }) => {
             if legacy {
                 dashboard::run(&data_dir).await
@@ -229,21 +262,17 @@ async fn run_trim(
     Ok(())
 }
 
-async fn run_serve(
-    http: Option<u16>,
-    http_only: bool,
-    data_dir: std::path::PathBuf,
-    herdr_socket: Option<std::path::PathBuf>,
-) -> Result<()> {
+async fn run_serve(config: &Config) -> Result<()> {
+    let data_dir = config.data_dir.clone();
     let persistence = Persistence::new(data_dir.clone());
     persistence.init().await?;
     let persistence = std::sync::Arc::new(persistence);
 
-    let herdr_client = build_herdr_client(&data_dir, herdr_socket);
+    let herdr_client = build_herdr_client(&data_dir, config.herdr.socket_path.clone());
     herdr_client.spawn_subscriber();
     let registry = herdr_client.registry.clone();
 
-    if let Some(port) = http {
+    if let Some(port) = config.http.port {
         let server = HerdrMcpServer::new((*persistence).clone(), registry.clone());
         tokio::spawn(async move {
             if let Err(e) = start_http(server, port).await {
@@ -253,7 +282,7 @@ async fn run_serve(
         tracing::info!("HTTP playground listening on http://localhost:{port}");
     }
 
-    if http_only {
+    if config.http.http_only {
         tracing::info!("HTTP-only mode — waiting for shutdown signal");
         tokio::signal::ctrl_c().await?;
         tracing::info!("Shutting down");

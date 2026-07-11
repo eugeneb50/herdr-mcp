@@ -41,8 +41,8 @@ For the web playground:
 
 ```bash
 cargo build --release
-./target/release/herdr-mcp --http 8080 --http-only
-# Open http://localhost:8080/
+./target/release/herdr-mcp serve --http 7676 --http-only
+# Open http://localhost:7676/
 ```
 
 ---
@@ -137,7 +137,7 @@ reference.
 | [compressorplan.md](compressorplan.md) | Message-trim design plan (caveman + pfc1) |
 | [a2a.md](a2a.md) | Agent-to-agent primitive design and usage |
 | [TEST_PLAN.md](TEST_PLAN.md) | Test suite specification (233 tests across 4 crates) |
-| [herdr-mcp-context.toml](herdr-mcp-context.toml) | Evolving project memory for resuming sessions |
+| [herdmcp.toml](herdmcp.toml) | Persistent configuration (HTTP port, data dir, herdr socket) |
 
 ---
 
@@ -170,6 +170,27 @@ npm run build
 | `--http <port>` | Start HTTP bridge on given port |
 | `--http-only` | Run HTTP server only (skip MCP stdio transport) |
 
+### Persistent configuration
+
+Create a `herdmcp.toml` file in the working directory to set defaults:
+
+```toml
+# herdmcp.toml - Persistent configuration for herdr-mcp
+# This file is read from the current working directory when herdr-mcp starts.
+
+[persistent]
+# HTTP bridge port (default: 7676). CLI flag --http overrides this.
+http_port = 7676
+
+# Data directory for recipes, sessions, trim stats, PFC1 memory (default: ./data)
+data_dir = "./data"
+
+# herdr daemon socket path (default: ~/.config/herdr/herdr.sock)
+herdr_socket = "~/.config/herdr/herdr.sock"
+```
+
+All settings in `herdmcp.toml` are overridden by CLI flags and environment variables.
+
 ---
 
 ## Usage
@@ -192,21 +213,23 @@ Add to your MCP client config:
 }
 ```
 
+By default, this starts the MCP stdio transport **and** the HTTP bridge on port **7676**.
+
 ### HTTP + web playground
 
 ```bash
-# Start server with HTTP bridge (skips MCP stdio)
-./target/release/herdr-mcp --http 8080 --http-only
-# Open http://localhost:8080/
+# Start server with HTTP bridge on port 7676 (default), skip MCP stdio
+./target/release/herdr-mcp serve --http 7676 --http-only
+# Open http://localhost:7676/
 ```
 
 For development with hot-reload on the website:
 
 ```bash
 # Terminal 1: Rust HTTP server
-cargo run --release -- --http 8080 --http-only
+cargo run --release -- serve --http 7676 --http-only
 
-# Terminal 2: Vite dev server (proxies /api → localhost:8080)
+# Terminal 2: Vite dev server (proxies /api → localhost:7676)
 npm run dev
 
 # Open http://localhost:5173/

@@ -50,7 +50,7 @@ write the field. Two valid answers:
   not stored).
 - Derive macros that emit multiple surfaces from one input table.
 
-## Commands
+## Run Commands
 
 ```bash
 cargo fmt --all -- --check
@@ -75,17 +75,17 @@ cd src && npx tsc --noEmit
 ## Run Commands
 
 ```bash
-# Default: run MCP stdio + HTTP on port 8080
+# Default: run MCP stdio + HTTP on port 7676
 herdr-mcp
 
 # Explicit serve with HTTP
-herdr-mcp serve --http 8080
+herdr-mcp serve --http 7676
 
 # MCP only (no HTTP)
 herdr-mcp serve
 
 # HTTP only (no MCP stdio)
-herdr-mcp serve --http 8080 --http-only
+herdr-mcp serve --http 7676 --http-only
 
 # Kitchen-sink TUI dashboard (VS Code-style tabs, mouse+keyboard)
 herdr-mcp dashboard

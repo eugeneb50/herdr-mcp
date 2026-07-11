@@ -3,6 +3,46 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 
+/// Persistent runtime configuration loaded from CWD `herdmcp.toml`.
+/// This is applied BEFORE CLI overrides but AFTER defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct PersistentConfig {
+    /// HTTP bridge port (default: 7676). CLI flag --http overrides this.
+    #[serde(default)]
+    pub http_port: Option<u16>,
+
+    /// Data directory for recipes, sessions, trim stats, PFC1 memory (default: ./data)
+    #[serde(default)]
+    pub data_dir: Option<PathBuf>,
+
+    /// herdr daemon socket path (default: ~/.config/herdr/herdr.sock)
+    #[serde(default)]
+    pub herdr_socket: Option<PathBuf>,
+}
+
+impl PersistentConfig {
+    /// Load persistent config from CWD `herdmcp.toml` if it exists.
+    /// Only parses the `[persistent]` section.
+    pub fn load_from_cwd() -> Result<Self> {
+        let cwd = std::env::current_dir()?;
+        let path = cwd.join("herdmcp.toml");
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read persistent config: {}", path.display()))?;
+            // Parse only the [persistent] section
+            let table: toml::Table = toml::from_str(&content)
+                .with_context(|| format!("failed to parse persistent config: {}", path.display()))?;
+            if let Some(persistent) = table.get("persistent") {
+                let cfg: PersistentConfig = toml::from_str(&toml::to_string(persistent)?)
+                    .with_context(|| format!("failed to parse [persistent] section: {}", path.display()))?;
+                return Ok(cfg);
+            }
+        }
+        Ok(Self::default())
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
@@ -39,7 +79,7 @@ pub struct HttpConfig {
 impl Default for HttpConfig {
     fn default() -> Self {
         Self {
-            port: Some(5173),
+            port: Some(7676),
             bind_addr: Some("127.0.0.1".into()),
             http_only: false,
         }
@@ -235,11 +275,11 @@ impl std::fmt::Display for LogFormat {
 
 impl Config {
     /// Load configuration with full precedence chain:
-    /// Defaults < Config file < Env vars < CLI args
+    /// Defaults < Config file < Persistent (CWD herdmcp.toml) < Env vars < CLI args
     pub fn load(cli_overrides: Option<CliOverrides>) -> Result<Self> {
         let mut config = Config::default();
 
-        // 1. Load from config file
+        // 1. Load from config file (project config)
         if let Some(path) = find_config_file() {
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("failed to read config file: {}", path.display()))?;
@@ -248,15 +288,19 @@ impl Config {
             config = config.merge(file_config);
         }
 
-        // 2. Apply environment variable overrides
+        // 2. Load persistent runtime config from CWD herdmcp.toml
+        let persistent = PersistentConfig::load_from_cwd()?;
+        config = config.apply_persistent(persistent);
+
+        // 3. Apply environment variable overrides
         config = config.apply_env_overrides()?;
 
-        // 3. Apply CLI overrides
+        // 4. Apply CLI overrides
         if let Some(cli) = cli_overrides {
             config = config.apply_cli_overrides(cli);
         }
 
-        // 4. Validate
+        // 5. Validate
         config.validate()?;
 
         Ok(config)
@@ -273,6 +317,20 @@ impl Config {
             sandbox: other.sandbox,
             logging: other.logging,
         }
+    }
+
+    /// Apply persistent config from CWD herdmcp.toml (wins over defaults, loses to env/CLI)
+    fn apply_persistent(mut self, persistent: PersistentConfig) -> Self {
+        if let Some(v) = persistent.http_port {
+            self.http.port = Some(v);
+        }
+        if let Some(v) = persistent.data_dir {
+            self.data_dir = v;
+        }
+        if let Some(v) = persistent.herdr_socket {
+            self.herdr.socket_path = Some(v);
+        }
+        self
     }
 
     /// Apply environment variable overrides
@@ -507,7 +565,7 @@ mod tests {
     #[test]
     fn test_config_default_values() {
         let c = Config::default();
-        assert_eq!(c.http.port, Some(5173));
+        assert_eq!(c.http.port, Some(7676));
         assert_eq!(c.http.bind_addr.as_deref(), Some("127.0.0.1"));
         assert_eq!(c.mcp.tool_timeout_secs, 300);
         assert_eq!(c.mcp.max_concurrent_tools, 10);
