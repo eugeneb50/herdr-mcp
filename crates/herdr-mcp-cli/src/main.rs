@@ -13,7 +13,7 @@ use herdr_mcp_trim::{dashboard, folder_key as fk, pipeline, runner::PipelineRunn
 #[command(name = "herdr-mcp", version)]
 struct Args {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -48,6 +48,12 @@ enum Command {
     Dashboard {
         #[arg(long, default_value = "./data")]
         data_dir: std::path::PathBuf,
+        /// HTTP bridge port the dashboard talks to (playground/recipe builder).
+        #[arg(long, default_value_t = 8080)]
+        http_port: u16,
+        /// Run the legacy trim-only dashboard instead of the kitchen-sink TUI.
+        #[arg(long)]
+        legacy: bool,
     },
 
     /// Manage per-folder PFC1 phonetic keys (scan, list, decompress).
@@ -97,21 +103,29 @@ async fn main() -> Result<()> {
         .init();
 
     match args.command {
-        Command::Trim {
+        None => run_serve(Some(8080), false, std::path::PathBuf::from("./data"), None).await,
+        Some(Command::Trim {
             stage,
             decompress,
             data_dir,
             file,
             text,
-        } => run_trim(stage, decompress, &data_dir, file, text).await,
-        Command::Serve {
+        }) => run_trim(stage, decompress, &data_dir, file, text).await,
+        Some(Command::Serve {
             http,
             http_only,
             data_dir,
             herdr_socket,
-        } => run_serve(http, http_only, data_dir, herdr_socket).await,
-        Command::Dashboard { data_dir } => dashboard::run(&data_dir).await,
-        Command::FolderKey { action } => run_folder_key(action).await,
+        }) => run_serve(http, http_only, data_dir, herdr_socket).await,
+        Some(Command::Dashboard { data_dir, http_port, legacy }) => {
+            if legacy {
+                dashboard::run(&data_dir).await
+            } else {
+                let opts = herdr_mcp_trim::tui::DashboardOptions { data_dir, http_port };
+                herdr_mcp_trim::tui::run(opts).await
+            }
+        }
+        Some(Command::FolderKey { action }) => run_folder_key(action).await,
     }
 }
 

@@ -72,6 +72,31 @@ Website checks (TypeScript strict mode, fails on unused locals/params):
 cd src && npx tsc --noEmit
 ```
 
+## Run Commands
+
+```bash
+# Default: run MCP stdio + HTTP on port 8080
+herdr-mcp
+
+# Explicit serve with HTTP
+herdr-mcp serve --http 8080
+
+# MCP only (no HTTP)
+herdr-mcp serve
+
+# HTTP only (no MCP stdio)
+herdr-mcp serve --http 8080 --http-only
+
+# Kitchen-sink TUI dashboard (VS Code-style tabs, mouse+keyboard)
+herdr-mcp dashboard
+
+# Legacy trim-only dashboard
+herdr-mcp dashboard --legacy
+
+# Message trim CLI
+herdr-mcp trim "text to compress"
+```
+
 ## Project Snapshot
 
 herdr-mcp is an MCP (Model Context Protocol) server written in Rust that
@@ -79,8 +104,9 @@ exposes [herdr](https://herdr.dev) — a terminal-native agent multiplexer —
 as MCP tools. It enables AI clients (Claude Desktop, Cursor, Claude Code,
 OpenCode) to control herdr workspaces, tabs, panes, and agents. It also ships
 an HTTP bridge (Axum), a Vite+React+Tailwind web playground, a message-trim
-(compression) pipeline, a recipe engine for chaining tool calls, and an a2a
-(agent-to-agent) primitive layer.
+(compression) pipeline, a recipe engine for chaining tool calls, an a2a
+(agent-to-agent) primitive layer, and a **kitchen-sink TUI dashboard** with
+VS Code-style tabs, mouse + keyboard navigation.
 
 Core architecture is **shell-out + trait-light**: the server wraps the local
 `herdr` CLI via `tokio::process::Command` with real argv (no shell
@@ -103,6 +129,9 @@ Key subsystems:
   socket; label resolution by pane_id → role → label.
 - **Persistence** — file-based JSON under `data/` (recipes, schedules,
   variables, trim stats, PFC1 memory).
+- **TUI dashboard** — `crates/herdr-mcp-trim/src/tui/` with VS Code-style
+  tabbed interface (Overview, Playground, Trim, Variables, Settings), mouse
+  + keyboard navigation, herdr sidecar context awareness.
 
 ## Stability Tiers
 
@@ -132,7 +161,7 @@ through deliberate team decision.
 - `src/main.tsx` → `src/App.tsx` → `src/components/*` — Vite+React+Tailwind website
 - `src/recipes/` — TypeScript recipe types for frontend
 - `crates/herdr-mcp-core/` — `config.rs` (full config system), `error.rs` (anyhow-based error context), `lib.rs`
-- `crates/herdr-mcp-trim/` — `pfc1.rs`, `caveman.rs`, `code_regions.rs`, `pipeline.rs`, `policy.rs`, `runner.rs`, `stats.rs`, `eval.rs`, `dashboard.rs`, `folder_key.rs`
+- `crates/herdr-mcp-trim/` — `pfc1.rs`, `caveman.rs`, `code_regions.rs`, `pipeline.rs`, `policy.rs`, `runner.rs`, `stats.rs`, `eval.rs`, `dashboard.rs`, `folder_key.rs`, `tui/` (kitchen-sink dashboard)
 - `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers + recipe engine), `herdr_client.rs`, `persistence.rs`, `scheduler.rs`, `templates.rs`, `variables.rs`, `lib.rs`
 - `crates/herdr-mcp-cli/` — `src/main.rs` (CLI dispatch), `tests/` (integration)
 - `data/` — runtime persistence (recipes, executions, variables, schedules, sessions, pfc1 memory, folder keys)
@@ -189,6 +218,8 @@ When uncertain, classify as higher risk.
 - **File-based persistence** — simple, inspectable, no DB dependency. Adequate for single-server deployment.
 - **Workspace-scoped variables** — session variables use herdr workspace ID as scope; they chain across runs in the same workspace but don't leak between workspaces.
 - **`start_agent` appends `--`** — prevents herdr from consuming agent-specific flags.
+- **Default command is `serve`** — running `herdr-mcp` with no arguments starts MCP stdio + HTTP on port 8080, enabling both AI client integration and web playground access out of the box.
+- **Kitchen-sink TUI** — the `dashboard` subcommand launches a VS Code-style tabbed terminal interface with mouse + keyboard navigation, consolidating the playground, trim dashboard, variables, and settings into a single herdr sidecar pane.
 
 ## Skills
 
