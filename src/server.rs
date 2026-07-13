@@ -485,6 +485,19 @@ pub struct DecompressWithFolderKeyParams {
     pub text: String,
 }
 
+/// Parameters for the `clipboard_set` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct ClipboardSetParams {
+    /// Text to write to the system clipboard.
+    pub text: String,
+}
+
+/// Parameters for the `clipboard_get` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct ClipboardGetParams {}
+
 /// Parameters for the `trim_policy_set` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
@@ -710,6 +723,27 @@ impl HerdrMcpServer {
                     .await;
                 }
             }
+        }
+    }
+
+    /// Push savings-% badges for every workspace that has trim stats on disk.
+    /// Drives the periodic poller so badges survive server restarts.
+    async fn push_all_badges(&self) {
+        let sessions_dir = self.data_dir.join("sessions");
+        let mut entries = match tokio::fs::read_dir(&sessions_dir).await {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::debug!("trim poller: cannot read sessions dir: {e}");
+                return;
+            }
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".trim_stats.json") {
+                continue;
+            }
+            let ws = name.trim_end_matches(".trim_stats.json");
+            self.push_badge_for_workspace(ws).await;
         }
     }
 
@@ -1723,6 +1757,38 @@ impl HerdrMcpServer {
             "changed": out != text,
         })).map_err(to_mcp_err)?]))
     }
+
+    // ── Clipboard ───────────────────────────────────────────────────────
+
+    #[tool(
+        description = "Write text to the system clipboard. Requires a clipboard utility on the host (pbcopy on macOS, wl-copy on Wayland, xclip/xsel on X11). Text only."
+    )]
+    async fn clipboard_set(
+        &self,
+        Parameters(ClipboardSetParams { text }): Parameters<ClipboardSetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (copy_cmd, _paste_cmd) = detect_clipboard()?;
+        shell_with_stdin(copy_cmd, &text).await?;
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "ok": true,
+                "length": text.len(),
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
+    }
+
+    #[tool(
+        description = "Read the current text content of the system clipboard. Requires a clipboard utility on the host (pbpaste on macOS, wl-paste on Wayland, xclip/xsel on X11). Returns empty string if the clipboard contains no text. Text only."
+    )]
+    async fn clipboard_get(
+        &self,
+        Parameters(_): Parameters<ClipboardGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (_copy_cmd, paste_cmd) = detect_clipboard()?;
+        let text = shell_output(paste_cmd).await?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
 }
 
 #[tool_handler(
@@ -1831,6 +1897,144 @@ async fn run_herdr_json(args: &[&str]) -> Result<CallToolResult, McpError> {
 async fn run_herdr_text(args: &[&str]) -> Result<CallToolResult, McpError> {
     let output = herdr_cli(args).await?;
     Ok(CallToolResult::success(vec![Content::text(output)]))
+}
+
+// ── Clipboard helpers ────────────────────────────────────────────────
+
+/// Detect the platform clipboard command pair (copy, paste).
+///
+/// An explicit backend can be forced via the `HERDR_MCP_CLIPBOARD_COPY` and
+/// `HERDR_MCP_CLIPBOARD_PASTE` environment variables (both must be set). This
+/// lets the tools work in headless environments (e.g. a herdr pane with no
+/// X11/Wayland clipboard) and provides a test seam. Otherwise platform
+/// detection is used.
+fn detect_clipboard() -> Result<(&'static str, &'static str), McpError> {
+    if let (Ok(copy), Ok(paste)) = (
+        std::env::var("HERDR_MCP_CLIPBOARD_COPY"),
+        std::env::var("HERDR_MCP_CLIPBOARD_PASTE"),
+    ) && !copy.trim().is_empty()
+        && !paste.trim().is_empty()
+    {
+        let copy: &'static str = Box::leak(copy.into_boxed_str());
+        let paste: &'static str = Box::leak(paste.into_boxed_str());
+        return Ok((copy, paste));
+    }
+    match std::env::consts::OS {
+        "macos" => Ok(("pbcopy", "pbpaste")),
+        "windows" => Ok(("clip", "powershell -command Get-Clipboard")),
+        "linux" => {
+            if command_exists("wl-copy") {
+                Ok(("wl-copy", "wl-paste"))
+            } else if command_exists("xclip") {
+                Ok(("xclip -selection clipboard", "xclip -selection clipboard -o"))
+            } else if command_exists("xsel") {
+                Ok(("xsel --clipboard --input", "xsel --clipboard --output"))
+            } else {
+                Err(McpError {
+                    code: rmcp::model::ErrorCode(-32603),
+                    message:
+                        "No clipboard utility found. Install xclip, xsel, or wl-clipboard (e.g. `apt install xclip`).".into(),
+                    data: None,
+                })
+            }
+        }
+        _ => Err(McpError {
+            code: rmcp::model::ErrorCode(-32603),
+            message: "Unsupported platform for clipboard operations.".into(),
+            data: None,
+        }),
+    }
+}
+
+/// True if `cmd` resolves on PATH.
+fn command_exists(cmd: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Shell out to a command, piping `stdin_text` to its stdin (clipboard copy).
+async fn shell_with_stdin(cmd: &str, stdin_text: &str) -> Result<String, McpError> {
+    tracing::debug!("clipboard copy via: {cmd}");
+    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+    let bin = parts[0];
+    let args: Vec<&str> = parts.get(1).map(|a| a.split_whitespace().collect()).unwrap_or_default();
+
+    let mut child = tokio::process::Command::new(bin)
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| McpError {
+            code: rmcp::model::ErrorCode(-32603),
+            message: format!("Clipboard utility '{bin}' not found: {e}").into(),
+            data: None,
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(stdin_text.as_bytes()).await.map_err(|e| McpError {
+            code: rmcp::model::ErrorCode(-32603),
+            message: format!("Failed to write to clipboard utility stdin: {e}").into(),
+            data: None,
+        })?;
+    }
+
+    let output = child.wait_with_output().await.map_err(|e| McpError {
+        code: rmcp::model::ErrorCode(-32603),
+        message: format!("Clipboard utility failed: {e}").into(),
+        data: None,
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            return Err(McpError {
+                code: rmcp::model::ErrorCode(-32000),
+                message: format!("Clipboard write failed: {}", stderr.trim()).into(),
+                data: None,
+            });
+        }
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Shell out to a command, capturing stdout (clipboard paste).
+async fn shell_output(cmd: &str) -> Result<String, McpError> {
+    tracing::debug!("clipboard paste via: {cmd}");
+    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+    let bin = parts[0];
+    let args: Vec<&str> = parts.get(1).map(|a| a.split_whitespace().collect()).unwrap_or_default();
+
+    let output = tokio::process::Command::new(bin)
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| McpError {
+            code: rmcp::model::ErrorCode(-32603),
+            message: format!("Clipboard utility '{bin}' not found: {e}").into(),
+            data: None,
+        })?;
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Spawn a background task that refreshes trim badges for all workspaces
+/// every 20s. Best-effort: I/O errors are logged, never propagated.
+pub fn spawn_trim_poller(server: std::sync::Arc<HerdrMcpServer>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(20));
+        loop {
+            interval.tick().await;
+            server.push_all_badges().await;
+        }
+    });
 }
 
 /// Execute the `herdr` CLI binary with the given arguments.
@@ -2301,7 +2505,18 @@ async fn dispatch_tool(
         "decompress_with_folder_key" => {
             let p: DecompressWithFolderKeyParams =
                 serde_json::from_value(body).map_err(bad_request)?;
-            server.decompress_with_folder_key(Parameters(p)).await.map_err(mcp_err_to_http)
+            server.decompress_with_folder_key(Parameters(p)).await                .map_err(mcp_err_to_http)
+        }
+
+        "clipboard_set" => {
+            let p: ClipboardSetParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.clipboard_set(Parameters(p)).await.map_err(mcp_err_to_http)
+        }
+        "clipboard_get" => {
+            let p: ClipboardGetParams =
+                serde_json::from_value(body).map_err(bad_request)?;
+            server.clipboard_get(Parameters(p)).await.map_err(mcp_err_to_http)
         }
 
         _ => Err((StatusCode::NOT_FOUND, format!("Unknown tool: {name}"))),

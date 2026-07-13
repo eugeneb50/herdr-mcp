@@ -28,6 +28,27 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
             }
             Ok(true)
         }
+        KeyCode::Char('s') if mods.contains(KeyModifiers::CONTROL) => {
+            if let Some(http) = app.http.clone() {
+                match http.trim_summary().await {
+                    Ok(_) => app.status_msg = "summary notification sent".into(),
+                    Err(e) => app.status_msg = format!("summary failed: {e}"),
+                }
+            }
+            Ok(true)
+        }
+        KeyCode::Char('o') if mods.contains(KeyModifiers::CONTROL) => {
+            if let Some(http) = app.http.clone() {
+                match http.trim_dashboard_open().await {
+                    Ok(v) => {
+                        let pane = v.get("pane_id").and_then(|x| x.as_str()).unwrap_or("?");
+                        app.status_msg = format!("opened dashboard pane {pane}");
+                    }
+                    Err(e) => app.status_msg = format!("open failed: {e}"),
+                }
+            }
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }
@@ -101,7 +122,10 @@ fn render_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         )));
         let mut panes: Vec<_> = s.per_pane.iter().collect();
         panes.sort_by_key(|(_, p)| std::cmp::Reverse(p.net_saved_bytes));
-        let max = panes.first().map(|(_, p)| p.net_saved_bytes.max(1)).unwrap_or(1);
+        let max = panes
+            .first()
+            .map(|(_, p)| p.net_saved_bytes.max(1))
+            .unwrap_or(1);
         for (pane, p) in panes.iter().take(12) {
             lines.push(pane_bar(pane, p.net_saved_bytes, max));
         }
@@ -139,25 +163,21 @@ fn render_policies(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         && let Some(policies) = t.get("active_policies").and_then(|p| p.as_object())
     {
         if policies.is_empty() {
-                lines.push(Line::from("(none)"));
-            } else {
-                for (pane, stages) in policies.iter().take(8) {
-                    let stage_list = match stages {
-                        serde_json::Value::Array(a) => a
-                            .iter()
-                            .filter_map(|s| s.as_str())
-                            .collect::<Vec<_>>()
-                            .join(","),
-                        _ => String::new(),
-                    };
-                    lines.push(Line::from(format!(
-                        "{} {}",
-                        truncate(pane, 14),
-                        stage_list
-                    )));
-                }
+            lines.push(Line::from("(none)"));
+        } else {
+            for (pane, stages) in policies.iter().take(8) {
+                let stage_list = match stages {
+                    serde_json::Value::Array(a) => a
+                        .iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    _ => String::new(),
+                };
+                lines.push(Line::from(format!("{} {}", truncate(pane, 14), stage_list)));
             }
         }
+    }
 
     if let Some(d) = &app.trim.diagnose {
         lines.push(Line::from(""));

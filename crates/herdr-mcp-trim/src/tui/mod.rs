@@ -22,18 +22,43 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind,
-        KeyModifiers, MouseEvent, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::Modifier;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::{Terminal, backend::CrosstermBackend};
 use serde_json::Value;
+use tui_textarea::{Input as TaInput, Key as TaKey, TextArea};
+
+use std::io::Write;
+
+/// Append a debug line to `<data_dir>/tui-debug.log` AND echo it on stderr.
+///
+/// The TUI owns the terminal, so stderr lands in the spawning pane's
+/// scrollback while the file gives a durable trace. This is the primary
+/// runtime-diagnostics channel for clipboard / result-selection behavior
+/// (which otherwise fails silently inside async futures).
+fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let line = format!("[{}] {}\n", ts, msg.as_ref());
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(data_dir.join("tui-debug.log"))
+    {
+        let _ = f.write_all(line.as_bytes());
+    }
+    eprint!("{line}");
+}
 
 use crate::stats;
 
@@ -118,6 +143,52 @@ pub struct HerdrContext {
     pub pane_count: usize,
 }
 
+/// Right-click context-menu actions for editing fields / panes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ContextAction {
+    Copy,
+    Cut,
+    Paste,
+    PasteToPane,
+}
+
+impl ContextAction {
+    fn label(self) -> &'static str {
+        match self {
+            ContextAction::Copy => "Copy",
+            ContextAction::Cut => "Cut",
+            ContextAction::Paste => "Paste",
+            ContextAction::PasteToPane => "Paste to pane",
+        }
+    }
+
+    const ALL: [ContextAction; 4] = [
+        ContextAction::Copy,
+        ContextAction::Cut,
+        ContextAction::Paste,
+        ContextAction::PasteToPane,
+    ];
+}
+
+/// Right-click context menu overlay state.
+pub struct ContextMenu {
+    pub open: bool,
+    pub x: u16,
+    pub y: u16,
+    pub index: usize,
+}
+
+/// Width/height of the context menu overlay (chars/lines).
+const MENU_WIDTH: u16 = 18;
+const MENU_HEIGHT: u16 = ContextAction::ALL.len() as u16 + 2; // border top + bottom
+
+/// Compute the clamped menu rect given the terminal size.
+fn menu_rect(x: u16, y: u16, cols: u16, rows: u16) -> Rect {
+    let x = x.min(cols.saturating_sub(MENU_WIDTH));
+    let y = y.min(rows.saturating_sub(MENU_HEIGHT));
+    Rect::new(x, y, MENU_WIDTH, MENU_HEIGHT)
+}
+
 /// Options for launching the dashboard.
 #[derive(Clone)]
 pub struct DashboardOptions {
@@ -154,6 +225,9 @@ pub struct App {
     pub tab_rects: Vec<Rect>,
     pub tool_list_inner: Rect,
     pub var_list_inner: Rect,
+    pub result_inner: Rect,
+    /// right-click context menu state
+    pub context_menu: ContextMenu,
 }
 
 /// Playground tab state (tool runner + recipe builder).
@@ -161,11 +235,14 @@ pub struct PlaygroundState {
     pub sub_tab: PlaygroundSub,
     pub tool_index: usize,
     pub tools_list: Vec<(String, String)>, // (name, short desc)
-    pub editing_field: bool,                // editing focused text/number field
-    pub fields: Vec<ToolField>,             // parsed schema for current tool
-    pub field_values: Vec<String>,          // current values aligned to `fields`
-    pub field_focus: usize,                 // focused field index
-    pub fields_for_index: Option<usize>,    // tool_index the fields were parsed for
+    pub editing_field: bool,               // editing focused text/number field
+    pub fields: Vec<ToolField>,            // parsed schema for current tool
+    pub field_values: Vec<String>,         // current values aligned to `fields`
+    pub field_focus: usize,                // focused field index
+    pub fields_for_index: Option<usize>,   // tool_index the fields were parsed for
+    pub edit_area: TextArea<'static>,      // live editor for the focused field
+    pub result_area: TextArea<'static>,    // selectable view of the last result
+    pub result_focused: bool,              // result pane has selection focus
     pub result: Option<Value>,
     pub error: Option<String>,
 }
@@ -186,8 +263,8 @@ pub struct VariablesState {
     pub entries: Vec<(String, String)>, // (key, value)
     pub selected: usize,
     pub editing: bool,
-    pub edit_key: String,
-    pub edit_value: String,
+    pub edit_key_area: TextArea<'static>,
+    pub edit_value_area: TextArea<'static>,
     pub edit_field: EditField,
 }
 
@@ -206,6 +283,11 @@ pub struct SettingsState {
 }
 
 impl App {
+    /// Trace a debug line (see `log_debug`) tagged with this app's data dir.
+    fn log_debug(&self, msg: impl AsRef<str>) {
+        log_debug(&self.opts.data_dir, msg);
+    }
+
     fn new(opts: DashboardOptions) -> Self {
         let http = HttpClient::new(opts.http_port).ok();
         let http_port = opts.http_port;
@@ -232,6 +314,9 @@ impl App {
                 field_values: Vec::new(),
                 field_focus: 0,
                 fields_for_index: None,
+                edit_area: TextArea::default(),
+                result_area: TextArea::default(),
+                result_focused: false,
                 result: None,
                 error: None,
             },
@@ -240,8 +325,8 @@ impl App {
                 entries: Vec::new(),
                 selected: 0,
                 editing: false,
-                edit_key: String::new(),
-                edit_value: String::new(),
+                edit_key_area: TextArea::default(),
+                edit_value_area: TextArea::default(),
                 edit_field: EditField::Key,
             },
             settings: SettingsState {
@@ -257,7 +342,25 @@ impl App {
             tab_rects: Vec::new(),
             tool_list_inner: Rect::default(),
             var_list_inner: Rect::default(),
+            result_inner: Rect::default(),
+            context_menu: ContextMenu {
+                open: false,
+                x: 0,
+                y: 0,
+                index: 0,
+            },
         }
+        .tap_debug()
+    }
+
+    /// Log startup + the debug-file location, then return self.
+    fn tap_debug(self) -> Self {
+        let path = self.opts.data_dir.join("tui-debug.log");
+        log_debug(
+            &self.opts.data_dir,
+            format!("App started; debug log -> {}", path.display()),
+        );
+        self
     }
 
     async fn refresh(&mut self) {
@@ -274,8 +377,10 @@ impl App {
                 self.status_msg.clear();
             } else {
                 self.bridge_connected = false;
-                self.status_msg =
-                    format!("bridge unreachable at :{} — start `herdr-mcp serve`", self.opts.http_port);
+                self.status_msg = format!(
+                    "bridge unreachable at :{} — start `herdr-mcp serve`",
+                    self.opts.http_port
+                );
             }
         }
 
@@ -377,6 +482,314 @@ impl App {
                 .unwrap_or(0);
         }
     }
+
+    /// The active editable `TextArea` (live editor) for the current tab/field.
+    fn active_textarea_mut(&mut self) -> Option<&mut TextArea<'static>> {
+        match self.tab {
+            Tab::Playground if self.playground.editing_field => {
+                Some(&mut self.playground.edit_area)
+            }
+            Tab::Variables if self.variables_state.editing => {
+                if self.variables_state.edit_field == EditField::Key {
+                    Some(&mut self.variables_state.edit_key_area)
+                } else {
+                    Some(&mut self.variables_state.edit_value_area)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Immutable counterpart of [`App::active_textarea_mut`].
+    fn active_textarea_ref(&self) -> Option<&TextArea<'static>> {
+        match self.tab {
+            Tab::Playground if self.playground.editing_field => Some(&self.playground.edit_area),
+            Tab::Variables if self.variables_state.editing => {
+                if self.variables_state.edit_field == EditField::Key {
+                    Some(&self.variables_state.edit_key_area)
+                } else {
+                    Some(&self.variables_state.edit_value_area)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// The full text of the focused editable field (used when there's no active
+    /// selection). Falls back to the non-editing focused playground field.
+    fn focused_field_text(&self) -> Option<String> {
+        match self.tab {
+            Tab::Playground => {
+                if self.playground.editing_field {
+                    Some(self.playground.edit_area.lines().join("\n"))
+                } else if !self.playground.fields.is_empty() {
+                    self.playground
+                        .field_values
+                        .get(self.playground.field_focus)
+                        .cloned()
+                } else {
+                    None
+                }
+            }
+            Tab::Variables if self.variables_state.editing => {
+                if self.variables_state.edit_field == EditField::Key {
+                    Some(self.variables_state.edit_key_area.lines().join("\n"))
+                } else {
+                    Some(self.variables_state.edit_value_area.lines().join("\n"))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// True when a Copy/Cut/Paste target is available (field, variable, or the
+    /// focused Result pane).
+    fn has_editable(&self) -> bool {
+        self.selection_or_full_text().is_some()
+    }
+
+    /// The text to copy: the active selection if one exists, otherwise the full
+    /// value of the focused target. Priority: focused Result pane → active
+    /// editable field/variable → non-editing focused playground field.
+    fn selection_or_full_text(&self) -> Option<String> {
+        if self.tab == Tab::Playground && self.playground.result_focused {
+            let ta = &self.playground.result_area;
+            let full = ta.lines().join("\n");
+            return Some(textarea_selection_or_full(ta, full));
+        }
+        if let Some(ta) = self.active_textarea_ref() {
+            let full = ta.lines().join("\n");
+            return Some(textarea_selection_or_full(ta, full));
+        }
+        self.focused_field_text()
+    }
+
+    /// True when the current copy target is the read-only Result pane (so
+    /// Cut/Paste must be suppressed).
+    fn copy_target_is_readonly(&self) -> bool {
+        self.tab == Tab::Playground && self.playground.result_focused
+    }
+
+    /// Feed a key event into the active editable `TextArea` (if any).
+    pub(crate) fn feed_active_textarea(&mut self, code: KeyCode, mods: KeyModifiers) {
+        if let Some(ta) = self.active_textarea_mut()
+            && let Some(input) = to_textarea_input(code, mods)
+        {
+            ta.input(input);
+        }
+    }
+
+    /// Feed a key event into the focused Result `TextArea` (for scrolling /
+    /// Shift+arrow selection). No-op unless the Result pane is focused.
+    pub(crate) fn feed_result_textarea(&mut self, code: KeyCode, mods: KeyModifiers) {
+        if self.tab == Tab::Playground
+            && self.playground.result_focused
+            && let Some(input) = to_textarea_input(code, mods)
+        {
+            self.playground.result_area.input(input);
+        }
+    }
+
+    async fn set_clipboard(&mut self, text: &str) {
+        self.log_debug(format!(
+            "set_clipboard: {} chars, http={}",
+            text.len(),
+            self.http.is_some()
+        ));
+        match self.http.clone() {
+            Some(http) => match http.clipboard_set(text).await {
+                Ok(v) => {
+                    self.status_msg = format!("copied {} chars", text.len());
+                    self.log_debug(format!("set_clipboard ok: {v}"));
+                }
+                Err(e) => {
+                    self.status_msg = format!("clipboard set failed: {e}");
+                    self.log_debug(format!("set_clipboard ERR: {e}"));
+                }
+            },
+            None => {
+                self.status_msg = "bridge not connected".into();
+                self.log_debug("set_clipboard: bridge not connected (http=None)");
+            }
+        }
+    }
+
+    async fn clipboard_copy(&mut self) {
+        let text = match self.selection_or_full_text() {
+            Some(t) => t,
+            None => {
+                self.status_msg = "nothing to copy".into();
+                self.log_debug("clipboard_copy: nothing to copy (selection_or_full_text=None)");
+                return;
+            }
+        };
+        self.log_debug(format!(
+            "clipboard_copy: result_focused={} text_len={}",
+            self.playground.result_focused,
+            text.len()
+        ));
+        self.set_clipboard(&text).await;
+    }
+
+    async fn clipboard_cut(&mut self) {
+        if self.copy_target_is_readonly() {
+            self.status_msg = "result is read-only".into();
+            return;
+        }
+        let text = if let Some(ta) = self.active_textarea_mut() {
+            if !ta.is_selecting() {
+                ta.select_all();
+            }
+            ta.copy();
+            let yank = ta.yank_text();
+            ta.cut();
+            yank
+        } else if let Some(t) = self.focused_field_text() {
+            // No live editor: clear the focused (non-editing) field.
+            if self.tab == Tab::Playground
+                && !self.playground.editing_field
+                && let Some(v) = self
+                    .playground
+                    .field_values
+                    .get_mut(self.playground.field_focus)
+            {
+                *v = String::new();
+            }
+            t
+        } else {
+            self.status_msg = "nothing to cut".into();
+            return;
+        };
+        self.set_clipboard(&text).await;
+    }
+
+    async fn clipboard_paste(&mut self) {
+        if self.copy_target_is_readonly() {
+            self.status_msg = "result is read-only".into();
+            return;
+        }
+        let text = match self.http.clone() {
+            Some(http) => match http.clipboard_get().await {
+                Ok(t) => {
+                    self.log_debug(format!("clipboard_paste: got {} chars", t.len()));
+                    t
+                }
+                Err(e) => {
+                    self.status_msg = format!("clipboard get failed: {e}");
+                    self.log_debug(format!("clipboard_paste ERR: {e}"));
+                    return;
+                }
+            },
+            None => {
+                self.status_msg = "bridge not connected".into();
+                self.log_debug("clipboard_paste: bridge not connected (http=None)");
+                return;
+            }
+        };
+        match self.tab {
+            Tab::Playground => {
+                if !self.playground.editing_field {
+                    self.playground.editing_field = true;
+                    let cur = self
+                        .playground
+                        .field_values
+                        .get(self.playground.field_focus)
+                        .cloned()
+                        .unwrap_or_default();
+                    self.playground.edit_area = TextArea::new(vec![cur]);
+                }
+                let ta = &mut self.playground.edit_area;
+                ta.set_yank_text(text);
+                ta.paste();
+                if let Some(v) = self
+                    .playground
+                    .field_values
+                    .get_mut(self.playground.field_focus)
+                {
+                    *v = ta.lines().join("\n");
+                }
+            }
+            Tab::Variables if self.variables_state.editing => {
+                let ta = if self.variables_state.edit_field == EditField::Key {
+                    &mut self.variables_state.edit_key_area
+                } else {
+                    &mut self.variables_state.edit_value_area
+                };
+                ta.set_yank_text(text);
+                ta.paste();
+            }
+            _ => self.status_msg = "no field to paste into".into(),
+        }
+    }
+
+    async fn paste_to_pane(&mut self) {
+        let text = match self.http.clone() {
+            Some(http) => match http.clipboard_get().await {
+                Ok(t) => t,
+                Err(e) => {
+                    self.status_msg = format!("clipboard get failed: {e}");
+                    return;
+                }
+            },
+            None => {
+                self.status_msg = "bridge not connected".into();
+                return;
+            }
+        };
+        let pane_id = match &self.herdr.pane_id {
+            Some(p) => p.clone(),
+            None => {
+                self.status_msg = "no focused herdr pane".into();
+                return;
+            }
+        };
+        match herdr_cli(&["pane", "send-text", &pane_id, &text]).await {
+            Ok(_) => self.status_msg = format!("sent {} chars to pane {pane_id}", text.len()),
+            Err(e) => self.status_msg = format!("send-text failed: {e}"),
+        }
+    }
+}
+
+/// Execute a right-click context-menu action and close the menu.
+async fn execute_context_action(app: &mut App, action: ContextAction) {
+    match action {
+        ContextAction::Copy => app.clipboard_copy().await,
+        ContextAction::Cut => app.clipboard_cut().await,
+        ContextAction::Paste => app.clipboard_paste().await,
+        ContextAction::PasteToPane => app.paste_to_pane().await,
+    }
+    app.context_menu.open = false;
+}
+
+/// Convert a crossterm key event into a backend-agnostic `tui_textarea::Input`.
+///
+/// We build `Input` manually (rather than `Input::from(crossterm_event)`) so the
+/// TUI does not need to depend on tui-textarea's pinned crossterm version.
+pub(crate) fn to_textarea_input(code: KeyCode, mods: KeyModifiers) -> Option<TaInput> {
+    let key = match code {
+        KeyCode::Char(c) => TaKey::Char(c),
+        KeyCode::Enter => TaKey::Enter,
+        KeyCode::Backspace => TaKey::Backspace,
+        KeyCode::Left => TaKey::Left,
+        KeyCode::Right => TaKey::Right,
+        KeyCode::Up => TaKey::Up,
+        KeyCode::Down => TaKey::Down,
+        KeyCode::Tab => TaKey::Tab,
+        KeyCode::Delete => TaKey::Delete,
+        KeyCode::Home => TaKey::Home,
+        KeyCode::End => TaKey::End,
+        KeyCode::PageUp => TaKey::PageUp,
+        KeyCode::PageDown => TaKey::PageDown,
+        KeyCode::Esc => TaKey::Esc,
+        KeyCode::F(n) => TaKey::F(n),
+        _ => return None,
+    };
+    Some(TaInput {
+        key,
+        ctrl: mods.contains(KeyModifiers::CONTROL),
+        alt: mods.contains(KeyModifiers::ALT),
+        shift: mods.contains(KeyModifiers::SHIFT),
+    })
 }
 
 /// Entry point invoked from the CLI `dashboard` subcommand.
@@ -450,6 +863,30 @@ async fn main_loop(
     }
 }
 
+/// Extract the selected text from a `TextArea` without mutating its yank
+/// buffer, falling back to the full text when no selection is active. Mirrors
+/// tui-textarea's `copy` semantics but is safe to call from an `&self` context.
+fn textarea_selection_or_full(ta: &TextArea, full: String) -> String {
+    if ta.is_selecting()
+        && let Some(((sr, sc), (er, ec))) = ta.selection_range()
+    {
+        if sr == er {
+            return ta.lines()[sr]
+                .chars()
+                .skip(sc)
+                .take(ec.saturating_sub(sc))
+                .collect();
+        }
+        let mut chunk = vec![ta.lines()[sr].chars().skip(sc).collect::<String>()];
+        for row in (sr + 1)..er {
+            chunk.push(ta.lines()[row].clone());
+        }
+        chunk.push(ta.lines()[er].chars().take(ec).collect::<String>());
+        return chunk.join("\n");
+    }
+    full
+}
+
 /// Draws the full frame: header, tab bar, tab content, footer.
 fn ui(frame: &mut ratatui::Frame, app: &mut App) {
     let area = frame.area();
@@ -466,6 +903,37 @@ fn ui(frame: &mut ratatui::Frame, app: &mut App) {
     draw_tab_bar(frame, chunks[0], app);
     draw_content(frame, chunks[1], app);
     draw_footer(frame, chunks[2], app);
+    if app.context_menu.open {
+        draw_context_menu(frame, app);
+    }
+}
+
+/// Right-click context menu overlay (Copy / Cut / Paste / Paste to pane).
+fn draw_context_menu(frame: &mut ratatui::Frame, app: &mut App) {
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let rect = menu_rect(app.context_menu.x, app.context_menu.y, cols, rows);
+    let block = Block::default().borders(Borders::ALL).title("Edit");
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let has = app.has_editable();
+    for (i, a) in ContextAction::ALL.iter().enumerate() {
+        let focused = i == app.context_menu.index;
+        let enabled = has || matches!(a, ContextAction::PasteToPane);
+        let style = if !enabled {
+            dim_style()
+        } else if focused {
+            accent_style().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        };
+        let label = format!(" {:<14} ", a.label());
+        let line = Line::from(Span::styled(label, style));
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(inner.x, inner.y + i as u16, inner.width, 1),
+        );
+    }
 }
 
 /// Brand header + herdr sidecar context.
@@ -503,8 +971,7 @@ fn draw_tab_bar(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
             muted_style()
         };
         spans.push(Span::styled(format!("{label}  "), style));
-        app.tab_rects
-            .push(Rect::new(x, bar_y, width, 1));
+        app.tab_rects.push(Rect::new(x, bar_y, width, 1));
         x += width;
     }
     let bar = Paragraph::new(Line::from(spans));
@@ -523,19 +990,20 @@ fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
 /// Footer with status message + keybindings.
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let mut line = Line::from(vec![
-        Span::styled(
-            "Ctrl+1-5/Ctrl+Tab:tab  ↑/↓:navigate  Ctrl+r:refresh  Ctrl+q:quit",
-            dim_style(),
-        ),
-    ]);
+    let mut line = Line::from(vec![Span::styled(
+        "Ctrl+1-5:tab  ↑/↓:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit",
+        dim_style(),
+    )]);
     if !app.status_msg.is_empty() {
         line = Line::from(vec![
             Span::styled(
-                "Ctrl+1-5/Ctrl+Tab:tab  ↑/↓:navigate  Ctrl+r:refresh  Ctrl+q:quit",
+                "Ctrl+1-5:tab  ↑/↓:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit",
                 dim_style(),
             ),
-            Span::styled(format!("   {}", truncate(&app.status_msg, 40)), accent_style()),
+            Span::styled(
+                format!("   {}", truncate(&app.status_msg, 90)),
+                accent_style(),
+            ),
         ]);
     }
     frame.render_widget(Paragraph::new(line), area);
@@ -543,6 +1011,12 @@ fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
 /// Global key handler with tab switching + per-tab dispatch.
 async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<()> {
+    // The right-click context menu fully owns input while open.
+    if app.context_menu.open {
+        handle_context_menu_key(app, code, mods).await?;
+        return Ok(());
+    }
+
     // Editing inputs are handled inside the active tab first.
     let consumed = match app.tab {
         Tab::Playground => tabs::playground::handle_key(app, code, mods).await?,
@@ -553,6 +1027,25 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
     };
     if consumed {
         return Ok(());
+    }
+
+    // Global clipboard hotkeys (Ctrl+C copy / Ctrl+V paste / Ctrl+X cut).
+    if mods.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('c') => {
+                app.clipboard_copy().await;
+                return Ok(());
+            }
+            KeyCode::Char('v') => {
+                app.clipboard_paste().await;
+                return Ok(());
+            }
+            KeyCode::Char('x') => {
+                app.clipboard_cut().await;
+                return Ok(());
+            }
+            _ => {}
+        }
     }
 
     // Global keys. Every command requires a Ctrl modifier (or is a navigation
@@ -593,10 +1086,99 @@ fn cycle_tab(app: &mut App, step: i32) {
     app.status_msg.clear();
 }
 
+/// Key handling while the right-click context menu is open.
+async fn handle_context_menu_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
+    // Hotkeys still work while the menu is open.
+    if mods.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('c') => {
+                execute_context_action(app, ContextAction::Copy).await;
+                return Ok(true);
+            }
+            KeyCode::Char('v') => {
+                execute_context_action(app, ContextAction::Paste).await;
+                return Ok(true);
+            }
+            KeyCode::Char('x') => {
+                execute_context_action(app, ContextAction::Cut).await;
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+    match code {
+        KeyCode::Up => {
+            if app.context_menu.index > 0 {
+                app.context_menu.index -= 1;
+            }
+            Ok(true)
+        }
+        KeyCode::Down => {
+            if app.context_menu.index + 1 < ContextAction::ALL.len() {
+                app.context_menu.index += 1;
+            }
+            Ok(true)
+        }
+        KeyCode::Esc => {
+            app.context_menu.open = false;
+            Ok(true)
+        }
+        KeyCode::Enter => {
+            let action = ContextAction::ALL[app.context_menu.index];
+            execute_context_action(app, action).await;
+            Ok(true)
+        }
+        _ => Ok(true),
+    }
+}
+
 /// Mouse event handler: click tabs to switch, click lists to select, wheel scroll.
 async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
     match m.kind {
-        MouseEventKind::Down(_) => {
+        MouseEventKind::Down(MouseButton::Right) => {
+            // Region-aware: focusing the Result pane makes Copy target it.
+            let over_result = app.tab == Tab::Playground
+                && m.column >= app.result_inner.x
+                && m.column < app.result_inner.right()
+                && m.row >= app.result_inner.y
+                && m.row < app.result_inner.bottom();
+            app.log_debug(format!(
+                "mouse right-down at ({},{}) result_inner={:?} over_result={}",
+                m.column, m.row, app.result_inner, over_result
+            ));
+            if over_result {
+                app.playground.result_focused = true;
+                app.playground.editing_field = false;
+            } else if app.tab == Tab::Playground {
+                app.playground.result_focused = false;
+            }
+            // Open the right-click context menu at the cursor.
+            app.context_menu.open = true;
+            app.context_menu.x = m.column;
+            app.context_menu.y = m.row;
+            app.context_menu.index = 0;
+            return Ok(());
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if app.context_menu.open {
+                if let Ok((cols, rows)) = crossterm::terminal::size() {
+                    let rect = menu_rect(app.context_menu.x, app.context_menu.y, cols, rows);
+                    if m.column >= rect.x
+                        && m.column < rect.right()
+                        && m.row >= rect.y
+                        && m.row < rect.bottom()
+                    {
+                        let idx = (m.row.saturating_sub(rect.y + 1)) as usize;
+                        if idx < ContextAction::ALL.len() {
+                            let action = ContextAction::ALL[idx];
+                            execute_context_action(app, action).await;
+                            return Ok(());
+                        }
+                    }
+                }
+                // Click outside the menu dismisses it; continue to normal handling.
+                app.context_menu.open = false;
+            }
             // Tab strip.
             for (i, r) in app.tab_rects.iter().enumerate() {
                 if m.row == r.y && m.column >= r.x && m.column < r.x + r.width {
@@ -616,7 +1198,23 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 if idx < app.playground.tools_list.len() {
                     app.playground.tool_index = idx;
                     app.playground.editing_field = false;
+                    app.playground.result_focused = false;
                 }
+                return Ok(());
+            }
+            // Result pane (playground): focus it for selection.
+            if app.tab == Tab::Playground
+                && m.column >= app.result_inner.x
+                && m.column < app.result_inner.right()
+                && m.row >= app.result_inner.y
+                && m.row < app.result_inner.bottom()
+            {
+                app.playground.result_focused = true;
+                app.playground.editing_field = false;
+                app.log_debug(format!(
+                    "mouse left-down focused Result pane; result_inner={:?}",
+                    app.result_inner
+                ));
                 return Ok(());
             }
             // Variable list.
@@ -705,14 +1303,11 @@ pub fn parse_tool_schema(tool: &Value) -> Vec<ToolField> {
     let mut fields = Vec::new();
     for (name, spec) in props {
         let typ = spec.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        let enum_variants = spec
-            .get("enum")
-            .and_then(|e| e.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_string))
-                    .collect::<Vec<_>>()
-            });
+        let enum_variants = spec.get("enum").and_then(|e| e.as_array()).map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect::<Vec<_>>()
+        });
         let kind = if typ == "boolean" {
             FieldKind::Boolean
         } else if enum_variants.is_some() {
@@ -722,12 +1317,10 @@ pub fn parse_tool_schema(tool: &Value) -> Vec<ToolField> {
         } else {
             FieldKind::Text
         };
-        let default = spec
-            .get("default")
-            .map(|d| match d {
-                Value::String(s) => s.clone(),
-                o => o.to_string(),
-            });
+        let default = spec.get("default").map(|d| match d {
+            Value::String(s) => s.clone(),
+            o => o.to_string(),
+        });
         let description = spec
             .get("description")
             .and_then(|d| d.as_str())
@@ -844,7 +1437,10 @@ mod tests {
 
         let mode = fields.iter().find(|f| f.name == "mode").unwrap();
         assert!(matches!(mode.kind, FieldKind::Enum));
-        assert_eq!(mode.enum_variants.as_ref().unwrap(), &vec!["fast".to_string(), "slow".to_string()]);
+        assert_eq!(
+            mode.enum_variants.as_ref().unwrap(),
+            &vec!["fast".to_string(), "slow".to_string()]
+        );
     }
 
     #[test]
@@ -852,5 +1448,108 @@ mod tests {
         let none = parse_tool_schema(&serde_json::json!({ "name": "x" }));
         assert!(none.is_empty());
     }
-}
 
+    // ── Clipboard / result selection ─────────────────────────────────────
+
+    fn sample_field() -> ToolField {
+        ToolField {
+            name: "field".into(),
+            label: "field".into(),
+            kind: FieldKind::Text,
+            required: false,
+            default: None,
+            enum_variants: None,
+            description: None,
+        }
+    }
+
+    fn test_app() -> App {
+        App::new(DashboardOptions {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            http_port: 1,
+        })
+    }
+
+    #[test]
+    fn selection_or_full_text_uses_focused_field() {
+        let mut app = test_app();
+        app.tab = Tab::Playground;
+        app.playground.fields = vec![sample_field()];
+        app.playground.field_values = vec!["hello".into()];
+        app.playground.field_focus = 0;
+        app.playground.result_focused = false;
+        assert_eq!(app.selection_or_full_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn selection_or_full_text_uses_full_result_when_focused() {
+        let mut app = test_app();
+        app.tab = Tab::Playground;
+        app.playground.result_focused = true;
+        app.playground.result_area = TextArea::new(vec!["line1".to_string(), "line2".to_string()]);
+        assert_eq!(
+            app.selection_or_full_text(),
+            Some("line1\nline2".to_string())
+        );
+    }
+
+    #[test]
+    fn selection_or_full_text_uses_result_selection() {
+        let mut app = test_app();
+        app.tab = Tab::Playground;
+        app.playground.result_focused = true;
+        let mut ta = TextArea::new(vec!["hello world".to_string()]);
+        ta.start_selection();
+        for _ in 0..5 {
+            ta.move_cursor(tui_textarea::CursorMove::Forward);
+        }
+        app.playground.result_area = ta;
+        assert_eq!(app.selection_or_full_text(), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn selection_or_full_text_none_when_nothing_focused() {
+        let app = test_app();
+        assert_eq!(app.selection_or_full_text(), None);
+    }
+
+    #[test]
+    fn copy_target_is_readonly_only_for_result() {
+        let mut app = test_app();
+        app.tab = Tab::Playground;
+        app.playground.result_focused = true;
+        assert!(app.copy_target_is_readonly());
+        app.playground.result_focused = false;
+        assert!(!app.copy_target_is_readonly());
+    }
+
+    #[test]
+    fn menu_rect_clamps_to_terminal() {
+        let r = menu_rect(1000, 1000, 80, 24);
+        assert!(r.x + r.width <= 80);
+        assert!(r.y + r.height <= 24);
+        assert_eq!(r.width, MENU_WIDTH);
+        assert_eq!(r.height, MENU_HEIGHT);
+
+        let r2 = menu_rect(5, 5, 80, 24);
+        assert_eq!(r2.x, 5);
+        assert_eq!(r2.y, 5);
+    }
+
+    #[test]
+    fn to_textarea_input_maps_keys_and_mods() {
+        let a = to_textarea_input(KeyCode::Char('a'), KeyModifiers::NONE).unwrap();
+        assert_eq!(a.key, TaKey::Char('a'));
+        assert!(!a.ctrl);
+
+        let c = to_textarea_input(KeyCode::Char('c'), KeyModifiers::CONTROL).unwrap();
+        assert!(c.ctrl);
+        assert_eq!(c.key, TaKey::Char('c'));
+
+        let up = to_textarea_input(KeyCode::Up, KeyModifiers::NONE).unwrap();
+        assert_eq!(up.key, TaKey::Up);
+
+        // Unsupported keys (e.g. modifier-only) map to None.
+        assert!(to_textarea_input(KeyCode::Null, KeyModifiers::NONE).is_none());
+    }
+}

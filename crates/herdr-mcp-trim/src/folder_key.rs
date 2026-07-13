@@ -567,10 +567,7 @@ mod tests {
     fn write_sample_folder() -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("docs.md");
-        let body = format!(
-            "{}\n",
-            "configuration gateway profile session ".repeat(5)
-        );
+        let body = format!("{}\n", "configuration gateway profile session ".repeat(5));
         std::fs::write(&path, body).unwrap();
         tmp
     }

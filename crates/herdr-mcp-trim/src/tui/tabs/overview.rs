@@ -11,9 +11,9 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(9),  // intro + stats
-            Constraint::Length(8),  // tabs guide
-            Constraint::Min(0),     // herdr context
+            Constraint::Length(9), // intro + stats
+            Constraint::Length(8), // tabs guide
+            Constraint::Min(0),    // herdr context
         ])
         .split(area);
 

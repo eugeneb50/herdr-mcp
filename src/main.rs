@@ -285,6 +285,11 @@ async fn run_serve(
     herdr_client.spawn_subscriber();
     let registry = herdr_client.registry.clone();
 
+    // Periodic trim-badge refresh so savings badges survive server restarts.
+    server::spawn_trim_poller(std::sync::Arc::new(
+        server::HerdrMcpServer::new((*persistence).clone(), registry.clone()),
+    ));
+
     if let Some(port) = http {
         let server = server::HerdrMcpServer::new((*persistence).clone(), registry.clone());
         tokio::spawn(async move {

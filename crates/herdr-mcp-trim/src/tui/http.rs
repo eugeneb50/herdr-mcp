@@ -62,7 +62,12 @@ impl HttpClient {
             .ok()?;
         for port in candidates {
             let url = format!("http://localhost:{port}/api/health");
-            if probe.get(&url).send().await.is_ok_and(|r| r.status().is_success()) {
+            if probe
+                .get(&url)
+                .send()
+                .await
+                .is_ok_and(|r| r.status().is_success())
+            {
                 return Some(port);
             }
         }
@@ -234,6 +239,118 @@ impl HttpClient {
             .context("parsing /api/trim/diagnose body")?;
         Ok(v)
     }
+
+    /// Fire a savings summary notification.
+    pub async fn trim_summary(&self) -> Result<Value> {
+        let url = format!("{}/api/trim/summary", self.base);
+        let v = self
+            .inner
+            .post(&url)
+            .send()
+            .await
+            .context("POST /api/trim/summary")?
+            .json::<Value>()
+            .await
+            .context("parsing /api/trim/summary body")?;
+        Ok(v)
+    }
+
+    /// Open a live trim dashboard in a new herdr pane.
+    pub async fn trim_dashboard_open(&self) -> Result<Value> {
+        let url = format!("{}/api/trim/dashboard/open", self.base);
+        let v = self
+            .inner
+            .post(&url)
+            .send()
+            .await
+            .context("POST /api/trim/dashboard/open")?
+            .json::<Value>()
+            .await
+            .context("parsing /api/trim/dashboard/open body")?;
+        Ok(v)
+    }
+
+    /// Write `text` to the system clipboard via the bridge's `clipboard_set` tool.
+    pub async fn clipboard_set(&self, text: &str) -> Result<Value> {
+        let url = format!("{}/api/tools/clipboard_set", self.base);
+        let body = serde_json::json!({ "text": text });
+        eprintln!("[http] clipboard_set -> {url} ({} chars)", text.len());
+        let resp = self
+            .inner
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("POST /api/tools/clipboard_set")?;
+        let status = resp.status();
+        let v: Value = resp
+            .json()
+            .await
+            .context("parsing /api/tools/clipboard_set body")?;
+        eprintln!("[http] clipboard_set <- status={status} body={v}");
+        if !status.is_success() {
+            anyhow::bail!("clipboard_set HTTP {status}: {v}");
+        }
+        if v.get("is_error").and_then(|x| x.as_bool()).unwrap_or(false) {
+            let detail = v
+                .pointer("/content/0/text")
+                .and_then(|x| x.as_str())
+                .unwrap_or("tool reported is_error");
+            anyhow::bail!("clipboard_set tool error: {detail}");
+        }
+        Ok(v)
+    }
+
+    /// Read text from the system clipboard via the bridge's `clipboard_get` tool.
+    pub async fn clipboard_get(&self) -> Result<String> {
+        let url = format!("{}/api/tools/clipboard_get", self.base);
+        eprintln!("[http] clipboard_get -> {url}");
+        let resp = self
+            .inner
+            .post(&url)
+            .json(&serde_json::Value::Object(Default::default()))
+            .send()
+            .await
+            .context("POST /api/tools/clipboard_get")?;
+        let status = resp.status();
+        let v: Value = resp
+            .json()
+            .await
+            .context("parsing /api/tools/clipboard_get body")?;
+        eprintln!("[http] clipboard_get <- status={status} body={v}");
+        if !status.is_success() {
+            anyhow::bail!("clipboard_get HTTP {status}: {v}");
+        }
+        Ok(parse_clipboard_text(&v))
+    }
+}
+
+/// Extract clipboard text from a `clipboard_get` tool result.
+///
+/// The bridge serializes a rmcp `CallToolResult` whose `content` is an array of
+/// `{ "type": "text", "text": "..." }` items. We concatenate every `text`
+/// item (joined by newlines). As a fallback we return the first string found
+/// anywhere in the payload, or an empty string.
+pub fn parse_clipboard_text(v: &Value) -> String {
+    let mut out = String::new();
+    if let Some(items) = v.get("content").and_then(|c| c.as_array()) {
+        for item in items {
+            if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(t);
+            }
+        }
+    }
+    if !out.is_empty() {
+        return out;
+    }
+    if let Some(s) = v.as_str() {
+        return s.to_string();
+    }
+    // No extractable text content.
+    String::new()
 }
 
 #[cfg(test)]
@@ -250,5 +367,34 @@ mod tests {
         )
         .await;
         assert!(res.is_ok(), "discover_bridge hung");
+    }
+
+    #[test]
+    fn parse_clipboard_text_from_content_array() {
+        let v = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "hello" },
+                { "type": "text", "text": "world" }
+            ],
+            "is_error": false
+        });
+        assert_eq!(parse_clipboard_text(&v), "hello\nworld");
+    }
+
+    #[test]
+    fn parse_clipboard_text_empty_when_no_text() {
+        let v = serde_json::json!({ "content": [{ "type": "image", "data": "x" }] });
+        assert_eq!(parse_clipboard_text(&v), "");
+    }
+
+    #[test]
+    fn parse_clipboard_text_multiline_roundtrip() {
+        let v = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "line one" },
+                { "type": "text", "text": "line two" }
+            ]
+        });
+        assert_eq!(parse_clipboard_text(&v), "line one\nline two");
     }
 }

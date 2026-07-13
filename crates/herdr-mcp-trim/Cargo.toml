@@ -17,6 +17,7 @@ schemars = { workspace = true }
 walkdir = { workspace = true }
 tokio = { workspace = true, features = ["fs"] }
 reqwest = { workspace = true }
+tui-textarea-2 = { version = "0.12", default-features = false, features = ["crossterm"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

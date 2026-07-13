@@ -6,8 +6,11 @@ use clap::{Parser, Subcommand};
 use rmcp::{ServiceExt, transport::stdio};
 use tracing_subscriber::EnvFilter;
 
-use herdr_mcp_core::{Config, CliOverrides};
-use herdr_mcp_server::{HerdrClient, HerdrMcpServer, Persistence, server::start_http};
+use herdr_mcp_core::{CliOverrides, Config};
+use herdr_mcp_server::{
+    HerdrClient, HerdrMcpServer, Persistence,
+    server::{spawn_trim_poller, start_http},
+};
 use herdr_mcp_trim::{dashboard, folder_key as fk, pipeline, runner::PipelineRunner};
 
 #[derive(Parser)]
@@ -150,11 +153,18 @@ async fn main() -> Result<()> {
             data_dir: _,
             herdr_socket: _,
         }) => run_serve(&config).await,
-        Some(Command::Dashboard { data_dir, http_port, legacy }) => {
+        Some(Command::Dashboard {
+            data_dir,
+            http_port,
+            legacy,
+        }) => {
             if legacy {
                 dashboard::run(&data_dir).await
             } else {
-                let opts = herdr_mcp_trim::tui::DashboardOptions { data_dir, http_port };
+                let opts = herdr_mcp_trim::tui::DashboardOptions {
+                    data_dir,
+                    http_port,
+                };
                 herdr_mcp_trim::tui::run(opts).await
             }
         }
@@ -272,8 +282,15 @@ async fn run_serve(config: &Config) -> Result<()> {
     herdr_client.spawn_subscriber();
     let registry = herdr_client.registry.clone();
 
+    // Periodic trim-badge refresh so savings badges survive server restarts.
+    spawn_trim_poller(std::sync::Arc::new(HerdrMcpServer::with_config(
+        (*persistence).clone(),
+        registry.clone(),
+        config,
+    )));
+
     if let Some(port) = config.http.port {
-        let server = HerdrMcpServer::new((*persistence).clone(), registry.clone());
+        let server = HerdrMcpServer::with_config((*persistence).clone(), registry.clone(), config);
         tokio::spawn(async move {
             if let Err(e) = start_http(server, port).await {
                 tracing::error!("HTTP server failed: {e}");
@@ -290,7 +307,7 @@ async fn run_serve(config: &Config) -> Result<()> {
     }
 
     tracing::info!("Starting herdr-mcp MCP server");
-    let server = HerdrMcpServer::new((*persistence).clone(), registry.clone());
+    let server = HerdrMcpServer::with_config((*persistence).clone(), registry.clone(), config);
     let service = server.serve(stdio()).await?;
     tracing::info!("herdr-mcp server initialized, waiting for requests");
     service.waiting().await?;

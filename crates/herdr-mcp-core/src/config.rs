@@ -31,11 +31,14 @@ impl PersistentConfig {
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("failed to read persistent config: {}", path.display()))?;
             // Parse only the [persistent] section
-            let table: toml::Table = toml::from_str(&content)
-                .with_context(|| format!("failed to parse persistent config: {}", path.display()))?;
+            let table: toml::Table = toml::from_str(&content).with_context(|| {
+                format!("failed to parse persistent config: {}", path.display())
+            })?;
             if let Some(persistent) = table.get("persistent") {
                 let cfg: PersistentConfig = toml::from_str(&toml::to_string(persistent)?)
-                    .with_context(|| format!("failed to parse [persistent] section: {}", path.display()))?;
+                    .with_context(|| {
+                        format!("failed to parse [persistent] section: {}", path.display())
+                    })?;
                 return Ok(cfg);
             }
         }
@@ -66,6 +69,27 @@ pub struct Config {
 
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// Clipboard backend override for the `clipboard_set` / `clipboard_get` tools.
+    #[serde(default)]
+    pub clipboard: ClipboardConfig,
+}
+
+/// Explicit clipboard backend commands for the `clipboard_set` / `clipboard_get`
+/// tools. When both `copy-command` and `paste-command` are set (non-empty) they
+/// override platform auto-detection (e.g. force `xsel` instead of `wl-copy` on
+/// Linux). The `HERDR_MCP_CLIPBOARD_COPY` / `HERDR_MCP_CLIPBOARD_PASTE` env vars
+/// still take precedence over this setting.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ClipboardConfig {
+    /// Command that reads clipboard contents from stdin (copy).
+    #[serde(default)]
+    pub copy_command: Option<String>,
+
+    /// Command that writes clipboard contents to stdout (paste).
+    #[serde(default)]
+    pub paste_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -316,6 +340,7 @@ impl Config {
             trim: other.trim,
             sandbox: other.sandbox,
             logging: other.logging,
+            clipboard: other.clipboard,
         }
     }
 
@@ -523,6 +548,15 @@ pub fn generate_default_config() -> String {
     out.push_str("# herdr-mcp configuration\n");
     out.push_str("# See https://github.com/yourorg/herdr-mcp for docs\n\n");
     out.push_str(&toml::to_string_pretty(&config).unwrap());
+    out.push_str(
+        "\n# Clipboard backend override for the clipboard_set / clipboard_get tools.\n\
+         # When both are set they override platform auto-detection (e.g. force\n\
+         # xsel instead of wl-copy on Linux). HERDR_MCP_CLIPBOARD_COPY / _PASTE\n\
+         # env vars still take precedence over this.\n\
+         # [clipboard]\n\
+         # copy-command = \"xsel --clipboard --input\"\n\
+         # paste-command = \"xsel --clipboard --output\"\n",
+    );
     out
 }
 
@@ -587,6 +621,25 @@ mod tests {
         );
         assert_eq!(original.trim.default_stages, restored.trim.default_stages);
         assert_eq!(original.logging.level, restored.logging.level);
+    }
+
+    #[test]
+    fn test_clipboard_config_section_parses() {
+        let toml_str = r#"
+            data-dir = "/tmp/x"
+            [clipboard]
+            copy-command = "xsel --clipboard --input"
+            paste-command = "xsel --clipboard --output"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            cfg.clipboard.copy_command.as_deref(),
+            Some("xsel --clipboard --input")
+        );
+        assert_eq!(
+            cfg.clipboard.paste_command.as_deref(),
+            Some("xsel --clipboard --output")
+        );
     }
 
     #[test]

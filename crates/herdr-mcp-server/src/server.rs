@@ -484,6 +484,19 @@ pub struct DecompressWithFolderKeyParams {
     pub text: String,
 }
 
+/// Parameters for the `clipboard_set` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct ClipboardSetParams {
+    /// Text to write to the system clipboard.
+    pub text: String,
+}
+
+/// Parameters for the `clipboard_get` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct ClipboardGetParams {}
+
 /// Parameters for the `trim_policy_set` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
@@ -597,11 +610,22 @@ pub struct HerdrMcpServer {
     pub registry: AgentRegistry,
     /// Data directory, used by the trim layer for persistent PFC1 memory.
     pub data_dir: std::path::PathBuf,
+    /// Resolved clipboard backend config (source of truth: `Config`).
+    pub clipboard: herdr_mcp_core::ClipboardConfig,
 }
 
 #[tool_router]
 impl HerdrMcpServer {
     pub fn new(persistence: Persistence, registry: AgentRegistry) -> Self {
+        Self::with_config(persistence, registry, &herdr_mcp_core::Config::default())
+    }
+
+    /// Build the server, resolving the clipboard backend from `config`.
+    pub fn with_config(
+        persistence: Persistence,
+        registry: AgentRegistry,
+        config: &herdr_mcp_core::Config,
+    ) -> Self {
         let data_dir = persistence.data_dir().to_path_buf();
         let persistence = std::sync::Arc::new(persistence);
         let scheduler = Scheduler::new(persistence.clone());
@@ -610,6 +634,7 @@ impl HerdrMcpServer {
             scheduler,
             registry,
             data_dir,
+            clipboard: config.clipboard.clone(),
         }
     }
 
@@ -626,40 +651,42 @@ impl HerdrMcpServer {
     ) -> String {
         // 1. Explicit per-call stages win.
         if let Some(specs) = explicit
-            && !specs.is_empty() {
-                let stages = match pipeline::parse_stage_specs(specs) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!("trim: {e}");
-                        return text.to_string();
-                    }
-                };
-                let base = self.base_key_for(None).await;
-                let r = pipeline::run(text, &stages, &base);
-                self.record_trim_result(pane, &r).await;
-                return r.output;
-            }
+            && !specs.is_empty()
+        {
+            let stages = match pipeline::parse_stage_specs(specs) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("trim: {e}");
+                    return text.to_string();
+                }
+            };
+            let base = self.base_key_for(None).await;
+            let r = pipeline::run(text, &stages, &base);
+            self.record_trim_result(pane, &r).await;
+            return r.output;
+        }
         // 2. Fall back to the target's per-pane policy.
         if let Some(policy) = self.registry.get_trim_policy(pane).await
-            && policy.is_active() {
-                let stages = match policy.parse_stages_with(false) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::warn!("trim policy: {e}");
-                        return text.to_string();
-                    }
-                };
-                let ws = self.registry.get(pane).await.map(|h| h.workspace_id);
-                let base = self.base_key_for(ws.as_deref()).await;
-                let r = pipeline::run(text, &stages, &base);
-                if let Some(last) = r.stages.iter().rev().find_map(|s| s.pfc1_key.clone())
-                    && let Some(ws) = ws
-                {
-                    self.save_pfc1_key(&ws, &last).await;
+            && policy.is_active()
+        {
+            let stages = match policy.parse_stages_with(false) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("trim policy: {e}");
+                    return text.to_string();
                 }
-                self.record_trim_result(pane, &r).await;
-                return r.output;
+            };
+            let ws = self.registry.get(pane).await.map(|h| h.workspace_id);
+            let base = self.base_key_for(ws.as_deref()).await;
+            let r = pipeline::run(text, &stages, &base);
+            if let Some(last) = r.stages.iter().rev().find_map(|s| s.pfc1_key.clone())
+                && let Some(ws) = ws
+            {
+                self.save_pfc1_key(&ws, &last).await;
             }
+            self.record_trim_result(pane, &r).await;
+            return r.output;
+        }
         text.to_string()
     }
 
@@ -692,20 +719,42 @@ impl HerdrMcpServer {
         let badge = format!("-{net_pct}%");
         for h in self.registry.list_for_ws(ws).await {
             if let Some(ref policy) = h.trim_policy
-                && policy.is_active() {
-                    let _ = herdr_cli(&[
-                        "pane",
-                        "report-metadata",
-                        &h.pane_id,
-                        "--source",
-                        "herdr-mcp",
-                        "--custom-status",
-                        &badge,
-                        "--ttl-ms",
-                        "25000",
-                    ])
-                    .await;
-                }
+                && policy.is_active()
+            {
+                let _ = herdr_cli(&[
+                    "pane",
+                    "report-metadata",
+                    &h.pane_id,
+                    "--source",
+                    "herdr-mcp",
+                    "--custom-status",
+                    &badge,
+                    "--ttl-ms",
+                    "25000",
+                ])
+                .await;
+            }
+        }
+    }
+
+    /// Push savings-% badges for every workspace that has trim stats on disk.
+    /// Drives the periodic poller so badges survive server restarts.
+    async fn push_all_badges(&self) {
+        let sessions_dir = self.data_dir.join("sessions");
+        let mut entries = match tokio::fs::read_dir(&sessions_dir).await {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::debug!("trim poller: cannot read sessions dir: {e}");
+                return;
+            }
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.ends_with(".trim_stats.json") {
+                continue;
+            }
+            let ws = name.trim_end_matches(".trim_stats.json");
+            self.push_badge_for_workspace(ws).await;
         }
     }
 
@@ -1955,6 +2004,59 @@ impl HerdrMcpServer {
             .map_err(to_mcp_err)?,
         ]))
     }
+
+    // ── Clipboard ───────────────────────────────────────────────────────
+
+    #[tool(
+        description = "Write text to the system clipboard. Requires a clipboard utility on the host (pbcopy on macOS, wl-copy on Wayland, xclip/xsel on X11). Text only."
+    )]
+    async fn clipboard_set(
+        &self,
+        Parameters(ClipboardSetParams { text }): Parameters<ClipboardSetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (copy_cmd, _paste_cmd) = detect_clipboard(&self.clipboard)?;
+        eprintln!(
+            "[clipboard] set: running `{copy_cmd}` ({} chars)",
+            text.len()
+        );
+        match shell_with_stdin(copy_cmd, &text).await {
+            Ok(out) => {
+                eprintln!("[clipboard] set: ok (stdout={out:?})");
+                Ok(CallToolResult::success(vec![
+                    Content::json(serde_json::json!({
+                        "ok": true,
+                        "length": text.len(),
+                    }))
+                    .map_err(to_mcp_err)?,
+                ]))
+            }
+            Err(e) => {
+                eprintln!("[clipboard] set: FAILED: {e}");
+                Err(e)
+            }
+        }
+    }
+
+    #[tool(
+        description = "Read the current text content of the system clipboard. Requires a clipboard utility on the host (pbpaste on macOS, wl-paste on Wayland, xclip/xsel on X11). Returns empty string if the clipboard contains no text. Text only."
+    )]
+    async fn clipboard_get(
+        &self,
+        Parameters(_): Parameters<ClipboardGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (_copy_cmd, paste_cmd) = detect_clipboard(&self.clipboard)?;
+        eprintln!("[clipboard] get: running `{paste_cmd}`");
+        match shell_output(paste_cmd).await {
+            Ok(text) => {
+                eprintln!("[clipboard] get: ok ({} chars)", text.len());
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+            Err(e) => {
+                eprintln!("[clipboard] get: FAILED: {e}");
+                Err(e)
+            }
+        }
+    }
 }
 
 #[tool_handler(
@@ -2065,6 +2167,172 @@ async fn run_herdr_json(args: &[&str]) -> Result<CallToolResult, McpError> {
 async fn run_herdr_text(args: &[&str]) -> Result<CallToolResult, McpError> {
     let output = herdr_cli(args).await?;
     Ok(CallToolResult::success(vec![Content::text(output)]))
+}
+
+// ── Clipboard helpers ────────────────────────────────────────────────
+
+/// Detect the platform clipboard command pair (copy, paste).
+///
+/// Resolution order (highest precedence first):
+/// 1. `HERDR_MCP_CLIPBOARD_COPY` / `HERDR_MCP_CLIPBOARD_PASTE` env vars (both set).
+/// 2. The `clipboard.copy-command` / `clipboard.paste-command` config settings
+///    (both set) — lets Linux users force e.g. `xsel` instead of `wl-copy`.
+/// 3. Platform auto-detection (pbcopy / wl-copy / xclip / xsel).
+///
+/// The leaked `&'static str` pairs are used for the process lifetime; this
+/// avoids threading an allocator through the call sites.
+fn detect_clipboard(
+    cfg: &herdr_mcp_core::ClipboardConfig,
+) -> Result<(&'static str, &'static str), McpError> {
+    if let (Ok(copy), Ok(paste)) = (
+        std::env::var("HERDR_MCP_CLIPBOARD_COPY"),
+        std::env::var("HERDR_MCP_CLIPBOARD_PASTE"),
+    ) && !copy.trim().is_empty()
+        && !paste.trim().is_empty()
+    {
+        // Leak intentionally: the returned pair is 'static and used for the
+        // process lifetime; this avoids threading an allocator through the
+        // call sites.
+        let copy: &'static str = Box::leak(copy.into_boxed_str());
+        let paste: &'static str = Box::leak(paste.into_boxed_str());
+        return Ok((copy, paste));
+    }
+    if let (Some(copy), Some(paste)) = (&cfg.copy_command, &cfg.paste_command)
+        && !copy.trim().is_empty()
+        && !paste.trim().is_empty()
+    {
+        let copy: &'static str = Box::leak(copy.clone().into_boxed_str());
+        let paste: &'static str = Box::leak(paste.clone().into_boxed_str());
+        return Ok((copy, paste));
+    }
+    match std::env::consts::OS {
+        "macos" => Ok(("pbcopy", "pbpaste")),
+        "windows" => Ok(("clip", "powershell -command Get-Clipboard")),
+        "linux" => {
+            if command_exists("wl-copy") {
+                Ok(("wl-copy", "wl-paste"))
+            } else if command_exists("xclip") {
+                Ok((
+                    "xclip -selection clipboard",
+                    "xclip -selection clipboard -o",
+                ))
+            } else if command_exists("xsel") {
+                Ok(("xsel --clipboard --input", "xsel --clipboard --output"))
+            } else {
+                Err(McpError {
+                    code: rmcp::model::ErrorCode(-32603),
+                    message:
+                        "No clipboard utility found. Install xclip, xsel, or wl-clipboard (e.g. `apt install xclip`).".into(),
+                    data: None,
+                })
+            }
+        }
+        _ => Err(McpError {
+            code: rmcp::model::ErrorCode(-32603),
+            message: "Unsupported platform for clipboard operations.".into(),
+            data: None,
+        }),
+    }
+}
+
+/// True if `cmd` resolves on PATH.
+fn command_exists(cmd: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Shell out to a command, piping `stdin_text` to its stdin (clipboard copy).
+async fn shell_with_stdin(cmd: &str, stdin_text: &str) -> Result<String, McpError> {
+    tracing::debug!("clipboard copy via: {cmd}");
+    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+    let bin = parts[0];
+    let args: Vec<&str> = parts
+        .get(1)
+        .map(|a| a.split_whitespace().collect())
+        .unwrap_or_default();
+
+    let mut child = tokio::process::Command::new(bin)
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| McpError {
+            code: rmcp::model::ErrorCode(-32603),
+            message: format!("Clipboard utility '{bin}' not found: {e}").into(),
+            data: None,
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin
+            .write_all(stdin_text.as_bytes())
+            .await
+            .map_err(|e| McpError {
+                code: rmcp::model::ErrorCode(-32603),
+                message: format!("Failed to write to clipboard utility stdin: {e}").into(),
+                data: None,
+            })?;
+    }
+
+    let output = child.wait_with_output().await.map_err(|e| McpError {
+        code: rmcp::model::ErrorCode(-32603),
+        message: format!("Clipboard utility failed: {e}").into(),
+        data: None,
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            return Err(McpError {
+                code: rmcp::model::ErrorCode(-32000),
+                message: format!("Clipboard write failed: {}", stderr.trim()).into(),
+                data: None,
+            });
+        }
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Shell out to a command, capturing stdout (clipboard paste).
+async fn shell_output(cmd: &str) -> Result<String, McpError> {
+    tracing::debug!("clipboard paste via: {cmd}");
+    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
+    let bin = parts[0];
+    let args: Vec<&str> = parts
+        .get(1)
+        .map(|a| a.split_whitespace().collect())
+        .unwrap_or_default();
+
+    let output = tokio::process::Command::new(bin)
+        .args(&args)
+        .output()
+        .await
+        .map_err(|e| McpError {
+            code: rmcp::model::ErrorCode(-32603),
+            message: format!("Clipboard utility '{bin}' not found: {e}").into(),
+            data: None,
+        })?;
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Spawn a background task that refreshes trim badges for all workspaces
+/// every 20s. Best-effort: I/O errors are logged, never propagated.
+pub fn spawn_trim_poller(server: std::sync::Arc<HerdrMcpServer>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(20));
+        loop {
+            interval.tick().await;
+            server.push_all_badges().await;
+        }
+    });
 }
 
 /// Execute the `herdr` CLI binary with the given arguments.
@@ -2647,6 +2915,21 @@ async fn dispatch_tool(
                 serde_json::from_value(body).map_err(bad_request)?;
             server
                 .decompress_with_folder_key(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
+        }
+
+        "clipboard_set" => {
+            let p: ClipboardSetParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .clipboard_set(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
+        }
+        "clipboard_get" => {
+            let p: ClipboardGetParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .clipboard_get(Parameters(p))
                 .await
                 .map_err(mcp_err_to_http)
         }
@@ -3289,5 +3572,112 @@ mod tests {
     #[test]
     fn test_json_value_to_string_number() {
         assert_eq!(json_value_to_string(&serde_json::json!(7)), "7");
+    }
+
+    // ── Clipboard passthrough ────────────────────────────────────────────
+
+    /// Build a server with default config (no explicit clipboard commands).
+    fn clipboard_test_server() -> HerdrMcpServer {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let pers = Persistence::new(data);
+        let pers_arc = std::sync::Arc::new(pers);
+        let reg = AgentRegistry::new(pers_arc);
+        HerdrMcpServer::new(Persistence::new(tmp.path().join("data2")), reg)
+    }
+
+    // Single test touching process-global env vars so the assertions don't
+    // race with each other when tests run in parallel.
+    #[tokio::test]
+    async fn test_clipboard_env_override_and_roundtrip() {
+        let server = clipboard_test_server();
+        // --- detection override ---
+        unsafe {
+            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", "mycopy");
+            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", "mypaste");
+        }
+        let (copy, paste) = detect_clipboard(&server.clipboard).expect("override should be used");
+        assert_eq!(copy, "mycopy");
+        assert_eq!(paste, "mypaste");
+
+        // Override beats platform detection (even if a real backend exists).
+        unsafe {
+            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", "forced-copy");
+            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", "forced-paste");
+        }
+        let (copy, _) = detect_clipboard(&server.clipboard).unwrap();
+        assert_eq!(copy, "forced-copy");
+
+        // --- roundtrip via a fake backend driven by the override ---
+        let tmp = tempfile::tempdir().unwrap();
+        let clip = tmp.path().join("clip.txt");
+        let copy_sh = tmp.path().join("fake_copy.sh");
+        let paste_sh = tmp.path().join("fake_paste.sh");
+        std::fs::write(&copy_sh, "#!/bin/sh\ncat > \"$1\"\n").unwrap();
+        std::fs::write(&paste_sh, "#!/bin/sh\ncat \"$1\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = 0o755;
+            std::fs::set_permissions(&copy_sh, std::fs::Permissions::from_mode(mode)).unwrap();
+            std::fs::set_permissions(&paste_sh, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        let copy_cmd = format!("{} {}", copy_sh.display(), clip.display());
+        let paste_cmd = format!("{} {}", paste_sh.display(), clip.display());
+        unsafe {
+            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", &copy_cmd);
+            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", &paste_cmd);
+        }
+
+        let data_dir = tmp.path().join("data");
+        let pers = Persistence::new(data_dir.clone());
+        let pers_arc = std::sync::Arc::new(pers);
+        let registry = AgentRegistry::new(pers_arc);
+        let server = HerdrMcpServer::new(Persistence::new(data_dir), registry);
+
+        let set_res = server
+            .clipboard_set(Parameters(ClipboardSetParams {
+                text: "hello clipboard".into(),
+            }))
+            .await;
+        assert!(set_res.is_ok(), "clipboard_set should succeed via override");
+        // The backend file proves the text was actually written through.
+        let written = std::fs::read_to_string(&clip).unwrap();
+        assert_eq!(written, "hello clipboard");
+
+        let got = server
+            .clipboard_get(Parameters(ClipboardGetParams {}))
+            .await
+            .expect("clipboard_get should succeed");
+        // Extract text via the rmcp API (Content derefs to RawContent).
+        let mut text = String::new();
+        for c in &got.content {
+            if let Some(tc) = c.as_text() {
+                text = tc.text.clone();
+            }
+        }
+        assert_eq!(text, "hello clipboard");
+
+        unsafe {
+            std::env::remove_var("HERDR_MCP_CLIPBOARD_COPY");
+            std::env::remove_var("HERDR_MCP_CLIPBOARD_PASTE");
+        }
+
+        // --- config override beats platform detection (env now cleared) ---
+        let mut cfg = herdr_mcp_core::Config::default();
+        cfg.clipboard.copy_command = Some("cfg-copy".into());
+        cfg.clipboard.paste_command = Some("cfg-paste".into());
+        let cc_tmp = tempfile::tempdir().unwrap();
+        let cc_pers = Persistence::new(cc_tmp.path().join("data"));
+        let cc_reg = AgentRegistry::new(std::sync::Arc::new(cc_pers));
+        let cfg_server = HerdrMcpServer::with_config(
+            Persistence::new(cc_tmp.path().join("data2")),
+            cc_reg,
+            &cfg,
+        );
+        let (copy, paste) = detect_clipboard(&cfg_server.clipboard).unwrap();
+        assert_eq!(copy, "cfg-copy");
+        assert_eq!(paste, "cfg-paste");
     }
 }

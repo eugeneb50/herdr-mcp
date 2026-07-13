@@ -39,7 +39,12 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     ]));
     frame.render_widget(header, Rect::new(area.x, area.y, area.width, 1));
 
-    let body = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
+    let body = Rect::new(
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(1),
+    );
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -69,9 +74,21 @@ fn render_runtime(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let herdr_bin = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
     let lines = vec![
-        row(app.settings.selected == 0, "HTTP port".into(), app.settings.http_port.to_string()),
-        row(app.settings.selected == 1, "Data directory".into(), truncate(&app.settings.data_dir, 40)),
-        row(app.settings.selected == 2, "herdr socket".into(), truncate(&app.settings.herdr_socket, 40)),
+        row(
+            app.settings.selected == 0,
+            "HTTP port".into(),
+            app.settings.http_port.to_string(),
+        ),
+        row(
+            app.settings.selected == 1,
+            "Data directory".into(),
+            truncate(&app.settings.data_dir, 40),
+        ),
+        row(
+            app.settings.selected == 2,
+            "herdr socket".into(),
+            truncate(&app.settings.herdr_socket, 40),
+        ),
         row(app.settings.selected == 3, "HERDR_BIN".into(), herdr_bin),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -118,10 +135,21 @@ fn render_env_and_sidecar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::from("Sidecar profiler:"));
     match &app.herdr.workspace {
-        Some(ws) => lines.push(row(app.settings.selected == 9, "workspace".into(), ws.clone())),
-        None => lines.push(row(app.settings.selected == 9, "workspace".into(), "(unknown — not inside herdr?)".into())),
+        Some(ws) => lines.push(row(
+            app.settings.selected == 9,
+            "workspace".into(),
+            ws.clone(),
+        )),
+        None => lines.push(row(
+            app.settings.selected == 9,
+            "workspace".into(),
+            "(unknown — not inside herdr?)".into(),
+        )),
     }
-    lines.push(raw_row(format!("  pane:      {}", app.herdr.pane_id.as_deref().unwrap_or("(unknown)"))));
+    lines.push(raw_row(format!(
+        "  pane:      {}",
+        app.herdr.pane_id.as_deref().unwrap_or("(unknown)")
+    )));
     lines.push(raw_row(format!("  panes:     {}", app.herdr.pane_count)));
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);

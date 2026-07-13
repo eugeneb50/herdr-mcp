@@ -9,8 +9,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::tui::{App, EditField};
 use crate::tui::theme::{accent_style, dim_style, panel_block, selected_style};
+use crate::tui::{App, EditField};
 
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     if app.variables_state.editing {
@@ -37,15 +37,15 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
                 .cloned()
                 .unwrap_or_default();
             app.variables_state.editing = true;
-            app.variables_state.edit_key = k;
-            app.variables_state.edit_value = v;
+            app.variables_state.edit_key_area = crate::tui::TextArea::new(vec![k]);
+            app.variables_state.edit_value_area = crate::tui::TextArea::new(vec![v]);
             app.variables_state.edit_field = EditField::Key;
             Ok(true)
         }
         KeyCode::Char('n') if mods.contains(KeyModifiers::CONTROL) => {
             app.variables_state.editing = true;
-            app.variables_state.edit_key = String::new();
-            app.variables_state.edit_value = String::new();
+            app.variables_state.edit_key_area = crate::tui::TextArea::default();
+            app.variables_state.edit_value_area = crate::tui::TextArea::default();
             app.variables_state.edit_field = EditField::Key;
             Ok(true)
         }
@@ -89,21 +89,14 @@ async fn handle_edit(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result
             save(app).await;
             Ok(true)
         }
-        KeyCode::Backspace => {
-            let buf = match app.variables_state.edit_field {
-                EditField::Key => &mut app.variables_state.edit_key,
-                EditField::Value => &mut app.variables_state.edit_value,
-            };
-            buf.pop();
-            Ok(true)
+        // Let global clipboard hotkeys (Ctrl+C/V/X) reach the global handler.
+        KeyCode::Char(c)
+            if mods.contains(KeyModifiers::CONTROL) && matches!(c, 'c' | 'v' | 'x') =>
+        {
+            Ok(false)
         }
-        KeyCode::Left | KeyCode::Right => Ok(true),
-        KeyCode::Char(c) if plain => {
-            let buf = match app.variables_state.edit_field {
-                EditField::Key => &mut app.variables_state.edit_key,
-                EditField::Value => &mut app.variables_state.edit_value,
-            };
-            buf.push(c);
+        KeyCode::Backspace | KeyCode::Left | KeyCode::Right | KeyCode::Char(_) if plain => {
+            app.feed_active_textarea(code, mods);
             Ok(true)
         }
         _ => Ok(false),
@@ -111,8 +104,14 @@ async fn handle_edit(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result
 }
 
 async fn save(app: &mut App) {
-    let key = app.variables_state.edit_key.trim().to_string();
-    let value = app.variables_state.edit_value.clone();
+    let key = app
+        .variables_state
+        .edit_key_area
+        .lines()
+        .join("\n")
+        .trim()
+        .to_string();
+    let value = app.variables_state.edit_value_area.lines().join("\n");
     if key.is_empty() {
         app.status_msg = "key cannot be empty".into();
         return;
@@ -140,7 +139,12 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     ]));
     frame.render_widget(header, Rect::new(area.x, area.y, area.width, 1));
 
-    let body = Rect::new(area.x, area.y + 1, area.width, area.height.saturating_sub(1));
+    let body = Rect::new(
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(1),
+    );
 
     if app.variables_state.editing {
         render_edit(frame, body, app);
@@ -198,24 +202,35 @@ fn render_edit(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let k_focus = state.edit_field == EditField::Key;
     let v_focus = state.edit_field == EditField::Value;
 
-    let k_cursor = if k_focus { "▌" } else { " " };
-    let v_cursor = if v_focus { "▌" } else { " " };
+    // key label + editor
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "key:",
+            if k_focus { accent_style() } else { dim_style() },
+        ))),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let ta_k = app.variables_state.edit_key_area.clone();
+    frame.render_widget(&ta_k, Rect::new(inner.x, inner.y + 1, inner.width, 1));
 
-    let lines = vec![
-        Line::from(vec![
-            Span::styled("  key:   ", dim_style()),
-            Span::styled(state.edit_key.clone(), if k_focus { accent_style() } else { Style::default() }),
-            Span::styled(k_cursor, accent_style()),
-        ]),
-        Line::from(vec![
-            Span::styled("  value: ", dim_style()),
-            Span::styled(truncate(&state.edit_value, 60), if v_focus { accent_style() } else { Style::default() }),
-            Span::styled(v_cursor, accent_style()),
-        ]),
-        Line::from(""),
-        Line::from("  Tab=switch field   Enter=save   Esc=cancel"),
-    ];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    // value label + editor
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "value:",
+            if v_focus { accent_style() } else { dim_style() },
+        ))),
+        Rect::new(inner.x, inner.y + 2, inner.width, 1),
+    );
+    let ta_v = app.variables_state.edit_value_area.clone();
+    frame.render_widget(&ta_v, Rect::new(inner.x, inner.y + 3, inner.width, 1));
+
+    let help_y = (inner.y + 4).min(inner.y + inner.height.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(Line::from(
+            "Tab=switch field  Ctrl+v paste  Enter=save  Esc=cancel",
+        )),
+        Rect::new(inner.x, help_y, inner.width, 1),
+    );
 }
 
 fn truncate(s: &str, max: usize) -> String {
