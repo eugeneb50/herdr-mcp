@@ -1,18 +1,62 @@
-//! Trim tab: savings dashboard, per-pane bars, active policies, diagnose —
-//! laid out in bordered panels.
+//! Trim tab: savings dashboard + trim policy settings with stage picker.
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::Style;
-use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
+use super::overview::fmt_bytes;
+use crate::policy::TrimDirection;
 use crate::tui::App;
-use crate::tui::theme::{accent_style, dim_style, panel_block};
+use crate::tui::theme::{accent_style, dim_style, panel_block, selected_style};
+use crate::tui::truncate;
+
+/// Available trim stages for the command dropdown.
+const AVAILABLE_STAGES: &[(&str, &str)] = &[
+    ("caveman:lite", "Lite style compression"),
+    ("caveman:full", "Full style compression"),
+    ("caveman:ultra", "Ultra style compression"),
+    ("pfc1", "Phonetic dictionary (lossless)"),
+];
+
+/// Direction options for the radio selector.
+const DIRECTIONS: &[TrimDirection] = &[
+    TrimDirection::None,
+    TrimDirection::Outbound,
+    TrimDirection::OutboundWithAck,
+];
+
+fn direction_label(d: &TrimDirection) -> &'static str {
+    match d {
+        TrimDirection::None => "none",
+        TrimDirection::Outbound => "outbound",
+        TrimDirection::OutboundWithAck => "outbound_with_ack",
+    }
+}
 
 /// Returns `true` if the key was consumed.
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
+    // Stage picker overlay captures all keys when open.
+    if app.trim.stage_picker_open {
+        return handle_stage_picker_key(app, code).await;
+    }
+
+    // Tab/BackTab cycle frames (3 frames: dashboard=0, pane list=1, stage list=2).
+    match code {
+        KeyCode::Tab => {
+            app.trim.focused_frame = (app.trim.focused_frame + 1) % 3;
+            return Ok(true);
+        }
+        KeyCode::BackTab => {
+            app.trim.focused_frame = (app.trim.focused_frame + 2) % 3;
+            return Ok(true);
+        }
+        _ => {}
+    }
+
+    // Ctrl+modified shortcuts (global across frames).
     match code {
         KeyCode::Char('d') if mods.contains(KeyModifiers::CONTROL) => {
             if let Some(http) = app.http.clone() {
@@ -26,7 +70,7 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
                     }
                 }
             }
-            Ok(true)
+            return Ok(true);
         }
         KeyCode::Char('s') if mods.contains(KeyModifiers::CONTROL) => {
             if let Some(http) = app.http.clone() {
@@ -35,7 +79,7 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
                     Err(e) => app.status_msg = format!("summary failed: {e}"),
                 }
             }
-            Ok(true)
+            return Ok(true);
         }
         KeyCode::Char('o') if mods.contains(KeyModifiers::CONTROL) => {
             if let Some(http) = app.http.clone() {
@@ -47,9 +91,276 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
                     Err(e) => app.status_msg = format!("open failed: {e}"),
                 }
             }
+            return Ok(true);
+        }
+        _ => {}
+    }
+
+    // Frame-specific dispatch.
+    match app.trim.focused_frame {
+        0 => handle_frame_dashboard(app, code).await,
+        1 => handle_frame_pane_list(app, code, mods).await,
+        2 => handle_frame_stage_list(app, code, mods).await,
+        _ => Ok(false),
+    }
+}
+
+/// Frame 0: Dashboard (read-only display, no navigation needed).
+async fn handle_frame_dashboard(_app: &mut App, _code: KeyCode) -> Result<bool> {
+    Ok(false)
+}
+
+/// Frame 1: Pane list — Up/Down/Home/End/PgUp/PgDn + actions.
+async fn handle_frame_pane_list(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
+    let pane_count = app.herdr.panes.len();
+    match code {
+        KeyCode::Up => {
+            app.trim.pane_index = app.trim.pane_index.saturating_sub(1);
+            Ok(true)
+        }
+        KeyCode::Down => {
+            if pane_count > 0 {
+                app.trim.pane_index = (app.trim.pane_index + 1).min(pane_count - 1);
+            }
+            Ok(true)
+        }
+        KeyCode::Home => {
+            app.trim.pane_index = 0;
+            Ok(true)
+        }
+        KeyCode::End => {
+            if pane_count > 0 {
+                app.trim.pane_index = pane_count - 1;
+            }
+            Ok(true)
+        }
+        KeyCode::PageUp => {
+            app.trim.pane_index = app.trim.pane_index.saturating_sub(5);
+            Ok(true)
+        }
+        KeyCode::PageDown => {
+            if pane_count > 0 {
+                app.trim.pane_index = (app.trim.pane_index + 5).min(pane_count - 1);
+            }
+            Ok(true)
+        }
+        KeyCode::Char('g') if mods.contains(KeyModifiers::CONTROL) => {
+            get_policy(app).await;
+            Ok(true)
+        }
+        KeyCode::Char('d') => {
+            apply_policy(app).await;
             Ok(true)
         }
         _ => Ok(false),
+    }
+}
+
+/// Frame 2: Stage list — Up/Down/Home/End/PgUp/PgDn + direction + actions.
+async fn handle_frame_stage_list(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
+    match code {
+        KeyCode::Up => {
+            app.trim.stage_index = app.trim.stage_index.saturating_sub(1);
+            Ok(true)
+        }
+        KeyCode::Down => {
+            if !app.trim.stages.is_empty() {
+                app.trim.stage_index = (app.trim.stage_index + 1).min(app.trim.stages.len() - 1);
+            }
+            Ok(true)
+        }
+        KeyCode::Home => {
+            app.trim.stage_index = 0;
+            Ok(true)
+        }
+        KeyCode::End => {
+            if !app.trim.stages.is_empty() {
+                app.trim.stage_index = app.trim.stages.len() - 1;
+            }
+            Ok(true)
+        }
+        KeyCode::PageUp => {
+            app.trim.stage_index = app.trim.stage_index.saturating_sub(5);
+            Ok(true)
+        }
+        KeyCode::PageDown => {
+            if !app.trim.stages.is_empty() {
+                app.trim.stage_index = (app.trim.stage_index + 5).min(app.trim.stages.len() - 1);
+            }
+            Ok(true)
+        }
+        // Direction cycling
+        KeyCode::Left => {
+            let cur = DIRECTIONS
+                .iter()
+                .position(|d| *d == app.trim.direction)
+                .unwrap_or(0);
+            app.trim.direction = if cur > 0 {
+                DIRECTIONS[cur - 1]
+            } else {
+                DIRECTIONS[DIRECTIONS.len() - 1]
+            };
+            Ok(true)
+        }
+        KeyCode::Right => {
+            let cur = DIRECTIONS
+                .iter()
+                .position(|d| *d == app.trim.direction)
+                .unwrap_or(0);
+            app.trim.direction = if cur + 1 < DIRECTIONS.len() {
+                DIRECTIONS[cur + 1]
+            } else {
+                DIRECTIONS[0]
+            };
+            Ok(true)
+        }
+        // Add stage — open picker
+        KeyCode::Char('a') => {
+            app.trim.stage_picker_open = true;
+            app.trim.stage_picker_index = 0;
+            Ok(true)
+        }
+        // Remove selected stage
+        KeyCode::Char('r') => {
+            if app.trim.stage_index < app.trim.stages.len() {
+                app.trim.stages.remove(app.trim.stage_index);
+                if app.trim.stage_index >= app.trim.stages.len() && app.trim.stage_index > 0 {
+                    app.trim.stage_index -= 1;
+                }
+            }
+            Ok(true)
+        }
+        KeyCode::Char('g') if mods.contains(KeyModifiers::CONTROL) => {
+            get_policy(app).await;
+            Ok(true)
+        }
+        KeyCode::Char('d') => {
+            apply_policy(app).await;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+async fn handle_stage_picker_key(app: &mut App, code: KeyCode) -> Result<bool> {
+    let count = AVAILABLE_STAGES.len();
+    match code {
+        KeyCode::Up => {
+            app.trim.stage_picker_index = app.trim.stage_picker_index.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            if count > 0 {
+                app.trim.stage_picker_index = (app.trim.stage_picker_index + 1).min(count - 1);
+            }
+        }
+        KeyCode::Home => {
+            app.trim.stage_picker_index = 0;
+        }
+        KeyCode::End => {
+            if count > 0 {
+                app.trim.stage_picker_index = count - 1;
+            }
+        }
+        KeyCode::Enter => {
+            if let Some((stage, _)) = AVAILABLE_STAGES.get(app.trim.stage_picker_index) {
+                app.trim.stages.push(stage.to_string());
+                app.trim.stage_index = app.trim.stages.len().saturating_sub(1);
+            }
+            app.trim.stage_picker_open = false;
+        }
+        KeyCode::Esc => {
+            app.trim.stage_picker_open = false;
+        }
+        _ => {}
+    }
+    Ok(true)
+}
+
+async fn get_policy(app: &mut App) {
+    let target = match app.herdr.panes.get(app.trim.pane_index) {
+        Some(p) => p.pane_id.clone(),
+        None => {
+            app.trim.policy_msg = "no pane selected".into();
+            return;
+        }
+    };
+    let http = match &app.http {
+        Some(h) => h.clone(),
+        None => {
+            app.trim.policy_msg = "bridge not connected".into();
+            return;
+        }
+    };
+    app.trim.policy_msg = "getting...".into();
+    match http.trim_policy_get(&target).await {
+        Ok(v) => {
+            if let Some(policy) = v.get("policy").cloned() {
+                if policy.is_null() {
+                    app.trim.stages.clear();
+                    app.trim.direction = TrimDirection::None;
+                    app.trim.policy_msg = "no policy set".into();
+                } else {
+                    if let Some(stages) = policy.get("stages").and_then(|s| s.as_array()) {
+                        app.trim.stages = stages
+                            .iter()
+                            .filter_map(|s| s.as_str().map(str::to_string))
+                            .collect();
+                        app.trim.stage_index = 0;
+                    }
+                    if let Some(dir) = policy.get("direction").and_then(|d| d.as_str()) {
+                        app.trim.direction = match dir {
+                            "outbound" => TrimDirection::Outbound,
+                            "outbound_with_ack" => TrimDirection::OutboundWithAck,
+                            _ => TrimDirection::None,
+                        };
+                    }
+                    app.trim.policy_msg = format!("got policy: {} stages", app.trim.stages.len());
+                }
+            } else {
+                app.trim.policy_msg = "no policy field in response".into();
+            }
+        }
+        Err(e) => {
+            app.trim.policy_msg = format!("get failed: {e}");
+        }
+    }
+}
+
+async fn apply_policy(app: &mut App) {
+    let target = match app.herdr.panes.get(app.trim.pane_index) {
+        Some(p) => p.pane_id.clone(),
+        None => {
+            app.trim.policy_msg = "no pane selected".into();
+            return;
+        }
+    };
+    let http = match &app.http {
+        Some(h) => h.clone(),
+        None => {
+            app.trim.policy_msg = "bridge not connected".into();
+            return;
+        }
+    };
+    let policy = if app.trim.stages.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!({
+            "stages": app.trim.stages,
+            "direction": direction_label(&app.trim.direction),
+        })
+    };
+    app.trim.policy_msg = "applying...".into();
+    match http.trim_policy_set(&target, policy).await {
+        Ok(_) => {
+            app.trim.policy_msg = format!(
+                "applied: {} stages, {}",
+                app.trim.stages.len(),
+                direction_label(&app.trim.direction)
+            );
+        }
+        Err(e) => {
+            app.trim.policy_msg = format!("apply failed: {e}");
+        }
     }
 }
 
@@ -60,11 +371,16 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .split(area);
 
     render_status(frame, chunks[0], app);
-    render_policies(frame, chunks[1], app);
+    render_trim_settings(frame, chunks[1], app);
+
+    // Stage picker overlay (rendered on top)
+    if app.trim.stage_picker_open {
+        render_stage_picker(frame, area, app);
+    }
 }
 
 fn render_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = panel_block(&format!(" {} ", "Trim Dashboard"));
+    let block = panel_block(" Trim Dashboard ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -80,9 +396,9 @@ fn render_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         let msgs = t.get("messages_trimmed").and_then(|v| v.as_u64());
 
         lines.push(Line::from(vec![
-            ratatui::text::Span::styled("savings ", dim_style()),
-            ratatui::text::Span::styled(format!("{}%", savings.round() as i64), accent_style()),
-            ratatui::text::Span::styled(
+            Span::styled("savings ", dim_style()),
+            Span::styled(format!("{}%", savings.round() as i64), accent_style()),
+            Span::styled(
                 format!(
                     "   net {}  gross {}  input {}  {} msgs",
                     net.map(|n| fmt_bytes(n as usize)).unwrap_or_default(),
@@ -138,6 +454,261 @@ fn render_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
+fn render_trim_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let block = panel_block(" Trim Policy ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // ── Pane list ──────────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        "Target pane:",
+        accent_style().add_modifier(Modifier::BOLD),
+    )));
+
+    if app.herdr.panes.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no panes — start herdr)",
+            dim_style(),
+        )));
+    } else {
+        // Show up to 6 panes around the selected index
+        let total = app.herdr.panes.len();
+        let sel = app.trim.pane_index.min(total.saturating_sub(1));
+        let visible = 6.min(total);
+        let start = if sel >= visible / 2 {
+            (sel - visible / 2).min(total - visible)
+        } else {
+            0
+        };
+
+        for i in start..start + visible {
+            let p = &app.herdr.panes[i];
+            let selected = i == sel;
+            let marker = if selected { "> " } else { "  " };
+            let label = if p.label.is_empty() {
+                truncate(&p.pane_id, 16)
+            } else {
+                truncate(&p.label, 16)
+            };
+            let agent = p.agent.as_deref().unwrap_or("—");
+            let status = &p.agent_status;
+
+            // Look up active policy from trim_status
+            let policy_stages = app
+                .trim_status
+                .as_ref()
+                .and_then(|t| t.get("active_policies"))
+                .and_then(|p| p.as_object())
+                .and_then(|pol| pol.get(&p.pane_id))
+                .and_then(|s| s.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+
+            let style = if selected {
+                selected_style()
+            } else {
+                Style::default()
+            };
+
+            lines.push(Line::from(vec![
+                Span::styled(
+                    marker,
+                    if selected {
+                        accent_style()
+                    } else {
+                        dim_style()
+                    },
+                ),
+                Span::styled(format!("{:<14}", label), style),
+                Span::styled(format!(" {:<8}", agent), dim_style()),
+                Span::styled(format!(" {:<8}", status), status_style(status)),
+                Span::styled(
+                    if policy_stages.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", truncate(&policy_stages, 20))
+                    },
+                    dim_style(),
+                ),
+            ]));
+        }
+        if total > visible {
+            lines.push(Line::from(Span::styled(
+                format!("  ... {}/{} panes", sel + 1, total),
+                dim_style(),
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+
+    // ── Pipeline stages ────────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        "Pipeline stages:",
+        accent_style().add_modifier(Modifier::BOLD),
+    )));
+
+    if app.trim.stages.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (empty — press [a] to add a stage)",
+            dim_style(),
+        )));
+    } else {
+        for (i, stage) in app.trim.stages.iter().enumerate() {
+            let selected = i == app.trim.stage_index;
+            let marker = if selected { "● " } else { "○ " };
+            let style = if selected {
+                selected_style()
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {}", marker),
+                    if selected {
+                        accent_style()
+                    } else {
+                        dim_style()
+                    },
+                ),
+                Span::styled(stage.clone(), style),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+
+    // ── Direction selector ─────────────────────────────────────
+    lines.push(Line::from(Span::styled(
+        "Direction:",
+        accent_style().add_modifier(Modifier::BOLD),
+    )));
+    let dir_line: Vec<Span> = DIRECTIONS
+        .iter()
+        .flat_map(|d| {
+            let active = *d == app.trim.direction;
+            let marker = if active { "● " } else { "○ " };
+            let style = if active {
+                selected_style()
+            } else {
+                dim_style()
+            };
+            vec![
+                Span::styled(format!("{}{} ", marker, direction_label(d)), style),
+                Span::raw("  "),
+            ]
+        })
+        .collect();
+    lines.push(Line::from(dir_line));
+
+    lines.push(Line::from(""));
+
+    // ── Action buttons ─────────────────────────────────────────
+    let btn_line = Line::from(vec![
+        Span::styled(" [g] Get  ", accent_style()),
+        Span::styled(" [d] Apply  ", accent_style()),
+        Span::styled(" [a] Add stage  [r] Remove", dim_style()),
+    ]);
+    lines.push(btn_line);
+
+    // ── Status message ─────────────────────────────────────────
+    if !app.trim.policy_msg.is_empty() {
+        let msg_style = if app.trim.policy_msg.contains("failed") {
+            Style::default().fg(ratatui::style::Color::Red)
+        } else if app.trim.policy_msg.starts_with("applied")
+            || app.trim.policy_msg.starts_with("got")
+        {
+            accent_style()
+        } else {
+            dim_style()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("  {}", app.trim.policy_msg),
+            msg_style,
+        )));
+    }
+
+    // ── Diagnose output ────────────────────────────────────────
+    if let Some(d) = &app.trim.diagnose {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Diagnose:",
+            dim_style().add_modifier(Modifier::BOLD),
+        )));
+        let pretty = serde_json::to_string_pretty(d).unwrap_or_else(|_| d.to_string());
+        for line in pretty.lines().take(6) {
+            lines.push(Line::from(Span::styled(line.to_string(), dim_style())));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn render_stage_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    // Center the picker overlay
+    let picker_width = 40.min(area.width.saturating_sub(4));
+    let picker_height = (AVAILABLE_STAGES.len() as u16) + 4; // title + items + border
+    let x = area.x + (area.width.saturating_sub(picker_width)) / 2;
+    let y = area.y + (area.height.saturating_sub(picker_height)) / 2;
+    let picker_area = Rect::new(x, y, picker_width, picker_height);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            " Add Stage ",
+            accent_style().add_modifier(Modifier::BOLD),
+        ))
+        .border_style(accent_style());
+    let inner = block.inner(picker_area);
+    frame.render_widget(block, picker_area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, (stage, desc)) in AVAILABLE_STAGES.iter().enumerate() {
+        let selected = i == app.trim.stage_picker_index;
+        let marker = if selected { "▸ " } else { "  " };
+        let style = if selected {
+            selected_style()
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                marker,
+                if selected {
+                    accent_style()
+                } else {
+                    dim_style()
+                },
+            ),
+            Span::styled(format!("{:<18}", stage), style),
+            Span::styled(truncate(desc, 18), dim_style()),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Enter to add, Esc to cancel",
+        dim_style(),
+    )));
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn status_style(status: &str) -> Style {
+    match status {
+        "working" => accent_style().add_modifier(Modifier::BOLD),
+        "idle" => dim_style(),
+        "done" => Style::default().fg(ratatui::style::Color::Yellow),
+        _ => Style::default().fg(ratatui::style::Color::DarkGray),
+    }
+}
+
 fn pane_bar(pane: &str, net: usize, max: usize) -> Line<'static> {
     let w = 24usize;
     let filled = if net == 0 {
@@ -145,79 +716,10 @@ fn pane_bar(pane: &str, net: usize, max: usize) -> Line<'static> {
     } else {
         (((net as f64 / max as f64) * w as f64).round() as usize).min(w)
     };
-    let bar = "█".repeat(filled) + &"░".repeat(w - filled);
+    let bar = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(w - filled);
     Line::from(vec![
-        ratatui::text::Span::styled(format!("{:>14} ", truncate(pane, 14)), dim_style()),
-        ratatui::text::Span::styled(bar, accent_style()),
-        ratatui::text::Span::styled(format!(" {}", fmt_bytes(net)), dim_style()),
+        Span::styled(format!("{:>14} ", truncate(pane, 14)), dim_style()),
+        Span::styled(bar, accent_style()),
+        Span::styled(format!(" {}", fmt_bytes(net)), dim_style()),
     ])
-}
-
-fn render_policies(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = panel_block(" Active policies ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let mut lines: Vec<Line> = Vec::new();
-    if let Some(t) = app.trim_status.as_ref()
-        && let Some(policies) = t.get("active_policies").and_then(|p| p.as_object())
-    {
-        if policies.is_empty() {
-            lines.push(Line::from("(none)"));
-        } else {
-            for (pane, stages) in policies.iter().take(8) {
-                let stage_list = match stages {
-                    serde_json::Value::Array(a) => a
-                        .iter()
-                        .filter_map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    _ => String::new(),
-                };
-                lines.push(Line::from(format!("{} {}", truncate(pane, 14), stage_list)));
-            }
-        }
-    }
-
-    if let Some(d) = &app.trim.diagnose {
-        lines.push(Line::from(""));
-        lines.push(Line::from("Diagnose:"));
-        let pretty = serde_json::to_string_pretty(d).unwrap_or_else(|_| d.to_string());
-        for line in pretty.lines().take(8) {
-            lines.push(Line::from(line.to_string()));
-        }
-    }
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .style(Style::default()),
-        inner,
-    );
-}
-
-/// Pretty-print bytes like the web UI (K/M suffixes).
-pub fn fmt_bytes(n: usize) -> String {
-    if n >= 1_048_576 {
-        format!("{:.1}M", n as f64 / 1_048_576.0)
-    } else if n >= 1024 {
-        format!("{:.1}K", n as f64 / 1024.0)
-    } else {
-        n.to_string()
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut t = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i + 1 >= max {
-            t.push('…');
-            break;
-        }
-        t.push(c);
-    }
-    t
 }

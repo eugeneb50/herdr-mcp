@@ -12,11 +12,12 @@ use serde_json::Value;
 pub struct HttpClient {
     base: String,
     inner: reqwest::Client,
+    data_dir: std::path::PathBuf,
 }
 
 impl HttpClient {
     /// Build a client for `http://localhost:{port}`.
-    pub fn new(port: u16) -> Result<Self> {
+    pub fn new(port: u16, data_dir: std::path::PathBuf) -> Result<Self> {
         let inner = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -24,7 +25,13 @@ impl HttpClient {
         Ok(Self {
             base: format!("http://localhost:{port}"),
             inner,
+            data_dir,
         })
+    }
+
+    /// Write a debug line to the TUI log file (no stderr output).
+    fn log_debug(&self, msg: &str) {
+        super::log_debug(&self.data_dir, msg);
     }
 
     /// Retarget the client at a different bridge port.
@@ -270,11 +277,26 @@ impl HttpClient {
         Ok(v)
     }
 
+    /// Read the trim policy for a target pane (role or pane id).
+    pub async fn trim_policy_get(&self, target: &str) -> Result<Value> {
+        let params = serde_json::json!({ "target": target });
+        self.call_tool("trim_policy_get", params).await
+    }
+
+    /// Set (or clear with `policy: null`) the trim policy for a target pane.
+    pub async fn trim_policy_set(&self, target: &str, policy: Value) -> Result<Value> {
+        let params = serde_json::json!({ "target": target, "policy": policy });
+        self.call_tool("trim_policy_set", params).await
+    }
+
     /// Write `text` to the system clipboard via the bridge's `clipboard_set` tool.
     pub async fn clipboard_set(&self, text: &str) -> Result<Value> {
         let url = format!("{}/api/tools/clipboard_set", self.base);
         let body = serde_json::json!({ "text": text });
-        eprintln!("[http] clipboard_set -> {url} ({} chars)", text.len());
+        self.log_debug(&format!(
+            "[http] clipboard_set -> {url} ({} chars)",
+            text.len()
+        ));
         let resp = self
             .inner
             .post(&url)
@@ -287,7 +309,7 @@ impl HttpClient {
             .json()
             .await
             .context("parsing /api/tools/clipboard_set body")?;
-        eprintln!("[http] clipboard_set <- status={status} body={v}");
+        self.log_debug(&format!("[http] clipboard_set <- status={status} body={v}"));
         if !status.is_success() {
             anyhow::bail!("clipboard_set HTTP {status}: {v}");
         }
@@ -304,7 +326,7 @@ impl HttpClient {
     /// Read text from the system clipboard via the bridge's `clipboard_get` tool.
     pub async fn clipboard_get(&self) -> Result<String> {
         let url = format!("{}/api/tools/clipboard_get", self.base);
-        eprintln!("[http] clipboard_get -> {url}");
+        self.log_debug(&format!("[http] clipboard_get -> {url}"));
         let resp = self
             .inner
             .post(&url)
@@ -317,7 +339,7 @@ impl HttpClient {
             .json()
             .await
             .context("parsing /api/tools/clipboard_get body")?;
-        eprintln!("[http] clipboard_get <- status={status} body={v}");
+        self.log_debug(&format!("[http] clipboard_get <- status={status} body={v}"));
         if !status.is_success() {
             anyhow::bail!("clipboard_get HTTP {status}: {v}");
         }
@@ -396,5 +418,19 @@ mod tests {
             ]
         });
         assert_eq!(parse_clipboard_text(&v), "line one\nline two");
+    }
+
+    #[test]
+    fn http_client_log_debug_writes_to_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let client = HttpClient::new(1, tmp.path().to_path_buf()).unwrap();
+        client.log_debug("http client test msg");
+        let log_path = tmp.path().join("tui-debug.log");
+        let contents =
+            std::fs::read_to_string(&log_path).expect("log file should be created by HttpClient");
+        assert!(
+            contents.contains("http client test msg"),
+            "log should contain the message"
+        );
     }
 }

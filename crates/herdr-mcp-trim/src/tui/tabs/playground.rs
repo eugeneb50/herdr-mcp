@@ -25,14 +25,49 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
 }
 
 async fn handle_runner(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
-    // When the Result pane is focused (not editing a field), arrows scroll and
-    // Shift+arrows extend the selection. Esc unfocuses.
-    let pg = &mut app.playground;
-    if pg.result_focused && !pg.editing_field {
+    let frame_count = if app.playground.sub_tab == PlaygroundSub::Runner {
+        3
+    } else {
+        1
+    };
+
+    // Tab/BackTab cycle frames (when not editing).
+    if !app.playground.editing_field {
+        match code {
+            KeyCode::Tab => {
+                app.playground.focused_frame = (app.playground.focused_frame + 1) % frame_count;
+                return Ok(true);
+            }
+            KeyCode::BackTab => {
+                app.playground.focused_frame =
+                    (app.playground.focused_frame + frame_count - 1) % frame_count;
+                return Ok(true);
+            }
+            _ => {}
+        }
+    }
+
+    // Sub-tab switching (global across frames).
+    match code {
+        KeyCode::Char('s') if mods.contains(KeyModifiers::CONTROL) => {
+            app.playground.sub_tab = PlaygroundSub::Runner;
+            app.playground.focused_frame = 0;
+            return Ok(true);
+        }
+        KeyCode::Char('b') if mods.contains(KeyModifiers::CONTROL) => {
+            app.playground.sub_tab = PlaygroundSub::Builder;
+            app.playground.focused_frame = 0;
+            return Ok(true);
+        }
+        _ => {}
+    }
+
+    // Frame 2: Result pane — arrows scroll, Esc unfocuses.
+    if app.playground.focused_frame == 2 && !app.playground.editing_field {
         match code {
             KeyCode::Esc => {
-                pg.result_focused = false;
-                Ok(true)
+                app.playground.focused_frame = 1;
+                return Ok(true);
             }
             KeyCode::Up
             | KeyCode::Down
@@ -43,13 +78,13 @@ async fn handle_runner(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Resu
             | KeyCode::PageUp
             | KeyCode::PageDown => {
                 app.feed_result_textarea(code, mods);
-                Ok(true)
+                return Ok(true);
             }
-            _ => Ok(false),
+            _ => return Ok(false),
         }
-    } else {
-        handle_runner_fields(app, code, mods).await
     }
+
+    handle_runner_fields(app, code, mods).await
 }
 
 async fn handle_runner_fields(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
@@ -58,9 +93,8 @@ async fn handle_runner_fields(app: &mut App, code: KeyCode, mods: KeyModifiers) 
     let pg = &mut app.playground;
     let plain = !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT);
 
-    // While editing a text/number field, route keys into the live TextArea
-    // (which provides real range selection). Clipboard hotkeys (Ctrl+C/V/X)
-    // fall through to the global handler.
+    // While editing a text/number field (frame 1), route keys into the live TextArea.
+    // Clipboard hotkeys (Ctrl+C/V/X) fall through to the global handler.
     if pg.editing_field {
         match code {
             KeyCode::Enter | KeyCode::Esc => {
@@ -77,102 +111,152 @@ async fn handle_runner_fields(app: &mut App, code: KeyCode, mods: KeyModifiers) 
         return Ok(true);
     }
 
-    match code {
-        KeyCode::Char('s') if mods.contains(KeyModifiers::CONTROL) => {
-            pg.sub_tab = PlaygroundSub::Runner;
-            Ok(true)
-        }
-        KeyCode::Char('b') if mods.contains(KeyModifiers::CONTROL) => {
-            pg.sub_tab = PlaygroundSub::Builder;
-            Ok(true)
-        }
-        KeyCode::Up if !pg.editing_field => {
-            if pg.field_focus > 0 {
-                pg.field_focus -= 1;
+    // Frame 0: Tool list navigation.
+    if pg.focused_frame == 0 {
+        match code {
+            KeyCode::Up => {
+                pg.tool_index = pg.tool_index.saturating_sub(1);
+                Ok(true)
             }
-            Ok(true)
-        }
-        KeyCode::Down if !pg.editing_field => {
-            if pg.field_focus + 1 < pg.fields.len() {
-                pg.field_focus += 1;
+            KeyCode::Down => {
+                if !pg.tools_list.is_empty() {
+                    pg.tool_index = (pg.tool_index + 1).min(pg.tools_list.len() - 1);
+                }
+                Ok(true)
             }
-            Ok(true)
-        }
-        KeyCode::Char('k') if mods.contains(KeyModifiers::CONTROL) => {
-            // Reset all fields to their defaults (remapped from Ctrl+c, now copy).
-            pg.field_values = pg
-                .fields
-                .iter()
-                .map(|f| f.default.clone().unwrap_or_default())
-                .collect();
-            pg.edit_area = crate::tui::TextArea::default();
-            pg.editing_field = false;
-            pg.error = None;
-            Ok(true)
-        }
-        KeyCode::Esc => {
-            pg.editing_field = false;
-            Ok(true)
-        }
-        KeyCode::Enter => {
-            run_tool(app).await;
-            Ok(true)
-        }
-        KeyCode::Char(' ') => {
-            let i = pg.field_focus;
-            if let Some(f) = pg.fields.get(i)
-                && matches!(f.kind, FieldKind::Boolean)
-            {
-                let cur = pg.field_values[i].trim() == "true";
-                pg.field_values[i] = if cur { "false" } else { "true" }.to_string();
+            KeyCode::Home => {
+                pg.tool_index = 0;
+                Ok(true)
             }
-            Ok(true)
-        }
-        KeyCode::Left | KeyCode::Right => {
-            let i = pg.field_focus;
-            if let Some(f) = pg.fields.get(i)
-                && let Some(variants) = &f.enum_variants
-                && !variants.is_empty()
-            {
-                let cur = pg.field_values[i].clone();
-                let pos = variants.iter().position(|v| v == &cur).unwrap_or(0);
-                let next = if code == KeyCode::Right {
-                    (pos + 1) % variants.len()
-                } else {
-                    (pos + variants.len() - 1) % variants.len()
-                };
-                pg.field_values[i] = variants[next].clone();
+            KeyCode::End => {
+                if !pg.tools_list.is_empty() {
+                    pg.tool_index = pg.tools_list.len() - 1;
+                }
+                Ok(true)
             }
-            Ok(true)
-        }
-        // Start editing text/number fields by typing a printable character.
-        KeyCode::Char(_c) if plain => {
-            let i = pg.field_focus;
-            if let Some(f) = pg.fields.get(i)
-                && matches!(f.kind, FieldKind::Text | FieldKind::Number)
-            {
-                pg.editing_field = true;
-                let cur = pg.field_values.get(i).cloned().unwrap_or_default();
-                pg.edit_area = crate::tui::TextArea::new(vec![cur]);
-                pg.edit_area
-                    .input(crate::tui::to_textarea_input(code, mods).unwrap());
+            KeyCode::PageUp => {
+                pg.tool_index = pg.tool_index.saturating_sub(5);
+                Ok(true)
             }
-            Ok(true)
+            KeyCode::PageDown => {
+                if !pg.tools_list.is_empty() {
+                    pg.tool_index = (pg.tool_index + 5).min(pg.tools_list.len() - 1);
+                }
+                Ok(true)
+            }
+            KeyCode::Enter => {
+                run_tool(app).await;
+                Ok(true)
+            }
+            _ => Ok(false),
         }
-        _ => Ok(false),
+    } else {
+        // Frame 1: Fields form navigation.
+        match code {
+            KeyCode::Up => {
+                pg.field_focus = pg.field_focus.saturating_sub(1);
+                Ok(true)
+            }
+            KeyCode::Down => {
+                if pg.field_focus + 1 < pg.fields.len() {
+                    pg.field_focus += 1;
+                }
+                Ok(true)
+            }
+            KeyCode::Home => {
+                pg.field_focus = 0;
+                Ok(true)
+            }
+            KeyCode::End => {
+                if !pg.fields.is_empty() {
+                    pg.field_focus = pg.fields.len() - 1;
+                }
+                Ok(true)
+            }
+            KeyCode::Char('k') if mods.contains(KeyModifiers::CONTROL) => {
+                // Reset all fields to their defaults.
+                pg.field_values = pg
+                    .fields
+                    .iter()
+                    .map(|f| f.default.clone().unwrap_or_default())
+                    .collect();
+                pg.edit_area = crate::tui::TextArea::default();
+                pg.editing_field = false;
+                pg.error = None;
+                Ok(true)
+            }
+            KeyCode::Esc => {
+                pg.editing_field = false;
+                Ok(true)
+            }
+            KeyCode::Enter => {
+                run_tool(app).await;
+                Ok(true)
+            }
+            KeyCode::Char(' ') => {
+                let i = pg.field_focus;
+                if let Some(f) = pg.fields.get(i)
+                    && matches!(f.kind, FieldKind::Boolean)
+                {
+                    let cur = pg.field_values[i].trim() == "true";
+                    pg.field_values[i] = if cur { "false" } else { "true" }.to_string();
+                }
+                Ok(true)
+            }
+            KeyCode::Left | KeyCode::Right => {
+                let i = pg.field_focus;
+                if let Some(f) = pg.fields.get(i)
+                    && let Some(variants) = &f.enum_variants
+                    && !variants.is_empty()
+                {
+                    let cur = pg.field_values[i].clone();
+                    let pos = variants.iter().position(|v| v == &cur).unwrap_or(0);
+                    let next = if code == KeyCode::Right {
+                        (pos + 1) % variants.len()
+                    } else {
+                        (pos + variants.len() - 1) % variants.len()
+                    };
+                    pg.field_values[i] = variants[next].clone();
+                }
+                Ok(true)
+            }
+            // Start editing text/number fields by typing a printable character.
+            KeyCode::Char(_c) if plain => {
+                let i = pg.field_focus;
+                if let Some(f) = pg.fields.get(i)
+                    && matches!(f.kind, FieldKind::Text | FieldKind::Number)
+                {
+                    pg.editing_field = true;
+                    let cur = pg.field_values.get(i).cloned().unwrap_or_default();
+                    pg.edit_area = crate::tui::TextArea::new(vec![cur]);
+                    pg.edit_area
+                        .input(crate::tui::to_textarea_input(code, mods).unwrap());
+                }
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 }
 
 async fn handle_builder(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
+    // Sub-tab switching.
     match code {
         KeyCode::Char('s') if mods.contains(KeyModifiers::CONTROL) => {
             app.playground.sub_tab = PlaygroundSub::Runner;
-            Ok(true)
+            app.playground.focused_frame = 0;
+            return Ok(true);
         }
         KeyCode::Char('b') if mods.contains(KeyModifiers::CONTROL) => {
             app.playground.sub_tab = PlaygroundSub::Builder;
-            Ok(true)
+            app.playground.focused_frame = 0;
+            return Ok(true);
         }
+        // Tab/BackTab consumed (no-op for single-frame builder).
+        KeyCode::Tab | KeyCode::BackTab => return Ok(true),
+        _ => {}
+    }
+    match code {
         KeyCode::Enter => {
             let recipes = app.recipes.clone();
             if let Some(Value::Array(arr)) = recipes
@@ -496,7 +580,7 @@ fn render_result(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     // Capture inner rect for mouse hit-testing / focus.
     app.result_inner.clone_from(&inner);
 
-    if app.playground.result_focused {
+    if app.playground.focused_frame == 2 {
         // Render the selectable Result view (selection visible while focused).
         let ta = app.playground.result_area.clone();
         frame.render_widget(&ta, inner);

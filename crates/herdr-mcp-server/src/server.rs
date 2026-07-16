@@ -2209,15 +2209,16 @@ fn detect_clipboard(
         "macos" => Ok(("pbcopy", "pbpaste")),
         "windows" => Ok(("clip", "powershell -command Get-Clipboard")),
         "linux" => {
-            if command_exists("wl-copy") {
-                Ok(("wl-copy", "wl-paste"))
+            // Prefer xsel/xclip (work headless) over wl-copy (requires Wayland).
+            if command_exists("xsel") {
+                Ok(("xsel --clipboard --input", "xsel --clipboard --output"))
             } else if command_exists("xclip") {
                 Ok((
                     "xclip -selection clipboard",
                     "xclip -selection clipboard -o",
                 ))
-            } else if command_exists("xsel") {
-                Ok(("xsel --clipboard --input", "xsel --clipboard --output"))
+            } else if command_exists("wl-copy") {
+                Ok(("wl-copy", "wl-paste"))
             } else {
                 Err(McpError {
                     code: rmcp::model::ErrorCode(-32603),
@@ -3679,5 +3680,13 @@ mod tests {
         let (copy, paste) = detect_clipboard(&cfg_server.clipboard).unwrap();
         assert_eq!(copy, "cfg-copy");
         assert_eq!(paste, "cfg-paste");
+    }
+
+    #[test]
+    fn detect_clipboard_empty_config_does_not_panic() {
+        let cfg = herdr_mcp_core::ClipboardConfig::default();
+        // With no env and no config, detection falls through to platform auto-detect.
+        // On a real system this returns a tool or an error — but it must not panic.
+        let _ = detect_clipboard(&cfg);
     }
 }

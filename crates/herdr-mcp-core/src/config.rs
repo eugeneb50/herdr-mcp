@@ -73,6 +73,10 @@ pub struct Config {
     /// Clipboard backend override for the `clipboard_set` / `clipboard_get` tools.
     #[serde(default)]
     pub clipboard: ClipboardConfig,
+
+    /// TUI dashboard keybinding overrides.
+    #[serde(default)]
+    pub keybindings: crate::keybindings::Keybindings,
 }
 
 /// Explicit clipboard backend commands for the `clipboard_set` / `clipboard_get`
@@ -304,7 +308,7 @@ impl Config {
         let mut config = Config::default();
 
         // 1. Load from config file (project config)
-        if let Some(path) = find_config_file() {
+        if let Some(path) = find_config_file_impl() {
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("failed to read config file: {}", path.display()))?;
             let file_config: Config = toml::from_str(&content)
@@ -341,6 +345,7 @@ impl Config {
             sandbox: other.sandbox,
             logging: other.logging,
             clipboard: other.clipboard,
+            keybindings: other.keybindings,
         }
     }
 
@@ -507,7 +512,51 @@ pub struct CliOverrides {
     pub trim_stages: Vec<String>,
 }
 
-fn find_config_file() -> Option<PathBuf> {
+/// Generate a default config file with comments for user reference
+pub fn generate_default_config() -> String {
+    let config = Config::default();
+    let mut out = String::new();
+    out.push_str("# herdr-mcp configuration\n");
+    out.push_str("# See https://github.com/yourorg/herdr-mcp for docs\n\n");
+    out.push_str(&toml::to_string_pretty(&config).unwrap());
+    out.push_str(
+        "\n# Clipboard backend override for the clipboard_set / clipboard_get tools.\n\
+         # When both are set they override platform auto-detection (e.g. force\n\
+         # xsel instead of wl-copy on Linux). HERDR_MCP_CLIPBOARD_COPY / _PASTE\n\
+         # env vars still take precedence over this.\n\
+         # [clipboard]\n\
+         # copy-command = \"xsel -i\"\n\
+         # paste-command = \"xsel\"\n",
+    );
+    out.push_str(
+        "\n# TUI dashboard keybinding overrides. Uncomment and edit to customize.\n\
+         # Format: \"ctrl-q\", \"up\", \"page_up\", \"shift-tab\", etc.\n\
+         # [keybindings]\n\
+         # quit = \"ctrl-q\"\n\
+         # refresh = \"ctrl-r\"\n\
+         # copy = \"ctrl-c\"\n\
+         # paste = \"ctrl-v\"\n\
+         # cut = \"ctrl-x\"\n\
+         # nav-up = \"up\"\n\
+         # nav-down = \"down\"\n\
+         # nav-home = \"home\"\n\
+         # nav-end = \"end\"\n\
+         # nav-page-up = \"page_up\"\n\
+         # nav-page-down = \"page_down\"\n\
+         # frame-next = \"tab\"\n\
+         # frame-prev = \"backtab\"\n",
+    );
+    out
+}
+
+/// Returns the path to the config file that `Config::load` would read,
+/// or `None` if no file was found (i.e. defaults would be used).
+pub fn find_config_file() -> Option<PathBuf> {
+    find_config_file_impl()
+}
+
+/// Internal implementation split so `Config::load` can call it without recursion.
+fn find_config_file_impl() -> Option<PathBuf> {
     // 1. Explicit path from env
     if let Ok(p) = env::var("HERDR_MCP_CONFIG") {
         let p = PathBuf::from(p);
@@ -541,23 +590,64 @@ fn find_config_file() -> Option<PathBuf> {
     None
 }
 
-/// Generate a default config file with comments for user reference
-pub fn generate_default_config() -> String {
-    let config = Config::default();
-    let mut out = String::new();
-    out.push_str("# herdr-mcp configuration\n");
-    out.push_str("# See https://github.com/yourorg/herdr-mcp for docs\n\n");
-    out.push_str(&toml::to_string_pretty(&config).unwrap());
-    out.push_str(
-        "\n# Clipboard backend override for the clipboard_set / clipboard_get tools.\n\
-         # When both are set they override platform auto-detection (e.g. force\n\
-         # xsel instead of wl-copy on Linux). HERDR_MCP_CLIPBOARD_COPY / _PASTE\n\
-         # env vars still take precedence over this.\n\
-         # [clipboard]\n\
-         # copy-command = \"xsel --clipboard --input\"\n\
-         # paste-command = \"xsel --clipboard --output\"\n",
-    );
-    out
+/// Resolve the config file path the loader would use (or `None` if no file
+/// exists on any search path). Exposed so the TUI Settings tab can show the
+/// path and Save can write to the correct file.
+pub fn find_config_file_path() -> Option<PathBuf> {
+    find_config_file()
+}
+
+/// Resolve the config file path the loader *would* read, or — if none exists —
+/// the default location in the current working directory (`herdr-mcp.toml`).
+/// Used by the Settings tab's Save so it always has a concrete target.
+pub fn config_file_or_default() -> PathBuf {
+    find_config_file().unwrap_or_else(|| PathBuf::from("herdr-mcp.toml"))
+}
+
+/// Upsert the `[clipboard]` table's `copy-command` / `paste-command` keys in
+/// the config file at `path`, preserving all other content (comments, tables,
+/// formatting). Creates the file if absent.
+pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str) -> Result<()> {
+    use std::io::Write;
+
+    let content = if path.exists() {
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
+    } else {
+        String::new()
+    };
+
+    // Parse into an editable document; if parsing fails (empty or malformed),
+    // start from a fresh document so Save still works on a broken file.
+    let mut doc = content
+        .parse::<toml_edit::DocumentMut>()
+        .unwrap_or_else(|_| toml_edit::DocumentMut::new());
+
+    // Ensure the `[clipboard]` table exists.
+    if !doc.contains_table("clipboard") {
+        doc.insert("clipboard", toml_edit::table());
+    }
+    let tbl = doc
+        .get_mut("clipboard")
+        .and_then(|item| item.as_table_mut())
+        .context("[clipboard] is not a table")?;
+    tbl.insert("copy-command", toml_edit::value(copy));
+    tbl.insert("paste-command", toml_edit::value(paste));
+
+    let out = doc.to_string();
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    if !parent.as_os_str().is_empty() && !parent.exists() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("opening {} for write", path.display()))?;
+    f.write_all(out.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -834,5 +924,62 @@ mod tests {
         let bad = "unknown_field = 1\nhttp.port = 8080\n";
         let result: Result<Config, _> = toml::from_str(bad);
         assert!(result.is_err(), "unknown fields must be rejected");
+    }
+
+    #[test]
+    fn test_upsert_clipboard_preserves_other_sections() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("herdr-mcp.toml");
+        // Seed with an [http] section + a comment; [clipboard] absent.
+        std::fs::write(
+            &path,
+            "# my config\n[http]\nport = 9999\nbind-addr = \"0.0.0.0\"\nhttp-only = false\n",
+        )
+        .unwrap();
+
+        upsert_clipboard_in_file(&path, "xsel -i", "xsel").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // [http] preserved.
+        assert!(
+            content.contains("port = 9999"),
+            "http port preserved: {content}"
+        );
+        assert!(content.contains("0.0.0.0"), "bind-addr preserved");
+        assert!(content.contains("# my config"), "comment preserved");
+        // [clipboard] added.
+        let cfg: Config = toml::from_str(&content).unwrap();
+        assert_eq!(cfg.clipboard.copy_command.as_deref(), Some("xsel -i"));
+        assert_eq!(cfg.clipboard.paste_command.as_deref(), Some("xsel"));
+    }
+
+    #[test]
+    fn test_upsert_clipboard_overwrites_existing_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("herdr-mcp.toml");
+        std::fs::write(
+            &path,
+            "[clipboard]\ncopy-command = \"old\"\npaste-command = \"old\"\n",
+        )
+        .unwrap();
+
+        upsert_clipboard_in_file(&path, "wl-copy", "wl-paste").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let cfg: Config = toml::from_str(&content).unwrap();
+        assert_eq!(cfg.clipboard.copy_command.as_deref(), Some("wl-copy"));
+        assert_eq!(cfg.clipboard.paste_command.as_deref(), Some("wl-paste"));
+        assert!(!content.contains("\"old\""), "old values gone: {content}");
+    }
+
+    #[test]
+    fn test_upsert_clipboard_creates_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested/deep/herdr-mcp.toml");
+        upsert_clipboard_in_file(&path, "xsel -i", "xsel").unwrap();
+        assert!(path.exists());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[clipboard]"));
+        assert!(content.contains("xsel -i"));
     }
 }

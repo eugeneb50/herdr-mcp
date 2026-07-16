@@ -1,0 +1,3 @@
+[clipboard]
+copy-command = "xsel -i"
+paste-command = "xsel"

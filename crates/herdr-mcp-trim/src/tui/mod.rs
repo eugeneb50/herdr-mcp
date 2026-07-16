@@ -13,6 +13,7 @@
 //! Entry point: [`run`].
 
 pub mod http;
+pub mod nav;
 pub mod tabs;
 pub mod theme;
 
@@ -38,12 +39,10 @@ use tui_textarea::{Input as TaInput, Key as TaKey, TextArea};
 
 use std::io::Write;
 
-/// Append a debug line to `<data_dir>/tui-debug.log` AND echo it on stderr.
+/// Append a debug line to `<data_dir>/tui-debug.log` (file only — no stderr).
 ///
-/// The TUI owns the terminal, so stderr lands in the spawning pane's
-/// scrollback while the file gives a durable trace. This is the primary
-/// runtime-diagnostics channel for clipboard / result-selection behavior
-/// (which otherwise fails silently inside async futures).
+/// The TUI owns the terminal, so stderr output would corrupt the display.
+/// All runtime diagnostics go to the log file for post-mortem analysis.
 fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -57,7 +56,6 @@ fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
     {
         let _ = f.write_all(line.as_bytes());
     }
-    eprint!("{line}");
 }
 
 use crate::stats;
@@ -141,6 +139,20 @@ pub struct HerdrContext {
     pub workspace: Option<String>,
     pub pane_id: Option<String>,
     pub pane_count: usize,
+    /// Full pane list from `herdr pane list`.
+    pub panes: Vec<HerdrPane>,
+}
+
+/// A single herdr pane with metadata from `herdr pane list`.
+#[derive(Clone, Debug, Default, serde::Deserialize)]
+pub struct HerdrPane {
+    pub pane_id: String,
+    pub label: String,
+    pub agent: Option<String>,
+    pub agent_status: String,
+    pub cwd: String,
+    pub focused: bool,
+    pub tab_id: Option<String>,
 }
 
 /// Right-click context-menu actions for editing fields / panes.
@@ -215,6 +227,8 @@ pub struct App {
     pub playground: PlaygroundState,
     /// trim sub-state
     pub trim: TrimState,
+    /// overview sub-state
+    pub overview: OverviewState,
     /// variables sub-state
     pub variables_state: VariablesState,
     /// settings sub-state
@@ -226,8 +240,16 @@ pub struct App {
     pub tool_list_inner: Rect,
     pub var_list_inner: Rect,
     pub result_inner: Rect,
+    /// hit-areas for clipboard preset rows in Settings (one Rect per preset)
+    pub clipboard_preset_rects: Vec<Rect>,
+    /// hit-areas for clipboard action buttons (0=Test, 1=Save)
+    pub clipboard_btn_rects: Vec<Rect>,
+    /// hit-areas for clipboard command fields (0=copy, 1=paste)
+    pub clipboard_field_rects: Vec<Rect>,
     /// right-click context menu state
     pub context_menu: ContextMenu,
+    /// True when state has changed and a redraw is needed. Reset after draw.
+    pub dirty: bool,
 }
 
 /// Playground tab state (tool runner + recipe builder).
@@ -242,7 +264,8 @@ pub struct PlaygroundState {
     pub fields_for_index: Option<usize>,   // tool_index the fields were parsed for
     pub edit_area: TextArea<'static>,      // live editor for the focused field
     pub result_area: TextArea<'static>,    // selectable view of the last result
-    pub result_focused: bool,              // result pane has selection focus
+    /// Which frame has keyboard focus (0=tool list, 1=fields, 2=result).
+    pub focused_frame: usize,
     pub result: Option<Value>,
     pub error: Option<String>,
 }
@@ -256,6 +279,30 @@ pub enum PlaygroundSub {
 /// Trim tab state.
 pub struct TrimState {
     pub diagnose: Option<Value>,
+    /// Selected pane in the trim settings pane list.
+    pub pane_index: usize,
+    /// Selected stage in the pipeline stage list.
+    pub stage_index: usize,
+    /// Current editing stages (local copy before Apply).
+    pub stages: Vec<String>,
+    /// Current editing direction (local copy before Apply).
+    pub direction: crate::policy::TrimDirection,
+    /// Whether the stage picker overlay is open.
+    pub stage_picker_open: bool,
+    /// Selected item in the stage picker overlay.
+    pub stage_picker_index: usize,
+    /// Last operation result message.
+    pub policy_msg: String,
+    /// Which frame has keyboard focus (0=dashboard, 1=pane list, 2=stage list).
+    pub focused_frame: usize,
+}
+
+/// Overview tab state.
+pub struct OverviewState {
+    /// Selected row in the pane table.
+    pub pane_index: usize,
+    /// Which frame has keyboard focus (0 = pane table).
+    pub focused_frame: usize,
 }
 
 /// Variables tab state.
@@ -266,6 +313,8 @@ pub struct VariablesState {
     pub edit_key_area: TextArea<'static>,
     pub edit_value_area: TextArea<'static>,
     pub edit_field: EditField,
+    /// Which frame has keyboard focus (0 = variable list).
+    pub focused_frame: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -280,6 +329,80 @@ pub struct SettingsState {
     pub data_dir: String,
     pub herdr_socket: String,
     pub selected: usize,
+    /// Clipboard backend configuration.
+    pub clipboard: ClipboardSettingsState,
+    /// Which frame has keyboard focus (0=runtime info, 1=clipboard config).
+    pub focused_frame: usize,
+}
+
+/// Clipboard config sub-state for the Settings tab.
+pub struct ClipboardSettingsState {
+    /// Which preset row is highlighted (index into `BackendPreset::ALL`).
+    pub preset_index: usize,
+    /// User-editable copy command (may diverge from the preset default).
+    pub copy_cmd: String,
+    /// User-editable paste command.
+    pub paste_cmd: String,
+    /// Which clipboard input is focused: 0 = preset list, 1 = copy field,
+    /// 2 = paste field.
+    pub field_focus: usize,
+    /// True when the user is typing into a command field (textarea editor).
+    pub editing: bool,
+    /// Which field is being edited (0 = copy, 1 = paste).
+    pub edit_field: usize,
+    /// The TextArea buffer for inline editing of command fields.
+    pub edit_area: tui_textarea::TextArea<'static>,
+    /// Resolved config-file path (where Save writes). Empty if unresolvable.
+    pub config_path: String,
+    /// Last test outcome message (empty = no test run yet).
+    pub test_msg: String,
+    /// Last save outcome message (empty = no save yet).
+    pub save_msg: String,
+}
+
+/// Clipboard backend presets offered in the Settings radio.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BackendPreset {
+    Xsel,
+    Xclip,
+    WlCopy,
+    Pbcopy,
+    Custom,
+}
+
+impl BackendPreset {
+    /// All presets in display order.
+    pub const ALL: [BackendPreset; 5] = [
+        BackendPreset::Xsel,
+        BackendPreset::Xclip,
+        BackendPreset::WlCopy,
+        BackendPreset::Pbcopy,
+        BackendPreset::Custom,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Xsel => "xsel",
+            Self::Xclip => "xclip",
+            Self::WlCopy => "wl-copy",
+            Self::Pbcopy => "pbcopy",
+            Self::Custom => "custom",
+        }
+    }
+
+    /// Default (copy, paste) commands for this preset. `Custom` returns empty.
+    pub fn commands(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Xsel => ("xsel -i", "xsel"),
+            Self::Xclip => (
+                "xclip -selection clipboard",
+                "xclip -selection clipboard -o",
+            ),
+            Self::WlCopy => ("wl-copy", "wl-paste"),
+            Self::Pbcopy => ("pbcopy", "pbpaste"),
+            Self::Custom => ("", ""),
+        }
+    }
 }
 
 impl App {
@@ -289,7 +412,7 @@ impl App {
     }
 
     fn new(opts: DashboardOptions) -> Self {
-        let http = HttpClient::new(opts.http_port).ok();
+        let http = HttpClient::new(opts.http_port, opts.data_dir.clone()).ok();
         let http_port = opts.http_port;
         let data_dir = opts.data_dir.display().to_string();
         Self {
@@ -316,11 +439,25 @@ impl App {
                 fields_for_index: None,
                 edit_area: TextArea::default(),
                 result_area: TextArea::default(),
-                result_focused: false,
+                focused_frame: 0,
                 result: None,
                 error: None,
             },
-            trim: TrimState { diagnose: None },
+            trim: TrimState {
+                diagnose: None,
+                pane_index: 0,
+                stage_index: 0,
+                stages: Vec::new(),
+                direction: crate::policy::TrimDirection::None,
+                stage_picker_open: false,
+                stage_picker_index: 0,
+                policy_msg: String::new(),
+                focused_frame: 0,
+            },
+            overview: OverviewState {
+                pane_index: 0,
+                focused_frame: 0,
+            },
             variables_state: VariablesState {
                 entries: Vec::new(),
                 selected: 0,
@@ -328,6 +465,7 @@ impl App {
                 edit_key_area: TextArea::default(),
                 edit_value_area: TextArea::default(),
                 edit_field: EditField::Key,
+                focused_frame: 0,
             },
             settings: SettingsState {
                 http_port,
@@ -337,18 +475,37 @@ impl App {
                     format!("{home}/.config/herdr/herdr.sock")
                 }),
                 selected: 0,
+                clipboard: ClipboardSettingsState {
+                    preset_index: 0,
+                    copy_cmd: BackendPreset::Xsel.commands().0.into(),
+                    paste_cmd: BackendPreset::Xsel.commands().1.into(),
+                    field_focus: 0,
+                    editing: false,
+                    edit_field: 0,
+                    edit_area: tui_textarea::TextArea::default(),
+                    config_path: herdr_mcp_core::config_file_or_default()
+                        .display()
+                        .to_string(),
+                    test_msg: String::new(),
+                    save_msg: String::new(),
+                },
+                focused_frame: 0,
             },
             bridge_connected: false,
             tab_rects: Vec::new(),
             tool_list_inner: Rect::default(),
             var_list_inner: Rect::default(),
             result_inner: Rect::default(),
+            clipboard_preset_rects: Vec::new(),
+            clipboard_btn_rects: Vec::new(),
+            clipboard_field_rects: Vec::new(),
             context_menu: ContextMenu {
                 open: false,
                 x: 0,
                 y: 0,
                 index: 0,
             },
+            dirty: true,
         }
         .tap_debug()
     }
@@ -364,8 +521,17 @@ impl App {
     }
 
     async fn refresh(&mut self) {
+        // Cap total refresh time so the UI never freezes for more than 2s.
+        if tokio::time::timeout(Duration::from_secs(2), self.refresh_inner())
+            .await
+            .is_err()
+        {
+            self.status_msg = "refresh timed out".into();
+        }
         self.last_refresh = Instant::now();
+    }
 
+    async fn refresh_inner(&mut self) {
         // If we're not connected, try to discover a live bridge first.
         if !self.bridge_connected {
             if let Some(port) = http::HttpClient::discover_bridge(self.opts.http_port).await {
@@ -388,12 +554,11 @@ impl App {
             && let Some(http) = &self.http
         {
             let mut ok = true;
-            if self.playground.tools_list.is_empty()
-                && let Ok(v) = http.list_tools().await
-            {
+            // Always re-fetch tools on refresh so Ctrl+R picks up new tools.
+            if let Ok(v) = http.list_tools().await {
                 self.tools = Some(v.clone());
                 self.playground.tools_list = parse_tool_list(&v);
-            } else if self.playground.tools_list.is_empty() {
+            } else {
                 ok = false;
             }
             if let Ok(v) = http.trim_status().await {
@@ -462,7 +627,8 @@ impl App {
             && let Ok(v) = serde_json::from_str::<Value>(&raw)
         {
             self.herdr.workspace = v
-                .get("workspaces")
+                .get("result")
+                .and_then(|r| r.get("workspaces"))
                 .and_then(|w| w.get(0))
                 .and_then(|w| w.get("id"))
                 .and_then(|i| i.as_str())
@@ -472,14 +638,49 @@ impl App {
             && let Ok(v) = serde_json::from_str::<Value>(&raw)
         {
             self.herdr.pane_id = v
-                .pointer("/panes/0/id")
+                .pointer("/result/panes/0/pane_id")
+                .or_else(|| v.pointer("/result/panes/0/id"))
                 .and_then(|i| i.as_str())
                 .map(str::to_string);
-            self.herdr.pane_count = v
-                .get("panes")
+            if let Some(panes) = v
+                .get("result")
+                .and_then(|r| r.get("panes"))
                 .and_then(|p| p.as_array())
-                .map(|a| a.len())
-                .unwrap_or(0);
+            {
+                self.herdr.panes = panes
+                    .iter()
+                    .filter_map(|p| {
+                        Some(HerdrPane {
+                            pane_id: p
+                                .get("pane_id")
+                                .or_else(|| p.get("id"))?
+                                .as_str()?
+                                .to_string(),
+                            label: p
+                                .get("label")
+                                .and_then(|l| l.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            agent: p.get("agent").and_then(|a| a.as_str()).map(str::to_string),
+                            agent_status: p
+                                .get("agent_status")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("unknown")
+                                .to_string(),
+                            cwd: p
+                                .get("cwd")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            focused: p.get("focused").and_then(|f| f.as_bool()).unwrap_or(false),
+                            tab_id: p.get("tab_id").and_then(|t| t.as_str()).map(str::to_string),
+                        })
+                    })
+                    .collect();
+                self.herdr.pane_count = self.herdr.panes.len();
+            } else {
+                self.herdr.pane_count = 0;
+            }
         }
     }
 
@@ -552,7 +753,7 @@ impl App {
     /// value of the focused target. Priority: focused Result pane → active
     /// editable field/variable → non-editing focused playground field.
     fn selection_or_full_text(&self) -> Option<String> {
-        if self.tab == Tab::Playground && self.playground.result_focused {
+        if self.tab == Tab::Playground && self.playground.focused_frame == 2 {
             let ta = &self.playground.result_area;
             let full = ta.lines().join("\n");
             return Some(textarea_selection_or_full(ta, full));
@@ -567,7 +768,7 @@ impl App {
     /// True when the current copy target is the read-only Result pane (so
     /// Cut/Paste must be suppressed).
     fn copy_target_is_readonly(&self) -> bool {
-        self.tab == Tab::Playground && self.playground.result_focused
+        self.tab == Tab::Playground && self.playground.focused_frame == 2
     }
 
     /// Feed a key event into the active editable `TextArea` (if any).
@@ -583,7 +784,7 @@ impl App {
     /// Shift+arrow selection). No-op unless the Result pane is focused.
     pub(crate) fn feed_result_textarea(&mut self, code: KeyCode, mods: KeyModifiers) {
         if self.tab == Tab::Playground
-            && self.playground.result_focused
+            && self.playground.focused_frame == 2
             && let Some(input) = to_textarea_input(code, mods)
         {
             self.playground.result_area.input(input);
@@ -624,8 +825,8 @@ impl App {
             }
         };
         self.log_debug(format!(
-            "clipboard_copy: result_focused={} text_len={}",
-            self.playground.result_focused,
+            "clipboard_copy: focused_frame={} text_len={}",
+            self.playground.focused_frame == 2,
             text.len()
         ));
         self.set_clipboard(&text).await;
@@ -822,7 +1023,7 @@ async fn main_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
-    let frame_ms = 120u64;
+    let frame_ms = 300u64;
     let refresh = Duration::from_secs(3);
     let context_refresh = Duration::from_secs(15);
 
@@ -833,7 +1034,11 @@ async fn main_loop(
             return Ok(());
         }
 
-        let _ = terminal.draw(|frame| ui(frame, app));
+        // Only redraw when state has changed.
+        if app.dirty {
+            let _ = terminal.draw(|frame| ui(frame, app));
+            app.dirty = false;
+        }
 
         let poll = Duration::from_millis(frame_ms);
         while event::poll(poll)? {
@@ -843,9 +1048,15 @@ async fn main_loop(
                         continue;
                     }
                     handle_key(app, k.code, k.modifiers).await?;
+                    app.dirty = true;
                 }
-                Event::Mouse(m) => handle_mouse(app, m).await?,
-                Event::Resize(_, _) => {}
+                Event::Mouse(m) => {
+                    handle_mouse(app, m).await?;
+                    app.dirty = true;
+                }
+                Event::Resize(_, _) => {
+                    app.dirty = true;
+                }
                 _ => {}
             }
             if app.quitting {
@@ -855,10 +1066,12 @@ async fn main_loop(
 
         if app.last_refresh.elapsed() > refresh {
             app.refresh().await;
+            app.dirty = true;
         }
         if last_ctx.elapsed() > context_refresh {
             app.refresh_herdr().await;
             last_ctx = Instant::now();
+            app.dirty = true;
         }
     }
 }
@@ -979,27 +1192,27 @@ fn draw_tab_bar(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
+    // Settings tab needs &mut (stores click hit-areas during render).
+    if app.tab == Tab::Settings {
+        tabs::settings::render(frame, area, app);
+        return;
+    }
     match app.tab {
         Tab::Overview => tabs::overview::render(frame, area, app),
         Tab::Playground => tabs::playground::render(frame, area, app),
         Tab::Trim => tabs::trim::render(frame, area, app),
         Tab::Variables => tabs::variables::render(frame, area, app),
-        Tab::Settings => tabs::settings::render(frame, area, app),
+        _ => {}
     }
 }
 
 /// Footer with status message + keybindings.
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let mut line = Line::from(vec![Span::styled(
-        "Ctrl+1-5:tab  ↑/↓:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit",
-        dim_style(),
-    )]);
+    let bindings = "Ctrl+1-5:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
+    let mut line = Line::from(vec![Span::styled(bindings, dim_style())]);
     if !app.status_msg.is_empty() {
         line = Line::from(vec![
-            Span::styled(
-                "Ctrl+1-5:tab  ↑/↓:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit",
-                dim_style(),
-            ),
+            Span::styled(bindings, dim_style()),
             Span::styled(
                 format!("   {}", truncate(&app.status_msg, 90)),
                 accent_style(),
@@ -1019,11 +1232,11 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
 
     // Editing inputs are handled inside the active tab first.
     let consumed = match app.tab {
+        Tab::Overview => tabs::overview::handle_key(app, code, mods).await?,
         Tab::Playground => tabs::playground::handle_key(app, code, mods).await?,
         Tab::Variables => tabs::variables::handle_key(app, code, mods).await?,
         Tab::Settings => tabs::settings::handle_key(app, code, mods).await?,
         Tab::Trim => tabs::trim::handle_key(app, code, mods).await?,
-        _ => false,
     };
     if consumed {
         return Ok(());
@@ -1048,20 +1261,12 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
         }
     }
 
-    // Global keys. Every command requires a Ctrl modifier (or is a navigation
-    // key such as Tab / arrows) so printable characters typed into fields are
-    // never intercepted.
+    // Global keys.
     if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('q') {
         app.quitting = true;
         return Ok(());
     }
     match code {
-        KeyCode::Tab => {
-            cycle_tab(app, 1);
-        }
-        KeyCode::BackTab => {
-            cycle_tab(app, -1);
-        }
         KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => {
             app.refresh().await;
             app.status_msg = "refreshed".to_string();
@@ -1076,14 +1281,6 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
         _ => {}
     }
     Ok(())
-}
-
-fn cycle_tab(app: &mut App, step: i32) {
-    let idx = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0) as i32;
-    let n = Tab::ALL.len() as i32;
-    let next = ((idx + step + n) % n) as usize;
-    app.tab = Tab::ALL[next];
-    app.status_msg.clear();
 }
 
 /// Key handling while the right-click context menu is open.
@@ -1135,6 +1332,9 @@ async fn handle_context_menu_key(app: &mut App, code: KeyCode, mods: KeyModifier
 /// Mouse event handler: click tabs to switch, click lists to select, wheel scroll.
 async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
     match m.kind {
+        // Ignore mouse move events — they fire on every pixel of movement
+        // and cause CPU thrashing without any useful state change.
+        MouseEventKind::Moved => return Ok(()),
         MouseEventKind::Down(MouseButton::Right) => {
             // Region-aware: focusing the Result pane makes Copy target it.
             let over_result = app.tab == Tab::Playground
@@ -1147,10 +1347,10 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 m.column, m.row, app.result_inner, over_result
             ));
             if over_result {
-                app.playground.result_focused = true;
+                app.playground.focused_frame = 2;
                 app.playground.editing_field = false;
             } else if app.tab == Tab::Playground {
-                app.playground.result_focused = false;
+                app.playground.focused_frame = 0;
             }
             // Open the right-click context menu at the cursor.
             app.context_menu.open = true;
@@ -1198,7 +1398,7 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 if idx < app.playground.tools_list.len() {
                     app.playground.tool_index = idx;
                     app.playground.editing_field = false;
-                    app.playground.result_focused = false;
+                    app.playground.focused_frame = 0;
                 }
                 return Ok(());
             }
@@ -1209,7 +1409,7 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 && m.row >= app.result_inner.y
                 && m.row < app.result_inner.bottom()
             {
-                app.playground.result_focused = true;
+                app.playground.focused_frame = 2;
                 app.playground.editing_field = false;
                 app.log_debug(format!(
                     "mouse left-down focused Result pane; result_inner={:?}",
@@ -1231,6 +1431,48 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 }
                 return Ok(());
             }
+            // Clipboard preset rows (Settings tab).
+            if app.tab == Tab::Settings && !app.settings.clipboard.editing {
+                for (i, r) in app.clipboard_preset_rects.iter().enumerate() {
+                    if m.row == r.y && m.column >= r.x && m.column < r.x + r.width {
+                        app.settings.clipboard.preset_index = i;
+                        let p = crate::tui::BackendPreset::ALL[i];
+                        app.settings.clipboard.copy_cmd = p.commands().0.to_string();
+                        app.settings.clipboard.paste_cmd = p.commands().1.to_string();
+                        app.settings.clipboard.field_focus = 0;
+                        return Ok(());
+                    }
+                }
+                // Clipboard Test / Save buttons.
+                for (i, r) in app.clipboard_btn_rects.iter().enumerate() {
+                    if m.row == r.y && m.column >= r.x && m.column < r.x + r.width {
+                        if i == 0 {
+                            tabs::settings::handle_key(app, KeyCode::Char('t'), KeyModifiers::NONE)
+                                .await?;
+                        } else if i == 1 {
+                            tabs::settings::handle_key(app, KeyCode::Char('s'), KeyModifiers::NONE)
+                                .await?;
+                        }
+                        return Ok(());
+                    }
+                }
+                // Clipboard copy/paste command fields (click to focus + enter for edit).
+                for (i, r) in app.clipboard_field_rects.iter().enumerate() {
+                    if m.row == r.y && m.column >= r.x && m.column < r.x + r.width {
+                        app.settings.clipboard.field_focus = i + 1; // 1=copy, 2=paste
+                        app.settings.clipboard.editing = true;
+                        app.settings.clipboard.edit_field = i;
+                        let text = if i == 0 {
+                            &app.settings.clipboard.copy_cmd
+                        } else {
+                            &app.settings.clipboard.paste_cmd
+                        };
+                        app.settings.clipboard.edit_area =
+                            tui_textarea::TextArea::new(vec![text.clone()]);
+                        return Ok(());
+                    }
+                }
+            }
         }
         MouseEventKind::ScrollDown => match app.tab {
             Tab::Variables
@@ -1245,14 +1487,33 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
             {
                 app.playground.tool_index += 1;
             }
+            Tab::Playground if app.playground.focused_frame == 2 => {
+                // Scroll the result TextArea
+                app.feed_result_textarea(KeyCode::Down, KeyModifiers::NONE);
+            }
+            Tab::Settings if !app.settings.clipboard.editing => {
+                app.settings.selected = (app.settings.selected + 1).min(9);
+            }
+            Tab::Overview if app.overview.pane_index + 1 < app.herdr.panes.len() => {
+                app.overview.pane_index += 1;
+            }
             _ => {}
         },
         MouseEventKind::ScrollUp => match app.tab {
             Tab::Variables if !app.variables_state.editing && app.variables_state.selected > 0 => {
                 app.variables_state.selected -= 1;
             }
+            Tab::Playground if app.playground.focused_frame == 2 => {
+                app.feed_result_textarea(KeyCode::Up, KeyModifiers::NONE);
+            }
             Tab::Playground if !app.playground.editing_field && app.playground.tool_index > 0 => {
                 app.playground.tool_index -= 1;
+            }
+            Tab::Settings if !app.settings.clipboard.editing && app.settings.selected > 0 => {
+                app.settings.selected -= 1;
+            }
+            Tab::Overview if app.overview.pane_index > 0 => {
+                app.overview.pane_index -= 1;
             }
             _ => {}
         },
@@ -1477,7 +1738,7 @@ mod tests {
         app.playground.fields = vec![sample_field()];
         app.playground.field_values = vec!["hello".into()];
         app.playground.field_focus = 0;
-        app.playground.result_focused = false;
+        app.playground.focused_frame = 1;
         assert_eq!(app.selection_or_full_text(), Some("hello".to_string()));
     }
 
@@ -1485,7 +1746,7 @@ mod tests {
     fn selection_or_full_text_uses_full_result_when_focused() {
         let mut app = test_app();
         app.tab = Tab::Playground;
-        app.playground.result_focused = true;
+        app.playground.focused_frame = 2;
         app.playground.result_area = TextArea::new(vec!["line1".to_string(), "line2".to_string()]);
         assert_eq!(
             app.selection_or_full_text(),
@@ -1497,7 +1758,7 @@ mod tests {
     fn selection_or_full_text_uses_result_selection() {
         let mut app = test_app();
         app.tab = Tab::Playground;
-        app.playground.result_focused = true;
+        app.playground.focused_frame = 2;
         let mut ta = TextArea::new(vec!["hello world".to_string()]);
         ta.start_selection();
         for _ in 0..5 {
@@ -1517,9 +1778,9 @@ mod tests {
     fn copy_target_is_readonly_only_for_result() {
         let mut app = test_app();
         app.tab = Tab::Playground;
-        app.playground.result_focused = true;
+        app.playground.focused_frame = 2;
         assert!(app.copy_target_is_readonly());
-        app.playground.result_focused = false;
+        app.playground.focused_frame = 0;
         assert!(!app.copy_target_is_readonly());
     }
 
@@ -1551,5 +1812,89 @@ mod tests {
 
         // Unsupported keys (e.g. modifier-only) map to None.
         assert!(to_textarea_input(KeyCode::Null, KeyModifiers::NONE).is_none());
+    }
+
+    #[test]
+    fn log_debug_writes_to_file_not_stderr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log_path = tmp.path().join("tui-debug.log");
+        log_debug(tmp.path(), "test message 12345");
+        let contents = std::fs::read_to_string(&log_path).expect("log file should be created");
+        assert!(
+            contents.contains("test message 12345"),
+            "log file should contain the message"
+        );
+        // Verify format: starts with `[` (timestamp prefix)
+        assert!(
+            contents.starts_with('['),
+            "log line should start with timestamp"
+        );
+    }
+
+    #[test]
+    fn app_starts_with_dirty_true() {
+        let app = test_app();
+        assert!(
+            app.dirty,
+            "newly created App should be dirty to force initial draw"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_mouse_moved_does_not_modify_state() {
+        let mut app = test_app();
+        let snapshot = (
+            app.tab,
+            app.playground.tool_index,
+            app.playground.focused_frame == 2,
+        );
+        let evt = crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Moved,
+            column: 10,
+            row: 5,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, evt).await.unwrap();
+        assert_eq!(
+            (
+                app.tab,
+                app.playground.tool_index,
+                app.playground.focused_frame == 2
+            ),
+            snapshot
+        );
+    }
+
+    #[test]
+    fn trim_state_defaults() {
+        let app = test_app();
+        assert!(app.trim.stages.is_empty());
+        assert_eq!(app.trim.pane_index, 0);
+        assert_eq!(app.trim.stage_index, 0);
+        assert!(!app.trim.stage_picker_open);
+        assert!(app.trim.policy_msg.is_empty());
+        assert!(matches!(
+            app.trim.direction,
+            crate::policy::TrimDirection::None
+        ));
+    }
+
+    #[test]
+    fn herdr_pane_from_json() {
+        let json = serde_json::json!({
+            "pane_id": "w123:p1",
+            "label": "test-pane",
+            "agent": "hermes",
+            "agent_status": "idle",
+            "cwd": "/tmp/test",
+            "focused": true,
+            "tab_id": "w123:t1"
+        });
+        let pane: HerdrPane = serde_json::from_value(json).unwrap();
+        assert_eq!(pane.pane_id, "w123:p1");
+        assert_eq!(pane.label, "test-pane");
+        assert_eq!(pane.agent.as_deref(), Some("hermes"));
+        assert_eq!(pane.agent_status, "idle");
+        assert!(pane.focused);
     }
 }

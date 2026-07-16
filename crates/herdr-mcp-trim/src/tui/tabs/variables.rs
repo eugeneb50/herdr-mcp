@@ -10,22 +10,48 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::tui::theme::{accent_style, dim_style, panel_block, selected_style};
-use crate::tui::{App, EditField};
+use crate::tui::{App, EditField, truncate};
 
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     if app.variables_state.editing {
         return handle_edit(app, code, mods).await;
     }
+    // Tab/BackTab consumed (no-op for single-frame).
+    match code {
+        KeyCode::Tab | KeyCode::BackTab => return Ok(true),
+        _ => {}
+    }
     match code {
         KeyCode::Up => {
-            if app.variables_state.selected > 0 {
-                app.variables_state.selected -= 1;
-            }
+            app.variables_state.selected = app.variables_state.selected.saturating_sub(1);
             Ok(true)
         }
         KeyCode::Down => {
-            if app.variables_state.selected + 1 < app.variables_state.entries.len() {
-                app.variables_state.selected += 1;
+            let count = app.variables_state.entries.len();
+            if count > 0 {
+                app.variables_state.selected = (app.variables_state.selected + 1).min(count - 1);
+            }
+            Ok(true)
+        }
+        KeyCode::Home => {
+            app.variables_state.selected = 0;
+            Ok(true)
+        }
+        KeyCode::End => {
+            let count = app.variables_state.entries.len();
+            if count > 0 {
+                app.variables_state.selected = count - 1;
+            }
+            Ok(true)
+        }
+        KeyCode::PageUp => {
+            app.variables_state.selected = app.variables_state.selected.saturating_sub(5);
+            Ok(true)
+        }
+        KeyCode::PageDown => {
+            let count = app.variables_state.entries.len();
+            if count > 0 {
+                app.variables_state.selected = (app.variables_state.selected + 5).min(count - 1);
             }
             Ok(true)
         }
@@ -231,19 +257,4 @@ fn render_edit(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         )),
         Rect::new(inner.x, help_y, inner.width, 1),
     );
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut t = String::new();
-    for (i, c) in s.chars().enumerate() {
-        if i + 1 >= max {
-            t.push('…');
-            break;
-        }
-        t.push(c);
-    }
-    t
 }
