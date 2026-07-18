@@ -89,11 +89,14 @@ fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(block, area);
 
     if pane_count == 0 {
-        let lines = vec![
+        let mut lines = vec![
             Line::from("No herdr panes detected."),
             Line::from(""),
-            Line::from("Run this dashboard inside a herdr pane to see live pane context."),
+            Line::from("Pane list comes from the live AgentRegistry (HTTP bridge /api/agents)."),
         ];
+        if let Some(err) = &app.herdr.last_error {
+            lines.push(Line::from(format!("Last refresh error: {err}")));
+        }
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
         return;
     }
@@ -116,7 +119,7 @@ fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let rows = app.herdr.panes.iter().enumerate().map(|(i, pane)| {
         let is_focused = Some(pane.pane_id.as_str()) == focused_pane_id;
-        let status_color = match pane.agent_status.as_str() {
+        let status_color = match pane.status.as_str() {
             "working" => Color::Green,
             "idle" => Color::DarkGray,
             "done" => Color::Cyan,
@@ -137,15 +140,13 @@ fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Row::new(vec![
             Cell::from(label).style(row_style),
             Cell::from(pane.agent.clone().unwrap_or_default()).style(row_style),
-            Cell::from(pane.agent_status.clone()).style(
-                Style::default()
-                    .fg(status_color)
-                    .add_modifier(if i == clamped {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            ),
+            Cell::from(pane.status.clone()).style(Style::default().fg(status_color).add_modifier(
+                if i == clamped {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                },
+            )),
             Cell::from(cwd_short).style(row_style),
         ])
     });
@@ -190,7 +191,7 @@ fn render_pane_detail(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         detail_line("pane_id", &pane.pane_id, 10),
         detail_line("label", &pane.label, 10),
         detail_line("agent", pane.agent.as_deref().unwrap_or("—"), 10),
-        detail_line("status", &pane.agent_status, 10),
+        detail_line("status", &pane.status, 10),
         detail_line("cwd", &pane.cwd, 10),
         detail_line("focused", if pane.focused { "yes" } else { "no" }, 10),
     ];
@@ -279,7 +280,11 @@ mod tests {
                 pane_id: format!("ws:p{i}"),
                 label: format!("pane-{i}"),
                 agent: Some(format!("agent-{i}")),
-                agent_status: "idle".into(),
+                status: "idle".into(),
+                role: String::new(),
+                output: String::new(),
+                trim_policy: None,
+                updated_at: 0,
                 cwd: format!("/tmp/pane-{i}"),
                 focused: i == 0,
                 tab_id: None,

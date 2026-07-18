@@ -493,7 +493,7 @@ fn render_trim_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 truncate(&p.label, 16)
             };
             let agent = p.agent.as_deref().unwrap_or("—");
-            let status = &p.agent_status;
+            let status = &p.status;
 
             // Look up active policy from trim_status
             let policy_stages = app

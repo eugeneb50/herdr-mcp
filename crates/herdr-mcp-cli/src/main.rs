@@ -8,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 
 use herdr_mcp_core::{CliOverrides, Config};
 use herdr_mcp_server::{
-    HerdrClient, HerdrMcpServer, Persistence,
+    AgentRegistry, HerdrClient, HerdrMcpServer, Persistence,
     server::{spawn_trim_poller, start_http},
 };
 use herdr_mcp_trim::{dashboard, folder_key as fk, pipeline, runner::PipelineRunner};
@@ -123,7 +123,22 @@ async fn main() -> Result<()> {
             trim_stages: Vec::new(),
         }),
         Some(Command::Trim { .. }) => None,
-        Some(Command::Dashboard { .. }) => None,
+        Some(Command::Dashboard {
+            data_dir,
+            http_port,
+            ..
+        }) => Some(CliOverrides {
+            data_dir: Some(data_dir.clone()),
+            // Dashboard runs on top of the serve stack's HTTP bridge; MCP stdio
+            // is disabled so the TUI owns the terminal (stdout stays clean for
+            // the bridge even though it never prints to stdout).
+            http_port: Some(*http_port),
+            http_only: Some(true),
+            http_bind: None,
+            herdr_socket: None,
+            log_level: None,
+            trim_stages: Vec::new(),
+        }),
         Some(Command::FolderKey { .. }) => None,
         None => Some(CliOverrides {
             data_dir: None,
@@ -161,6 +176,11 @@ async fn main() -> Result<()> {
             if legacy {
                 dashboard::run(&data_dir).await
             } else {
+                // A1: run the dashboard on top of the serve stack in-process.
+                // The HTTP bridge + herdr event subscriber come up headless
+                // (MCP stdio disabled), then the TUI runs on the main task and
+                // reads pane state from the live AgentRegistry via the bridge.
+                run_serve_headless(&config).await?;
                 let opts = herdr_mcp_trim::tui::DashboardOptions {
                     data_dir,
                     http_port,
@@ -272,7 +292,14 @@ async fn run_trim(
     Ok(())
 }
 
-async fn run_serve(config: &Config) -> Result<()> {
+/// Build the full serve stack (persistence, herdr subscriber, registry, HTTP
+/// bridge) and spawn its background tasks. Does NOT block — the spawned tasks
+/// live on the Tokio runtime until it shuts down. Returns the shared
+/// `AgentRegistry` + `Persistence` so callers can build a stdio server against
+/// the exact same registry the HTTP bridge uses. Shared by both `serve` and
+/// `dashboard`: the former awaits the MCP/HTTP server afterwards, the latter
+/// runs the TUI on the main task against the same registry.
+async fn serve_core(config: &Config) -> Result<(AgentRegistry, std::sync::Arc<Persistence>)> {
     let data_dir = config.data_dir.clone();
     let persistence = Persistence::new(data_dir.clone());
     persistence.init().await?;
@@ -298,6 +325,12 @@ async fn run_serve(config: &Config) -> Result<()> {
         });
         tracing::info!("HTTP playground listening on http://localhost:{port}");
     }
+    Ok((registry, persistence))
+}
+
+/// `serve` — full MCP server (stdio + optional HTTP).
+async fn run_serve(config: &Config) -> Result<()> {
+    let (registry, persistence) = serve_core(config).await?;
 
     if config.http.http_only {
         tracing::info!("HTTP-only mode — waiting for shutdown signal");
@@ -307,11 +340,19 @@ async fn run_serve(config: &Config) -> Result<()> {
     }
 
     tracing::info!("Starting herdr-mcp MCP server");
-    let server = HerdrMcpServer::with_config((*persistence).clone(), registry.clone(), config);
+    let server = HerdrMcpServer::with_config((*persistence).clone(), registry, config);
     let service = server.serve(stdio()).await?;
     tracing::info!("herdr-mcp server initialized, waiting for requests");
     service.waiting().await?;
     tracing::info!("herdr-mcp server stopped");
+    Ok(())
+}
+
+/// `dashboard` (A1) — serve stack headless (MCP stdio disabled), then the TUI
+/// runs on top of it. The caller runs the TUI afterwards; this only brings up
+/// the HTTP bridge + herdr event subscriber.
+async fn run_serve_headless(config: &Config) -> Result<()> {
+    serve_core(config).await?;
     Ok(())
 }
 

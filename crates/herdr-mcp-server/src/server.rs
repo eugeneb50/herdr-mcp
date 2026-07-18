@@ -2443,6 +2443,7 @@ async fn resolve_pane_id(
 // ── HTTP Bridge ───────────────────────────────────────────────────────
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use axum::{
     Json, Router,
@@ -2453,12 +2454,45 @@ use axum::{
 use regex::Regex;
 use tower_http::cors::CorsLayer;
 
-/// Start the Axum HTTP server for the web playground.
-pub async fn start_http(server: HerdrMcpServer, port: u16) -> anyhow::Result<()> {
-    let app = Router::new()
+/// Shared state for the Axum HTTP router: the server plus the optional cached
+/// frontend HTML (single-file build at `dist/index.html`). The bytes are read
+/// once at startup and served for every `GET /` and SPA fallback request.
+#[derive(Clone)]
+struct AppState {
+    server: HerdrMcpServer,
+    /// Cached bytes of `dist/index.html`, read once at router construction.
+    index_html: Option<Arc<Vec<u8>>>,
+}
+
+/// Build the Axum router for the web playground. Shared by [`start_http`] and
+/// the in-process dashboard that runs the server stack without MCP stdio.
+fn http_router(server: HerdrMcpServer) -> Router {
+    let index_html = match std::fs::read("./dist/index.html") {
+        Ok(bytes) => {
+            tracing::info!(
+                "serving frontend from ./dist/index.html ({} bytes)",
+                bytes.len()
+            );
+            Some(Arc::new(bytes))
+        }
+        Err(e) => {
+            let hint = format!(
+                "frontend not built: ./dist/index.html ({e}); \
+                 run `npm run build` in the repo root. /api/* still available."
+            );
+            tracing::warn!("{hint}");
+            None
+        }
+    };
+    let state = AppState { server, index_html };
+
+    Router::new()
+        .route("/", get(index_html_handler))
         .route("/api/health", get(health_handler))
         .route("/api/tools", get(list_tools_handler))
         .route("/api/tools/{name}", post(call_tool_handler))
+        .route("/api/agents", get(agents_handler))
+        .route("/api/workspaces", get(workspaces_handler))
         .route("/api/recipe", post(run_recipe_handler))
         .route(
             "/api/recipes",
@@ -2488,7 +2522,15 @@ pub async fn start_http(server: HerdrMcpServer, port: u16) -> anyhow::Result<()>
             post(trim_dashboard_open_http_handler),
         )
         .layer(CorsLayer::permissive())
-        .with_state(server);
+        .fallback(index_html_handler)
+        .with_state(state)
+}
+
+/// Start the Axum HTTP server for the web playground. Bind lives until the
+/// returned task is aborted or the process exits. The route table is built by
+/// [`http_router`]; this is the thin bind + serve wrapper.
+pub async fn start_http(server: HerdrMcpServer, port: u16) -> anyhow::Result<()> {
+    let app = http_router(server);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     axum::serve(listener, app).await?;
@@ -2505,7 +2547,7 @@ async fn list_tools_handler() -> Json<serde_json::Value> {
 }
 
 async fn call_tool_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     Path(name): Path<String>,
     body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<CallToolResult>, (StatusCode, String)> {
@@ -2514,6 +2556,51 @@ async fn call_tool_handler(
         .await
         .map(Json)
         .map_err(|e| (e.0, e.1))
+}
+
+/// `GET /api/agents?workspace_id=w1` — canonical pane list from the live
+/// `AgentRegistry`. This is the single source of truth the TUI dashboard reads;
+/// `list_panes` (MCP tool) shells out to herdr and is reserved as a diagnostic
+/// fallback only. Empty `workspace_id` returns the global snapshot.
+async fn agents_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Query(params): Query<TrimStatusParams>,
+) -> Json<serde_json::Value> {
+    let handles = match &params.workspace_id {
+        Some(ws) if !ws.is_empty() => server.registry.list_for_ws(ws).await,
+        _ => server.registry.inner_snapshot().await,
+    };
+    Json(serde_json::json!({ "agents": handles }))
+}
+
+/// `GET /api/workspaces` — passthrough to `herdr workspace list` for the
+/// sidecar header. Kept distinct from the registry so the TUI can show
+/// workspaces even when no agents are registered yet.
+async fn workspaces_handler() -> Json<serde_json::Value> {
+    let raw = herdr_cli(&["workspace", "list"])
+        .await
+        .map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::json!(null)))
+        .unwrap_or(serde_json::json!(null));
+    Json(raw)
+}
+
+/// `GET /` (also SPA fallback) — serves the single-file frontend build, or a
+/// plain-text hint when `dist/index.html` is missing.
+async fn index_html_handler(
+    State(AppState { index_html, .. }): State<AppState>,
+) -> (StatusCode, [(&'static str, &'static str); 1], Vec<u8>) {
+    match &index_html {
+        Some(bytes) => (
+            StatusCode::OK,
+            [("content-type", "text/html; charset=utf-8")],
+            bytes.as_ref().clone(),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            [("content-type", "text/plain; charset=utf-8")],
+            b"frontend not built \xe2\x80\x94 run `npm run build` in the repo root".to_vec(),
+        ),
+    }
 }
 
 fn mcp_err_to_http(e: McpError) -> (StatusCode, String) {
@@ -2526,7 +2613,7 @@ fn bad_request(e: impl ToString) -> (StatusCode, String) {
 
 /// `GET /api/trim/status?workspace_id=w1` — aggregate trim savings.
 async fn trim_status_http_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     Query(params): Query<TrimStatusParams>,
 ) -> Json<TrimStatusResponse> {
     Json(
@@ -2538,7 +2625,7 @@ async fn trim_status_http_handler(
 
 /// `POST /api/trim/diagnose` — end-to-end readiness check.
 async fn trim_diagnose_http_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     body: Option<Json<serde_json::Value>>,
 ) -> Json<DiagnoseReport> {
     let ws = body.and_then(|j| {
@@ -2551,7 +2638,7 @@ async fn trim_diagnose_http_handler(
 
 /// `POST /api/trim/summary` — fire a savings notification.
 async fn trim_summary_http_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     body: Option<Json<serde_json::Value>>,
 ) -> Json<serde_json::Value> {
     let p: TrimStatusParams = body
@@ -2566,7 +2653,7 @@ async fn trim_summary_http_handler(
 
 /// `POST /api/trim/dashboard/open` — open a live dashboard pane.
 async fn trim_dashboard_open_http_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     body: Option<Json<serde_json::Value>>,
 ) -> Json<serde_json::Value> {
     let p: TrimStatusParams = body
@@ -3062,7 +3149,7 @@ async fn execute_recipe(
 }
 
 async fn run_recipe_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     Json(req): Json<RecipeRequest>,
 ) -> Json<RecipeResponse> {
     let session = req.session_id.as_deref();
@@ -3164,7 +3251,7 @@ struct UpdateRecipeRequest {
 }
 
 async fn list_recipes_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
 ) -> Result<Json<Vec<Recipe>>, (StatusCode, String)> {
     server
         .persistence
@@ -3175,7 +3262,7 @@ async fn list_recipes_handler(
 }
 
 async fn create_recipe_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     Json(req): Json<CreateRecipeRequest>,
 ) -> Result<Json<Recipe>, (StatusCode, String)> {
     let now = chrono::Utc::now();
@@ -3210,7 +3297,7 @@ async fn create_recipe_handler(
 }
 
 async fn get_recipe_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<Recipe>, (StatusCode, String)> {
     server
@@ -3223,7 +3310,7 @@ async fn get_recipe_handler(
 }
 
 async fn update_recipe_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     Path(id): Path<uuid::Uuid>,
     Json(req): Json<UpdateRecipeRequest>,
 ) -> Result<Json<Recipe>, (StatusCode, String)> {
@@ -3266,7 +3353,7 @@ async fn update_recipe_handler(
 }
 
 async fn delete_recipe_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     server
@@ -3279,7 +3366,7 @@ async fn delete_recipe_handler(
 }
 
 async fn run_recipe_by_id_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<ExecutionResult>, (StatusCode, String)> {
     let recipe = server
@@ -3351,7 +3438,7 @@ async fn run_recipe_by_id_handler(
 // ── Variables API ──────────────────────────────────────────────────────
 
 async fn list_variables_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
 ) -> Result<Json<Vec<crate::persistence::VariableStore>>, (StatusCode, String)> {
     server
         .persistence
@@ -3362,7 +3449,7 @@ async fn list_variables_handler(
 }
 
 async fn save_variable_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     Json(req): Json<crate::persistence::VariableStore>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     server
@@ -3374,7 +3461,7 @@ async fn save_variable_handler(
 }
 
 async fn get_variable_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<Json<crate::persistence::VariableStore>, (StatusCode, String)> {
     let vars = server
@@ -3390,7 +3477,7 @@ async fn get_variable_handler(
 }
 
 async fn delete_variable_handler(
-    State(_server): State<HerdrMcpServer>,
+    State(_state): State<AppState>,
     Path(_key): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     Ok(StatusCode::NO_CONTENT)
@@ -3399,7 +3486,7 @@ async fn delete_variable_handler(
 // ── Executions API ────────────────────────────────────────────────────
 
 async fn get_execution_handler(
-    State(server): State<HerdrMcpServer>,
+    State(AppState { server, .. }): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<ExecutionResult>, (StatusCode, String)> {
     server

@@ -139,19 +139,55 @@ pub struct HerdrContext {
     pub workspace: Option<String>,
     pub pane_id: Option<String>,
     pub pane_count: usize,
-    /// Full pane list from `herdr pane list`.
+    /// Full pane list from the live `AgentRegistry` (read via the HTTP bridge).
     pub panes: Vec<HerdrPane>,
+    /// Last error surfaced by `refresh_herdr`, surfaced in the footer / log so
+    /// "no panes detected" is no longer a silent failure.
+    pub last_error: Option<String>,
 }
 
-/// A single herdr pane with metadata from `herdr pane list`.
+/// A single herdr pane, presumptively from the live `AgentRegistry`. The
+/// `cwd`/`focused` fields stay optional because the registry snapshot doesn't
+/// carry them; when the TUI shell-outs to `herdr pane list` as the diagnostic
+/// fallback (`refresh_herdr_panes_fallback` below), it fills them in.
+///
+/// Source of truth: the `AgentRegistry` snapshot served at `GET /api/agents`.
+/// The `herdr pane list` CLI is a diagnostic fallback only.
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 pub struct HerdrPane {
     pub pane_id: String,
+    /// Human-assigned label (`herdr pane rename`). From the registry: same source as AgentHandle.label.
+    #[serde(default)]
     pub label: String,
+    /// Agent binary name (e.g. "opencode"). Optional — idle panes may have none.
+    #[serde(default)]
     pub agent: Option<String>,
-    pub agent_status: String,
+    /// Lifecycle status from the registry event stream (idle/working/blocked/done/unknown).
+    #[serde(default)]
+    pub status: String,
+    /// Human-assigned role used for `{{role.output}}` a2a interpolation (e.g. "agentA").
+    #[serde(default)]
+    pub role: String,
+    /// Pane output captured at last idle — the agent's work product.
+    #[serde(default)]
+    pub output: String,
+    /// Optional message-trim policy. The Trim tab editor mutates this through
+    /// the registry, so the snapshot stays live without polling herdr.
+    #[serde(default)]
+    pub trim_policy: Option<crate::policy::TrimPolicy>,
+    /// Registry-side last-updated epoch seconds (registry authoritative, not the CLI).
+    #[serde(default)]
+    pub updated_at: i64,
+
+    // ── Diagnostic fallback fields (only populated by herdr CLI passthrough) ──
+    /// Pane cwd (CLI-only — registry doesn't track this).
+    #[serde(default)]
     pub cwd: String,
+    /// Whether the pane currently has focus in herdr (CLI-only).
+    #[serde(default)]
     pub focused: bool,
+    /// Tab id the pane belongs to (CLI-only).
+    #[serde(default)]
     pub tab_id: Option<String>,
 }
 
@@ -621,67 +657,121 @@ impl App {
         }
     }
 
-    /// Resolve current herdr workspace/pane via the CLI (best-effort).
+    /// Resolve current herdr workspace/pane context.
+    ///
+    /// Workspace id comes from `herdr workspace list` (CLI passthrough via the
+    /// HTTP bridge). The pane list is the canonical `AgentRegistry` snapshot
+    /// served at `GET /api/agents` — the single source of truth, kept live by
+    /// the herdr Unix-socket subscriber. If the registry is empty (e.g. the
+    /// subscriber hasn't populated yet, or the bridge isn't reachable), we fall
+    /// back to `herdr pane list` as a diagnostic, so "no panes detected" always
+    /// has a recovery path and a surfaced error.
     async fn refresh_herdr(&mut self) {
-        if let Ok(raw) = herdr_cli(&["workspace", "list"]).await
-            && let Ok(v) = serde_json::from_str::<Value>(&raw)
-        {
-            self.herdr.workspace = v
-                .get("result")
-                .and_then(|r| r.get("workspaces"))
-                .and_then(|w| w.get(0))
-                .and_then(|w| w.get("id"))
-                .and_then(|i| i.as_str())
-                .map(str::to_string);
-        }
-        if let Ok(raw) = herdr_cli(&["pane", "list"]).await
-            && let Ok(v) = serde_json::from_str::<Value>(&raw)
-        {
-            self.herdr.pane_id = v
-                .pointer("/result/panes/0/pane_id")
-                .or_else(|| v.pointer("/result/panes/0/id"))
-                .and_then(|i| i.as_str())
-                .map(str::to_string);
-            if let Some(panes) = v
-                .get("result")
-                .and_then(|r| r.get("panes"))
-                .and_then(|p| p.as_array())
+        // 1. Workspace id (best-effort CLI passthrough).
+        self.herdr.last_error = None;
+        if let Some(http) = &self.http {
+            match http.list_workspaces().await {
+                Ok(v) => {
+                    self.herdr.workspace = v
+                        .get("result")
+                        .and_then(|r| r.get("workspaces"))
+                        .and_then(|w| w.get(0))
+                        .and_then(|w| w.get("id"))
+                        .and_then(|i| i.as_str())
+                        .map(str::to_string);
+                }
+                Err(e) => {
+                    let msg = format!("list_workspaces failed: {e}");
+                    self.herdr.last_error = Some(msg.clone());
+                    self.log_debug(msg);
+                }
+            }
+            // 2. Canonical pane list from the live AgentRegistry.
+            match http.list_agents(self.herdr.workspace.as_deref()).await {
+                Ok(v) => {
+                    if let Some(agents) = v.get("agents").and_then(|a| a.as_array()) {
+                        self.herdr.panes = agents
+                            .iter()
+                            .filter_map(|a| serde_json::from_value::<HerdrPane>(a.clone()).ok())
+                            .collect();
+                        self.herdr.pane_count = self.herdr.panes.len();
+                        self.herdr.pane_id = self.herdr.panes.first().map(|p| p.pane_id.clone());
+                        return;
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("list_agents failed: {e}");
+                    self.herdr.last_error = Some(msg.clone());
+                    self.log_debug(msg);
+                }
+            }
+            // 3. Diagnostic fallback — ask herdr directly.
+            if let Ok(raw) = herdr_cli(&["pane", "list"]).await
+                && let Ok(v) = serde_json::from_str::<Value>(&raw)
             {
-                self.herdr.panes = panes
-                    .iter()
-                    .filter_map(|p| {
-                        Some(HerdrPane {
-                            pane_id: p
-                                .get("pane_id")
-                                .or_else(|| p.get("id"))?
-                                .as_str()?
-                                .to_string(),
-                            label: p
-                                .get("label")
-                                .and_then(|l| l.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            agent: p.get("agent").and_then(|a| a.as_str()).map(str::to_string),
-                            agent_status: p
-                                .get("agent_status")
-                                .and_then(|s| s.as_str())
-                                .unwrap_or("unknown")
-                                .to_string(),
-                            cwd: p
-                                .get("cwd")
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("")
-                                .to_string(),
-                            focused: p.get("focused").and_then(|f| f.as_bool()).unwrap_or(false),
-                            tab_id: p.get("tab_id").and_then(|t| t.as_str()).map(str::to_string),
+                self.herdr.pane_id = v
+                    .pointer("/result/panes/0/pane_id")
+                    .or_else(|| v.pointer("/result/panes/0/id"))
+                    .and_then(|i| i.as_str())
+                    .map(str::to_string);
+                if let Some(panes) = v
+                    .get("result")
+                    .and_then(|r| r.get("panes"))
+                    .and_then(|p| p.as_array())
+                {
+                    self.herdr.panes = panes
+                        .iter()
+                        .filter_map(|p| {
+                            Some(HerdrPane {
+                                pane_id: p
+                                    .get("pane_id")
+                                    .or_else(|| p.get("id"))?
+                                    .as_str()?
+                                    .to_string(),
+                                label: p
+                                    .get("label")
+                                    .and_then(|l| l.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                agent: p.get("agent").and_then(|a| a.as_str()).map(str::to_string),
+                                status: p
+                                    .get("agent_status")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("unknown")
+                                    .to_string(),
+                                role: p
+                                    .get("role")
+                                    .and_then(|s| s.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                output: String::new(),
+                                trim_policy: None,
+                                updated_at: 0,
+                                cwd: p
+                                    .get("cwd")
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                focused: p
+                                    .get("focused")
+                                    .and_then(|f| f.as_bool())
+                                    .unwrap_or(false),
+                                tab_id: p
+                                    .get("tab_id")
+                                    .and_then(|t| t.as_str())
+                                    .map(str::to_string),
+                            })
                         })
-                    })
-                    .collect();
-                self.herdr.pane_count = self.herdr.panes.len();
-            } else {
-                self.herdr.pane_count = 0;
+                        .collect();
+                    self.herdr.pane_count = self.herdr.panes.len();
+                } else {
+                    self.herdr.pane_count = 0;
+                }
+                return;
             }
         }
+        // 4. No HTTP bridge available — nothing to show.
+        self.herdr.pane_count = 0;
     }
 
     /// The active editable `TextArea` (live editor) for the current tab/field.
@@ -1885,7 +1975,9 @@ mod tests {
             "pane_id": "w123:p1",
             "label": "test-pane",
             "agent": "hermes",
-            "agent_status": "idle",
+            "status": "idle",
+            "role": "",
+            "output": "",
             "cwd": "/tmp/test",
             "focused": true,
             "tab_id": "w123:t1"
@@ -1894,7 +1986,7 @@ mod tests {
         assert_eq!(pane.pane_id, "w123:p1");
         assert_eq!(pane.label, "test-pane");
         assert_eq!(pane.agent.as_deref(), Some("hermes"));
-        assert_eq!(pane.agent_status, "idle");
+        assert_eq!(pane.status, "idle");
         assert!(pane.focused);
     }
 }

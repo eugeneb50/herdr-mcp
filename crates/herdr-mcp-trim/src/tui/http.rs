@@ -96,6 +96,44 @@ impl HttpClient {
         Ok(v)
     }
 
+    /// `GET /api/agents?workspace_id=` — canonical pane list straight from the
+    /// live `AgentRegistry` the HTTP bridge owns. This is the single source of
+    /// truth for the Overview/Trim tabs; the herdr CLI is reserved as a
+    /// diagnostic fallback. Empty `workspace_id` returns the global snapshot.
+    pub async fn list_agents(&self, workspace_id: Option<&str>) -> Result<Value> {
+        let url = match workspace_id.filter(|s| !s.is_empty()) {
+            Some(ws) => format!("{}/api/agents?workspace_id={ws}", self.base),
+            None => format!("{}/api/agents", self.base),
+        };
+        let v = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .json::<Value>()
+            .await
+            .with_context(|| format!("parsing {url} body"))?;
+        Ok(v)
+    }
+
+    /// `GET /api/workspaces` — passthrough to `herdr workspace list`. Kept
+    /// distinct from the registry so the sidecar header can resolve a
+    /// workspace id even before any agents register.
+    pub async fn list_workspaces(&self) -> Result<Value> {
+        let url = format!("{}/api/workspaces", self.base);
+        let v = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .context("GET /api/workspaces")?
+            .json::<Value>()
+            .await
+            .context("parsing /api/workspaces body")?;
+        Ok(v)
+    }
+
     /// Invoke a tool by name with the given params object.
     pub async fn call_tool(&self, name: &str, params: Value) -> Result<Value> {
         let url = format!("{}/api/tools/{name}", self.base);
