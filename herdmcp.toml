@@ -3,11 +3,11 @@
 # update at the end of each session. (Originally lived at
 # /root/.config/herdr-mcp-context.md; moved into the repo as TOML.)
 
-objective = "herdr-mcp migrated from a monolith into a 4-crate workspace; comprehensive test suite written per TEST_PLAN.md. Migration COMPLETE. Test suite COMPLETE (233 tests, all passing)."
+objective = "herdr-mcp migrated from a monolith into a 4-crate workspace; comprehensive test suite written per TEST_PLAN.md. Migration COMPLETE. Test suite COMPLETE (299 tests, all passing)."
 edition = "2024"
 binary_name = "herdr-mcp"
 cli_subcommands = ["serve", "trim", "dashboard", "folder-key"]
-tool_count = 49
+tool_count = 51
 
 [architecture]
 crates = ["herdr-mcp-core", "herdr-mcp-trim", "herdr-mcp-server", "herdr-mcp-cli"]
@@ -58,16 +58,23 @@ fact = "CompressionKey = HashMap<String,String> (Cherokee symbol -> term). 85 sy
 fact = "caveman is lossy (style); pfc1 is lossless. Pipeline run never expands wire bytes (adaptive gate skips PFC1 when candidate.len() >= current.len())."
 [[spec]]
 fact = "stats.rs: savings_pct() = gross/total_input; workspace_net_pct() = net/gross."
+[[spec]]
+fact = "resolve_label_in_panes handles both pane_id and id JSON keys via .or_else()."
+[[spec]]
+fact = "resolve_target_pane uses AgentRegistry::resolve; resolve_pane_id shells out to herdr pane list CLI."
 
 # Known non-determinism / gotchas
 [[gotcha]]
 note = "build_folder_key writes its output INTO the scanned root folder, so a second scan re-ingests that JSON file -> the produced key is non-deterministic across separate builds (symbol->term assignment order AND term selection both depend on HashMap iteration when over-subscribed). The persisted-on-disk key IS stable for a single build (test_load_folder_key_roundtrip). Don't assert two separate builds are equal."
 
+[[gotcha]]
+note = "resolve_pane_id uses herdr pane list CLI which may return the pane identifier as either pane_id or id; both are handled via .or_else()."
+
 # Test layout (crate -> count)
 [test_layout]
-herdr_mcp_trim = 126
-herdr_mcp_server = 73
-herdr_mcp_core = 24
+herdr_mcp_trim = 169
+herdr_mcp_server = 82
+herdr_mcp_core = 38
 herdr_mcp_cli = 10
 
 [test_breakdown.herdr_mcp_trim]
@@ -80,6 +87,7 @@ runner = 5
 eval = 5
 folder_key = 13
 pipeline = 17
+tui = 43
 
 [test_breakdown.herdr_mcp_server]
 config = 24
@@ -89,6 +97,8 @@ server_recipe_engine = 19
 persistence = 13
 herdr_client = 16
 scheduler = 6
+resolve_label = 7
+clipboard = 19
 
 [test_breakdown.herdr_mcp_core]
 config = 24

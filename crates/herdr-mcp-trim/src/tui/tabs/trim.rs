@@ -159,8 +159,25 @@ async fn handle_frame_pane_list(app: &mut App, code: KeyCode, mods: KeyModifiers
 /// Frame 2: Stage list — Up/Down/Home/End/PgUp/PgDn + direction + actions.
 async fn handle_frame_stage_list(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     match code {
+        // Move stage up (Ctrl+Up)
+        KeyCode::Up if mods.contains(KeyModifiers::CONTROL) && app.trim.stage_index > 0 => {
+            let idx = app.trim.stage_index;
+            app.trim.stages.swap(idx, idx - 1);
+            app.trim.stage_index = idx - 1;
+            Ok(true)
+        }
         KeyCode::Up => {
             app.trim.stage_index = app.trim.stage_index.saturating_sub(1);
+            Ok(true)
+        }
+        // Move stage down (Ctrl+Down)
+        KeyCode::Down
+            if mods.contains(KeyModifiers::CONTROL)
+                && app.trim.stage_index + 1 < app.trim.stages.len() =>
+        {
+            let idx = app.trim.stage_index;
+            app.trim.stages.swap(idx, idx + 1);
+            app.trim.stage_index = idx + 1;
             Ok(true)
         }
         KeyCode::Down => {
@@ -224,9 +241,9 @@ async fn handle_frame_stage_list(app: &mut App, code: KeyCode, mods: KeyModifier
         KeyCode::Char('r') => {
             if app.trim.stage_index < app.trim.stages.len() {
                 app.trim.stages.remove(app.trim.stage_index);
-                if app.trim.stage_index >= app.trim.stages.len() && app.trim.stage_index > 0 {
-                    app.trim.stage_index -= 1;
-                }
+            }
+            if !app.trim.stages.is_empty() && app.trim.stage_index >= app.trim.stages.len() {
+                app.trim.stage_index = app.trim.stages.len() - 1;
             }
             Ok(true)
         }
@@ -277,6 +294,10 @@ async fn handle_stage_picker_key(app: &mut App, code: KeyCode) -> Result<bool> {
 }
 
 async fn get_policy(app: &mut App) {
+    let pane_count = app.herdr.panes.len();
+    if pane_count > 0 {
+        app.trim.pane_index = app.trim.pane_index.min(pane_count.saturating_sub(1));
+    }
     let target = match app.herdr.panes.get(app.trim.pane_index) {
         Some(p) => p.pane_id.clone(),
         None => {
@@ -294,12 +315,16 @@ async fn get_policy(app: &mut App) {
     app.trim.policy_msg = "getting...".into();
     match http.trim_policy_get(&target).await {
         Ok(v) => {
-            if let Some(policy) = v.get("policy").cloned() {
-                if policy.is_null() {
-                    app.trim.stages.clear();
-                    app.trim.direction = TrimDirection::None;
-                    app.trim.policy_msg = "no policy set".into();
-                } else {
+            // The tool response is a CallToolResult wrapper; the actual data
+            // lives in content[0].text as a JSON string.
+            let policy = v
+                .pointer("/content/0/text")
+                .and_then(|t| t.as_str())
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .and_then(|inner| inner.get("policy").cloned());
+
+            match policy {
+                Some(policy) if !policy.is_null() => {
                     if let Some(stages) = policy.get("stages").and_then(|s| s.as_array()) {
                         app.trim.stages = stages
                             .iter()
@@ -316,8 +341,11 @@ async fn get_policy(app: &mut App) {
                     }
                     app.trim.policy_msg = format!("got policy: {} stages", app.trim.stages.len());
                 }
-            } else {
-                app.trim.policy_msg = "no policy field in response".into();
+                _ => {
+                    app.trim.stages.clear();
+                    app.trim.direction = TrimDirection::None;
+                    app.trim.policy_msg = "no policy set".into();
+                }
             }
         }
         Err(e) => {
@@ -327,6 +355,10 @@ async fn get_policy(app: &mut App) {
 }
 
 async fn apply_policy(app: &mut App) {
+    let pane_count = app.herdr.panes.len();
+    if pane_count > 0 {
+        app.trim.pane_index = app.trim.pane_index.min(pane_count.saturating_sub(1));
+    }
     let target = match app.herdr.panes.get(app.trim.pane_index) {
         Some(p) => p.pane_id.clone(),
         None => {
@@ -495,19 +527,25 @@ fn render_trim_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let agent = p.agent.as_deref().unwrap_or("—");
             let status = &p.status;
 
-            // Look up active policy from trim_status
-            let policy_stages = app
-                .trim_status
+            // Policy badge: try pane.trim_policy first, fall back to
+            // trim_status.active_policies for panes from the CLI fallback path.
+            let policy_stages = p
+                .trim_policy
                 .as_ref()
-                .and_then(|t| t.get("active_policies"))
-                .and_then(|p| p.as_object())
-                .and_then(|pol| pol.get(&p.pane_id))
-                .and_then(|s| s.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
+                .map(|tp| tp.stages.join(","))
+                .or_else(|| {
+                    app.trim_status
+                        .as_ref()
+                        .and_then(|t| t.get("active_policies"))
+                        .and_then(|p| p.as_object())
+                        .and_then(|pol| pol.get(&p.pane_id))
+                        .and_then(|s| s.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|s| s.as_str())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        })
                 })
                 .unwrap_or_default();
 
@@ -614,7 +652,8 @@ fn render_trim_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let btn_line = Line::from(vec![
         Span::styled(" [g] Get  ", accent_style()),
         Span::styled(" [d] Apply  ", accent_style()),
-        Span::styled(" [a] Add stage  [r] Remove", dim_style()),
+        Span::styled(" [a] Add stage  [r] Remove  ", dim_style()),
+        Span::styled(" [^↑/^↓] Reorder", dim_style()),
     ]);
     lines.push(btn_line);
 

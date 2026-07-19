@@ -1587,6 +1587,18 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
             Tab::Overview if app.overview.pane_index + 1 < app.herdr.panes.len() => {
                 app.overview.pane_index += 1;
             }
+            Tab::Trim
+                if app.trim.focused_frame == 1
+                    && app.trim.pane_index + 1 < app.herdr.panes.len() =>
+            {
+                app.trim.pane_index += 1;
+            }
+            Tab::Trim
+                if app.trim.focused_frame == 2
+                    && app.trim.stage_index + 1 < app.trim.stages.len() =>
+            {
+                app.trim.stage_index += 1;
+            }
             _ => {}
         },
         MouseEventKind::ScrollUp => match app.tab {
@@ -1604,6 +1616,12 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
             }
             Tab::Overview if app.overview.pane_index > 0 => {
                 app.overview.pane_index -= 1;
+            }
+            Tab::Trim if app.trim.focused_frame == 1 && app.trim.pane_index > 0 => {
+                app.trim.pane_index -= 1;
+            }
+            Tab::Trim if app.trim.focused_frame == 2 && app.trim.stage_index > 0 => {
+                app.trim.stage_index -= 1;
             }
             _ => {}
         },

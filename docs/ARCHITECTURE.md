@@ -18,7 +18,7 @@ sophisticated message-trim (compression) pipeline, and a recipe engine for
 chaining tool calls with variable interpolation.
 
 **License:** AGPL v3
-**Current test suite:** 233 tests across 4 crates (all passing)
+**Current test suite:** 299 tests across 4 crates (all passing)
 **Architecture:** 4-crate Cargo workspace; both the 4-crate workspace and a
 legacy `src/` monolith coexist in the source tree.
 
@@ -115,12 +115,12 @@ source tree.
 herdr-mcp/
 ├── Cargo.toml              # Workspace root (4 members)
 ├── crates/
-│   ├── herdr-mcp-core/     # Config, error types (24 tests)
+│   ├── herdr-mcp-core/     # Config, error types (38 tests)
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports Config, CliOverrides, Error
 │   │       ├── config.rs   # Full config system: TOML + env + CLI
 │   │       └── error.rs    # anyhow-based error context
-│   ├── herdr-mcp-trim/     # Message-trim pipeline (126 tests)
+│   ├── herdr-mcp-trim/     # Message-trim pipeline + TUI dashboard (169 tests)
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports all public types
 │   │       ├── pfc1.rs     # PFC1 phonetic compressor
@@ -131,9 +131,20 @@ herdr-mcp/
 │   │       ├── runner.rs   # PipelineRunner with persistence
 │   │       ├── stats.rs    # TrimStats per workspace
 │   │       ├── eval.rs     # trim_eval + trim_bench
-│   │       ├── dashboard.rs # Live ANSI TUI
-│   │       └── folder_key.rs # Per-folder PFC1 keys
-│   ├── herdr-mcp-server/   # MCP server, tools, HTTP bridge (73 tests)
+│   │       ├── dashboard.rs # Legacy trim-only TUI
+│   │       ├── folder_key.rs # Per-folder PFC1 keys
+│   │       └── tui/        # Kitchen-sink TUI dashboard (crossterm + ratatui)
+│   │           ├── mod.rs      # App state, event loop, mouse handling
+│   │           ├── http.rs     # HTTP client for bridge communication
+│   │           ├── nav.rs      # NavigationFrame + FrameFocus
+│   │           ├── theme.rs    # Color palette and styles
+│   │           └── tabs/       # 5 tabbed panels
+│   │               ├── overview.rs
+│   │               ├── playground.rs
+│   │               ├── trim.rs
+│   │               ├── variables.rs
+│   │               └── settings.rs
+│   ├── herdr-mcp-server/   # MCP server, tools, HTTP bridge (82 tests)
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports HerdrMcpServer, Persistence, etc.
 │   │       ├── server.rs   # Tool definitions + HTTP handlers + recipe engine
@@ -163,7 +174,7 @@ herdr-mcp/
 
 ---
 
-## 4. MCP Tool Reference (49 tools total)
+## 4. MCP Tool Reference (51 tools total)
 
 ### 4.1 Discovery Tools (7)
 
@@ -269,6 +280,13 @@ herdr-mcp/
 | `list_folder_keys` | — | List central registry keys |
 | `decompress_with_folder_key` | `folder_path`, `text` | Decompress with folder's key |
 
+### 4.12 Clipboard Tools (2)
+
+| Tool | Parameters | Description |
+|---|---|---|
+| `clipboard_set` | `text` | Write text to system clipboard |
+| `clipboard_get` | — | Read text from system clipboard |
+
 ---
 
 ## 5. HTTP Bridge API
@@ -276,10 +294,13 @@ herdr-mcp/
 ### 5.1 Core Routes
 
 | Method | Path | Handler | Description |
-|---|---|---|---|
+|---|---|---|---|---|
+| `GET` | `/` | `index_html_handler` | Serves the single-file web playground (from `dist/index.html`) |
 | `GET` | `/api/health` | `health_handler` | Returns `"ok"` |
 | `GET` | `/api/tools` | `list_tools_handler` | Lists all tools with JSON schemas |
 | `POST` | `/api/tools/{name}` | `call_tool_handler` | Dispatch tool by name |
+| `GET` | `/api/agents?workspace_id=` | `agents_handler` | Live pane list from AgentRegistry |
+| `GET` | `/api/workspaces` | `workspaces_handler` | Workspace list via herdr CLI |
 | `POST` | `/api/recipe` | `run_recipe_handler` | Execute multi-step recipe |
 
 ### 5.2 Recipe CRUD Routes
@@ -311,6 +332,18 @@ herdr-mcp/
 | `POST` | `/api/trim/diagnose` | End-to-end readiness check |
 | `POST` | `/api/trim/summary` | Fire savings notification |
 | `POST` | `/api/trim/dashboard/open` | Open live dashboard pane |
+
+### 5.5 Frontend Serving
+
+The HTTP bridge serves the single-file frontend at `GET /`:
+
+- `dist/index.html` (412 KB) is cached as `Arc<Vec<u8>>` at router construction
+- `GET /` + any unmatched path returns it via `.fallback()`
+- Missing `dist/index.html` logs a `tracing::warn!` hint
+- `/api/*` endpoints still work alongside the SPA fallback
+
+This makes the web playground available at `http://localhost:7676/` without
+a separate dev server in production.
 
 ---
 
@@ -502,7 +535,7 @@ Per-folder PFC1 keys for domain-specific compression:
 - Central registry: `data/folder_keys/` for cross-folder visibility
 - mtime-based caching: unchanged file set reuses the cached key
 
-### 7.9 Dashboard (`dashboard.rs`)
+### 7.9 Legacy Dashboard (`dashboard.rs`)
 
 Live ANSI TUI using crossterm:
 - 2-second refresh cycle
@@ -510,6 +543,42 @@ Live ANSI TUI using crossterm:
 - Shows per-workspace savings %, per-pane bar charts
 - Quit with `q` or `Ctrl+C`
 - RAII terminal restoration guard
+
+### 7.10 Kitchen-Sink TUI Dashboard (`tui/`)
+
+Full-featured terminal dashboard with VS Code-style tabs, mouse + keyboard
+navigation, running as a herdr sidecar pane:
+
+**5 tabs:**
+| Tab | Content |
+|---|---|
+| Overview | Welcome, workspace stats, pane table with agent/status/role |
+| Playground | Tool runner + recipe builder (same as web playground) |
+| Trim | Trim savings dashboard + per-pane policy editor |
+| Variables | Workspace-scoped variable editor |
+| Settings | Runtime info, clipboard config, keyboard shortcuts |
+
+**Architecture:**
+- Runs **in-process on top of the `serve` stack** (A1 approach): the HTTP
+  bridge + AgentRegistry + event subscriber come up headless, then the TUI
+  takes over the terminal. MCP stdio is auto-disabled (`http_only=true`) so
+  the TUI owns stdout.
+- Reads pane data from the **live AgentRegistry** via `GET /api/agents`
+  (canonical), falls back to `herdr pane list` CLI (diagnostic) if the bridge
+  is unavailable.
+- **Trim policy editor** — select a pane, add/remove/reorder pipeline stages
+  (`caveman:lite/full/ultra`, `pfc1`), set direction, Get/Apply via the
+  bridge's tool endpoints.
+- **Mouse support**: Tab strip clicks, scroll wheel on lists, right-click
+  context menu with copy actions.
+- **Clipboard integration**: Copy pane text, tool results, or JSON via
+  right-click menu; `clipboard_set`/`clipboard_get` tool integration in the
+  Settings panel.
+- Stats persisted per-workspace to
+  `data/sessions/{ws}.trim_stats.json`.
+- **Badge push:** After each trim, `push_badge_for_workspace()` sends
+  `herdr pane report-metadata --custom-status "-12%" --ttl-ms 25000` to all
+  panes with active policies.
 
 ---
 
@@ -716,25 +785,31 @@ cargo build --release                    # → target/release/herdr-mcp
 npm install && npm run build            # → dist/index.html
 
 # Development server (Rust + Vite with hot reload)
-cargo run --release -- --http 8080 --http-only  # Terminal 1
+cargo run --release -- serve --http-only           # Terminal 1 (port 7676)
 npm run dev                                    # Terminal 2 (port 5173)
 
 # Tests
-cargo test --workspace                   # 233 tests
-cargo test -p herdr-mcp-trim --lib      # 126 tests (trim)
-cargo test -p herdr-mcp-server --lib    # 73 tests (server)
-cargo test -p herdr-mcp-core --lib      # 24 tests (config)
+cargo test --workspace                   # 299 tests
+cargo test -p herdr-mcp-trim --lib      # 169 tests (trim + TUI)
+cargo test -p herdr-mcp-server --lib    # 82 tests (server)
+cargo test -p herdr-mcp-core --lib      # 38 tests (config)
 cargo test -p herdr-mcp-cli             # 10 tests (CLI integration)
+
+# Lint + format
+cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
 ### 13.2 Binary Subcommands
 
 ```bash
-herdr-mcp serve --http 8080 --http-only --data-dir ./data --herdr-socket ~/.config/herdr/herdr.sock
+herdr-mcp                         # MCP stdio + HTTP bridge on port 7676
+herdr-mcp serve                   # Explicit MCP + HTTP
+herdr-mcp dashboard               # Kitchen-sink TUI (no legacy flag)
+herdr-mcp dashboard --legacy      # Legacy trim-only dashboard
 herdr-mcp trim --stage caveman:full --stage pfc1 "text to compress"
 herdr-mcp trim --decompress "compressed text"
 herdr-mcp trim --file input.txt
-herdr-mcp dashboard --data-dir ./data
 herdr-mcp folder-key build ./my-folder --data-dir ./data --max-terms 85
 herdr-mcp folder-key list --data-dir ./data
 herdr-mcp folder-key show ./my-folder
@@ -746,12 +821,22 @@ herdr-mcp folder-key decompress ./my-folder "compressed text"
 | Variable | Default | Description |
 |---|---|---|
 | `HERDR_BIN` | `"herdr"` | herdr CLI binary path |
-| `RUST_LOG` | `herdr_mcp=info` | Tracing filter |
 | `HERDR_SOCKET_PATH` | `~/.config/herdr/herdr.sock` | herdr socket |
+| `RUST_LOG` | `herdr_mcp=info` | Tracing filter |
 | `HERDR_MCP_DATA_DIR` | `./data` | Data directory |
 | `HERDR_MCP_HTTP_PORT` | — | HTTP port override |
 | `HERDR_MCP_HTTP_ONLY` | — | HTTP-only mode |
+| `HERDR_MCP_HTTP_BIND` | `0.0.0.0` | HTTP bind address |
 | `HERDR_MCP_CONFIG` | — | Config file path |
+| `HERDR_MCP_TOOL_TIMEOUT` | — | Tool call timeout (seconds) |
+| `HERDR_MCP_MAX_CONCURRENT` | — | Max concurrent tool calls |
+| `HERDR_MCP_HERDR_TIMEOUT` | — | herdr CLI timeout (seconds) |
+| `HERDR_MCP_CLIPBOARD_COPY` | — | Clipboard copy command override |
+| `HERDR_MCP_CLIPBOARD_PASTE` | — | Clipboard paste command override |
+| `HERDR_MCP_LOG_LEVEL` | — | Log level override |
+| `HERDR_MCP_LOG_FORMAT` | — | Log format (full, compact, json) |
+| `HERDR_MCP_PFC1_MAX_SYMBOLS` | 85 | Max PFC1 Cherokee symbols |
+| `HERDR_MCP_PFC1_ENABLE_PHRASES` | — | Enable multi-word PFC1 phrases |
 
 ---
 
@@ -822,6 +907,17 @@ herdr from consuming agent-specific flags.
 **Rationale:** Prevents argument confusion between herdr's flags and agent
 flags.
 
+### 14.10 Clipboard Detection & Override
+
+**Decision:** Clipboard commands are auto-detected from the environment
+(pbcopy/pbpaste on macOS, wl-copy/wl-paste on Wayland, xclip/xsel on X11)
+with env-var overrides (`HERDR_MCP_CLIPBOARD_COPY`, `HERDR_MCP_CLIPBOARD_PASTE`)
+and config-file overrides (`clipboard.copy_command`, `clipboard.paste_command`).  
+**Rationale:** The clipboard is needed for the TUI's copy/paste operations; no
+single command works across all platforms and display servers. Env/config
+overrides let users pin a specific tool.  
+**Detection order:** environment override → config override → platform auto-detect.
+
 ---
 
 ## 15. Key Architectural Patterns
@@ -869,3 +965,8 @@ flags.
 4. **Event subscriber only on Unix:** The herdr event subscriber uses Unix
    sockets. On non-Unix platforms, the registry is populated only by explicit
    tool calls.
+
+5. **`pane_id` vs `id` field name:** The `herdr pane list` CLI output may
+   return the pane identifier as either `pane_id` or `id`. The `resolve_pane_id`
+   function in the server and the TUI fallback both handle this via
+   `.or_else(|| p.get("id"))`.

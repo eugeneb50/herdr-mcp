@@ -2371,6 +2371,44 @@ async fn herdr_cli(args: &[&str]) -> Result<String, McpError> {
     }
 }
 
+/// Given a parsed `herdr pane list` panes array and a label, find the
+/// matching pane_id. Handles both `pane_id` and `id` JSON keys (herdr CLI
+/// output can use either). Returns `Ok(pane_id)` on exact match, `Err` with
+/// a human-readable diagnostic on no match or ambiguity.
+fn resolve_label_in_panes(panes: &[serde_json::Value], label: &str) -> Result<String, String> {
+    let labels: Vec<String> = panes
+        .iter()
+        .filter_map(|p| p.get("label").and_then(|l| l.as_str()))
+        .map(|l| l.to_string())
+        .collect();
+
+    let matched: Vec<String> = panes
+        .iter()
+        .filter(|p| p.get("label").and_then(|l| l.as_str()) == Some(label))
+        .filter_map(|p| {
+            p.get("pane_id")
+                .or_else(|| p.get("id"))
+                .and_then(|id| id.as_str())
+        })
+        .map(|id| id.to_string())
+        .collect();
+
+    match matched.len() {
+        0 => {
+            let available = if labels.is_empty() {
+                "no labeled panes found".to_string()
+            } else {
+                format!("available labels: {}", labels.join(", "))
+            };
+            Err(format!("No pane found with label '{label}'. {available}"))
+        }
+        1 => Ok(matched[0].clone()),
+        _ => Err(format!(
+            "Multiple panes found with label '{label}'. Use pane_id instead."
+        )),
+    }
+}
+
 /// Resolve a pane_id from an optional pane_id or label.
 /// If pane_id is provided, returns it directly.
 /// If label is provided, queries herdr pane list to find the matching pane.
@@ -2395,42 +2433,11 @@ async fn resolve_pane_id(
                     data: None,
                 })?;
 
-            let labels: Vec<String> = panes
-                .iter()
-                .filter_map(|p| p.get("label").and_then(|l| l.as_str()))
-                .map(|l| l.to_string())
-                .collect();
-
-            let matched: Vec<String> = panes
-                .iter()
-                .filter(|p| p.get("label").and_then(|l| l.as_str()) == Some(lbl.as_str()))
-                .filter_map(|p| p.get("pane_id").and_then(|id| id.as_str()))
-                .map(|id| id.to_string())
-                .collect();
-
-            match matched.len() {
-                0 => {
-                    let available = if labels.is_empty() {
-                        "no labeled panes found".to_string()
-                    } else {
-                        format!("available labels: {}", labels.join(", "))
-                    };
-                    Err(McpError {
-                        code: rmcp::model::ErrorCode(-32000),
-                        message: format!("No pane found with label '{lbl}'. {available}").into(),
-                        data: None,
-                    })
-                }
-                1 => Ok(matched[0].clone()),
-                _ => Err(McpError {
-                    code: rmcp::model::ErrorCode(-32000),
-                    message: format!(
-                        "Multiple panes found with label '{lbl}'. Use pane_id instead."
-                    )
-                    .into(),
-                    data: None,
-                }),
-            }
+            resolve_label_in_panes(panes, &lbl).map_err(|msg| McpError {
+                code: rmcp::model::ErrorCode(-32000),
+                message: msg.into(),
+                data: None,
+            })
         }
         (None, None) => Err(McpError {
             code: rmcp::model::ErrorCode(-32000),
@@ -3767,6 +3774,72 @@ mod tests {
         let (copy, paste) = detect_clipboard(&cfg_server.clipboard).unwrap();
         assert_eq!(copy, "cfg-copy");
         assert_eq!(paste, "cfg-paste");
+    }
+
+    // ── resolve_label_in_panes tests ──────────────────────────────────
+
+    #[test]
+    fn test_resolve_label_matches_pane_id() {
+        let panes = vec![serde_json::json!({
+            "label": "foo",
+            "pane_id": "p1"
+        })];
+        assert_eq!(resolve_label_in_panes(&panes, "foo"), Ok("p1".into()));
+    }
+
+    #[test]
+    fn test_resolve_label_matches_id_field() {
+        let panes = vec![serde_json::json!({
+            "label": "foo",
+            "id": "p1"
+        })];
+        assert_eq!(resolve_label_in_panes(&panes, "foo"), Ok("p1".into()));
+    }
+
+    #[test]
+    fn test_resolve_label_has_both_id_and_pane_id() {
+        let panes = vec![serde_json::json!({
+            "label": "foo",
+            "id": "pX",
+            "pane_id": "p1"
+        })];
+        assert_eq!(resolve_label_in_panes(&panes, "foo"), Ok("p1".into()));
+    }
+
+    #[test]
+    fn test_resolve_label_no_match() {
+        let panes = vec![serde_json::json!({
+            "label": "bar",
+            "pane_id": "p1"
+        })];
+        let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
+        assert!(err.contains("available labels: bar"), "{err}");
+    }
+
+    #[test]
+    fn test_resolve_label_duplicate() {
+        let panes = vec![
+            serde_json::json!({ "label": "foo", "pane_id": "p1" }),
+            serde_json::json!({ "label": "foo", "pane_id": "p2" }),
+        ];
+        let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
+        assert!(err.contains("Multiple panes"), "{err}");
+    }
+
+    #[test]
+    fn test_resolve_label_no_labels_at_all() {
+        let panes = vec![serde_json::json!({
+            "pane_id": "p1"
+        })];
+        let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
+        assert!(err.contains("no labeled panes found"), "{err}");
+    }
+
+    #[test]
+    fn test_resolve_label_empty_panes() {
+        let panes = vec![];
+        let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
+        assert!(err.contains("no labeled panes found"), "{err}");
     }
 
     #[test]
