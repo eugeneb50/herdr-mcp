@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::persistence::Persistence;
+use herdr_mcp_proxy::ProxyPolicy;
 use herdr_mcp_trim::policy::{TrimDirection, TrimPolicy};
 
 /// Agent lifecycle state, mirroring herdr's `AgentStatus` (snake_case).
@@ -79,6 +80,10 @@ pub struct AgentHandle {
     /// agent blob, so recipes can opt a pane into compression.
     #[serde(default)]
     pub trim_policy: Option<TrimPolicy>,
+    /// Optional per-pane proxy policy (default off). Controls HTTPS
+    /// interception trim for this pane's LLM traffic.
+    #[serde(default)]
+    pub proxy_policy: Option<ProxyPolicy>,
     #[serde(default)]
     pub updated_at: i64,
 }
@@ -125,6 +130,7 @@ impl AgentRegistry {
             status: String::new(),
             output: String::new(),
             trim_policy: None,
+            proxy_policy: None,
             updated_at: now,
         });
         handle.pane_id = pane_id.to_string();
@@ -192,6 +198,30 @@ impl AgentRegistry {
             .await
             .get(pane_id)
             .and_then(|h| h.trim_policy.clone())
+    }
+
+    /// Set (or clear, with `None`) the proxy policy for a pane. Persisted.
+    pub async fn set_proxy_policy(&self, pane_id: &str, policy: Option<ProxyPolicy>) {
+        let ws = {
+            let mut map = self.inner.write().await;
+            if let Some(h) = map.get_mut(pane_id) {
+                h.proxy_policy = policy;
+                h.updated_at = chrono::Utc::now().timestamp();
+                h.workspace_id.clone()
+            } else {
+                return;
+            }
+        };
+        self.persist(&ws).await;
+    }
+
+    /// Read the proxy policy for a pane, if any.
+    pub async fn get_proxy_policy(&self, pane_id: &str) -> Option<ProxyPolicy> {
+        self.inner
+            .read()
+            .await
+            .get(pane_id)
+            .and_then(|h| h.proxy_policy.clone())
     }
 
     /// Set (or clear) the pane label. Persisted.

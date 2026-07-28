@@ -13,8 +13,7 @@ use crate::tui::App;
 use crate::tui::theme::{accent_style, dim_style, panel_block, selected_style};
 use crate::tui::truncate;
 
-/// Available trim stages for the command dropdown.
-const AVAILABLE_STAGES: &[(&str, &str)] = &[
+pub(crate) const AVAILABLE_STAGES: &[(&str, &str)] = &[
     ("caveman:lite", "Lite style compression"),
     ("caveman:full", "Full style compression"),
     ("caveman:ultra", "Ultra style compression"),
@@ -28,7 +27,7 @@ const DIRECTIONS: &[TrimDirection] = &[
     TrimDirection::OutboundWithAck,
 ];
 
-fn direction_label(d: &TrimDirection) -> &'static str {
+pub(crate) fn direction_label(d: &TrimDirection) -> &'static str {
     match d {
         TrimDirection::None => "none",
         TrimDirection::Outbound => "outbound",

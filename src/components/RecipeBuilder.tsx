@@ -15,11 +15,9 @@ import {
 } from "@dnd-kit/sortable";
 import { RecipeStepCard } from "./RecipeStep";
 import { ResponseViewer } from "./ResponseViewer";
-import { VariablePanel } from "./VariablePanel";
-import { useVariables } from "./VariableStore";
-import type { RecipeDef, RecipeStepDef } from "../recipes";
-import { saveRecipe, updateRecipe } from "../recipes/recipeDb";
-import type { SavedRecipe } from "../recipes/recipeDb";
+import type { RecipeStepDef } from "../recipes";
+import { saveRecipe, updateRecipe, runRecipe, runRecipeById, type SavedRecipe } from "../api/recipes";
+import { TOOL_CATEGORIES } from "../toolCategories";
 
 type ToolInfo = {
   name: string;
@@ -28,34 +26,25 @@ type ToolInfo = {
 };
 
 type Props = {
-  initialRecipe: RecipeDef | null;
+  initialRecipe: { name: string; description: string; steps: RecipeStepDef[] } | null;
   onSaved?: () => void;
 };
 
-const TOOL_CATEGORIES: Record<string, { label: string; match: string[] }> = {
-  session: { label: "Session", match: ["status", "list_"] },
-  reads: { label: "Reads", match: ["read_pane", "read_agent"] },
-  waits: { label: "Waits", match: ["wait_"] },
-  commands: { label: "Commands", match: ["run_", "send_"] },
-  agents: { label: "Agents", match: ["get_agent", "start_agent", "stop_agent"] },
-  panes: { label: "Pane Ops", match: ["get_pane", "split_pane", "close_pane", "kill_pane", "focus_pane", "resize_pane"] },
-  workspace: { label: "Workspace/Tab", match: ["create_", "close_workspace", "close_tab"] },
-};
-
 function categorize(tools: ToolInfo[]): { label: string; tools: ToolInfo[] }[] {
-  const uncategorized: ToolInfo[] = [];
   const assigned = new Set<string>();
   const groups: { label: string; tools: ToolInfo[] }[] = [];
 
-  for (const [, config] of Object.entries(TOOL_CATEGORIES)) {
+  for (const cat of TOOL_CATEGORIES) {
     const matched = tools.filter((t) => {
-      const inGroup = config.match.some((m) => t.name.startsWith(m) || t.name === m);
-      if (inGroup) assigned.add(t.name);
-      return inGroup;
+      if (cat.tools.includes(t.name)) {
+        assigned.add(t.name);
+        return true;
+      }
+      return false;
     });
     if (matched.length > 0) {
       matched.sort((a, b) => a.name.localeCompare(b.name));
-      groups.push({ label: config.label, tools: matched });
+      groups.push({ label: cat.label, tools: matched });
     }
   }
 
@@ -74,37 +63,17 @@ function freshId(): string {
   return `step${stepCounter}`;
 }
 
-function substituteParams(
-  steps: RecipeStepDef[],
-  substitute: (t: string) => string,
-): RecipeStepDef[] {
-  return steps.map((s) => {
-    const params: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(s.params)) {
-      if (typeof v === "string") {
-        params[k] = substitute(v);
-      } else if (typeof v === "object" && v !== null) {
-        params[k] = JSON.parse(substitute(JSON.stringify(v)));
-      } else {
-        params[k] = v;
-      }
-    }
-    return { ...s, params };
-  });
-}
-
 export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [name, setName] = useState(initialRecipe?.name ?? "");
   const [steps, setSteps] = useState<RecipeStepDef[]>(initialRecipe?.steps ?? []);
-  const [results, setResults] = useState<Record<string, unknown> | null>(null);
+  const [results, setResults] = useState<{ status: string; results: Record<string, unknown> } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showVars, setShowVars] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [savedId, setSavedId] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const { substitute, extractFromResponse, varNames } = useVariables();
   const pickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -117,7 +86,6 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
     })();
   }, []);
 
-  // Close picker on outside click
   useEffect(() => {
     if (!pickerOpen) return;
     const handle = (e: MouseEvent) => {
@@ -128,6 +96,14 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
     document.addEventListener("mousedown", handle);
     return () => document.removeEventListener("mousedown", handle);
   }, [pickerOpen]);
+
+  useEffect(() => {
+    if (initialRecipe && "id" in initialRecipe) {
+      setSavedId((initialRecipe as SavedRecipe).id);
+    } else {
+      setSavedId(null);
+    }
+  }, [initialRecipe]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
@@ -162,46 +138,25 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
   }, []);
 
   const stepIds = useMemo(() => steps.map((s) => s.id), [steps]);
-  const toolNames = useMemo(() => tools.map((t) => t.name), [tools]);
-
-  const toolMap = useMemo(() => {
-    const m = new Map<string, ToolInfo>();
-    for (const t of tools) m.set(t.name, t);
-    return m;
-  }, [tools]);
 
   const run = useCallback(async () => {
     setLoading(true);
     setError(null);
     setResults(null);
     try {
-      const resolved = substituteParams(steps, substitute);
-      const res = await fetch("/api/recipe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name || undefined, steps: resolved }),
-      });
-      const text = await res.text();
-      let data: unknown;
-      try { data = JSON.parse(text); } catch { data = { raw: text }; }
-      if (!res.ok) {
-        setError((data as Record<string, unknown>)?.error as string ?? `HTTP ${res.status}`);
+      let data: { status: string; results: Record<string, unknown> };
+      if (savedId) {
+        data = await runRecipeById(savedId);
       } else {
-        setResults(data);
-        const recipeResults = ((data as Record<string, unknown>).results ?? {}) as Record<string, unknown>;
-        for (const [stepId, result] of Object.entries(recipeResults)) {
-          const step = steps.find((s) => s.id === stepId);
-          if (step) {
-            extractFromResponse(step.tool, result);
-          }
-        }
+        data = await runRecipe(steps, name || undefined);
       }
+      setResults(data);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Request failed");
     } finally {
       setLoading(false);
     }
-  }, [name, steps, substitute, extractFromResponse]);
+  }, [name, steps, savedId]);
 
   const exportRecipe = useCallback(() => {
     const blob = new Blob([JSON.stringify({ name, steps }, null, 2)], { type: "application/json" });
@@ -212,42 +167,6 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
     a.click();
     URL.revokeObjectURL(url);
   }, [name, steps]);
-
-  // Track savedId when loading a saved recipe
-  useEffect(() => {
-    if (initialRecipe && "id" in initialRecipe) {
-      setSavedId((initialRecipe as SavedRecipe).id);
-    } else {
-      setSavedId(null);
-    }
-  }, [initialRecipe]);
-
-  const handleSave = useCallback(async () => {
-    if (!name.trim()) {
-      setSaveError("Recipe name is required");
-      return;
-    }
-    if (steps.length === 0) {
-      setSaveError("Add at least one step before saving");
-      return;
-    }
-    setSaveError(null);
-    try {
-      if (savedId) {
-        await updateRecipe(savedId, { name: name.trim(), steps });
-      } else {
-        const id = await saveRecipe({
-          name: name.trim(),
-          description: `${steps.length} step(s)`,
-          steps,
-        });
-        setSavedId(id);
-      }
-      onSaved?.();
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : "Failed to save recipe");
-    }
-  }, [name, steps, savedId, onSaved]);
 
   const importRecipe = useCallback(() => {
     const input = document.createElement("input");
@@ -268,10 +187,32 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
     input.click();
   }, []);
 
+  const handleSave = useCallback(async () => {
+    if (!name.trim()) {
+      setSaveError("Recipe name is required");
+      return;
+    }
+    if (steps.length === 0) {
+      setSaveError("Add at least one step before saving");
+      return;
+    }
+    setSaveError(null);
+    try {
+      if (savedId) {
+        await updateRecipe(savedId, { name: name.trim(), steps });
+      } else {
+        const recipe = await saveRecipe({ name: name.trim(), description: `${steps.length} step(s)`, steps });
+        setSavedId(recipe.id);
+      }
+      onSaved?.();
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : "Failed to save recipe");
+    }
+  }, [name, steps, savedId, onSaved]);
+
   const categorizedTools = useMemo(() => {
     if (tools.length === 0) return [];
     const groups = categorize(tools);
-    // Put session first, then commands, reads, waits, etc.
     const order = ["Session", "Reads", "Waits", "Commands", "Agents", "Pane Ops", "Workspace/Tab", "Other"];
     groups.sort((a, b) => {
       const ai = order.indexOf(a.label);
@@ -299,6 +240,7 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
           )}
         </div>
         <button
+          type="button"
           onClick={() => setShowVars(!showVars)}
           className={`px-3 py-2.5 rounded-lg border text-sm font-mono transition-colors ${
             showVars
@@ -306,7 +248,7 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
               : "border-neutral-700 text-neutral-400 hover:text-neutral-200"
           }`}
         >
-          Variables ({varNames.length})
+          Variables
         </button>
       </div>
 
@@ -323,7 +265,7 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
                     allStepIds={stepIds}
                     onChange={(s) => updateStep(step.id, s)}
                     onRemove={() => removeStep(step.id)}
-                    result={results ? (results as Record<string, unknown>).results?.[step.id as keyof typeof results] : undefined}
+                    result={results ? (results.results as Record<string, unknown>)[step.id] : undefined}
                     tools={tools}
                   />
                 ))}
@@ -340,7 +282,9 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
 
         {showVars && (
           <div className="border-l border-neutral-800/60 pl-6">
-            <VariablePanel />
+            <div className="text-xs font-mono uppercase tracking-wider text-neutral-500 mb-2">
+              Variables are resolved server-side. Use &#123;&#123;variable&#125;&#125; syntax in parameters.
+            </div>
           </div>
         )}
       </div>
@@ -348,11 +292,12 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
       <div className="flex gap-2 relative">
         <div ref={pickerRef} className="relative">
           <button
+            type="button"
             onClick={() => setPickerOpen(!pickerOpen)}
             className="px-3 py-2 rounded-lg border border-neutral-700 text-neutral-300 text-sm hover:bg-neutral-800 transition-colors flex items-center gap-1.5"
           >
             + Add Step
-            <svg className={`w-3.5 h-3.5 transition-transform ${pickerOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+            <svg aria-hidden="true" className={`w-3.5 h-3.5 transition-transform ${pickerOpen ? "rotate-180" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
             </svg>
           </button>
@@ -370,6 +315,7 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
                   {group.tools.map((t) => (
                     <button
                       key={t.name}
+                      type="button"
                       onClick={() => addStep(t.name)}
                       className="w-full text-left px-3 py-2 text-xs font-mono text-neutral-300 hover:bg-emerald-500/10 hover:text-emerald-200 transition-colors flex flex-col gap-0.5"
                     >
@@ -386,12 +332,14 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
         </div>
 
         <button
+          type="button"
           onClick={importRecipe}
           className="px-3 py-2 rounded-lg border border-neutral-700 text-neutral-300 text-sm hover:bg-neutral-800 transition-colors"
         >
           Import
         </button>
         <button
+          type="button"
           onClick={exportRecipe}
           disabled={steps.length === 0}
           className="px-3 py-2 rounded-lg border border-neutral-700 text-neutral-300 text-sm hover:bg-neutral-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
@@ -399,6 +347,7 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
           Export
         </button>
         <button
+          type="button"
           onClick={handleSave}
           disabled={steps.length === 0 || !name.trim()}
           className={`px-4 py-2 rounded-lg border text-sm font-mono transition-colors ${
@@ -410,6 +359,7 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
           {savedId ? "Update" : "Save"}
         </button>
         <button
+          type="button"
           onClick={run}
           disabled={loading || steps.length === 0}
           className="px-4 py-2 rounded-lg bg-emerald-500 text-neutral-950 font-semibold text-sm hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors ml-auto"
@@ -433,7 +383,7 @@ export function RecipeBuilder({ initialRecipe, onSaved }: Props) {
       {results && (
         <div>
           <h3 className="text-xs font-mono uppercase tracking-wider text-neutral-500 mb-2">
-            Results — {((results as Record<string, unknown>).status as string) ?? "unknown"}
+            Results — {results.status}
           </h3>
           <ResponseViewer data={results} />
         </div>

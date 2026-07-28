@@ -180,3 +180,42 @@ fn cli_trim_missing_input_fails() {
         .assert()
         .failure();
 }
+
+// ── Proxy CLI tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn cli_serve_proxy_port_flag_accepted() {
+    let data = tempfile::tempdir().unwrap();
+    bin()
+        .args([
+            "serve",
+            "--proxy-port",
+            "0",
+            "--http-only",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .timeout(std::time::Duration::from_secs(2))
+        .assert()
+        // Timeout leaves the binary running — expect exit by signal or assert_line.
+        .stderr(predicate::str::contains("Proxy listener auto-started"));
+}
+
+#[test]
+fn cli_serve_proxy_and_http_together() {
+    let data = tempfile::tempdir().unwrap();
+    bin()
+        .args([
+            "serve",
+            "--proxy-port",
+            "0",
+            "--http",
+            "0",
+            "--http-only",
+            "--data-dir",
+            data.path().to_str().unwrap(),
+        ])
+        .timeout(std::time::Duration::from_secs(2))
+        .assert()
+        .stderr(predicate::str::contains("Proxy listener auto-started"));
+}

@@ -46,6 +46,34 @@ impl PersistentConfig {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ProxyConfig {
+    pub port: Option<u16>,
+    pub bind_addr: Option<String>,
+    pub target_hosts: Vec<String>,
+    pub ca_validity_days: u32,
+    pub audit_log: bool,
+    pub trim_outbound: bool,
+    pub trim_inbound: bool,
+    pub trim_stages: Vec<String>,
+}
+
+impl Default for ProxyConfig {
+    fn default() -> Self {
+        Self {
+            port: Some(8443),
+            bind_addr: Some("127.0.0.1".into()),
+            target_hosts: vec!["api.openai.com".into(), "api.anthropic.com".into()],
+            ca_validity_days: 3650,
+            audit_log: false,
+            trim_outbound: false,
+            trim_inbound: false,
+            trim_stages: vec!["caveman:full".into(), "pfc1".into()],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
@@ -63,6 +91,9 @@ pub struct Config {
 
     #[serde(default)]
     pub trim: TrimConfig,
+
+    #[serde(default)]
+    pub proxy: ProxyConfig,
 
     #[serde(default)]
     pub sandbox: SandboxConfig,
@@ -342,6 +373,7 @@ impl Config {
             mcp: other.mcp,
             herdr: other.herdr,
             trim: other.trim,
+            proxy: other.proxy,
             sandbox: other.sandbox,
             logging: other.logging,
             clipboard: other.clipboard,
@@ -439,6 +471,9 @@ impl Config {
         if !cli.trim_stages.is_empty() {
             self.trim.default_stages = cli.trim_stages;
         }
+        if let Some(v) = cli.proxy_port {
+            self.proxy.port = Some(v);
+        }
         self
     }
 
@@ -448,12 +483,6 @@ impl Config {
             && !parent.exists()
         {
             anyhow::bail!("data_dir parent does not exist: {}", parent.display());
-        }
-
-        if let Some(port) = self.http.port
-            && port == 0
-        {
-            anyhow::bail!("http.port cannot be 0");
         }
 
         if self.mcp.tool_timeout_secs == 0 {
@@ -510,6 +539,8 @@ pub struct CliOverrides {
     pub herdr_socket: Option<PathBuf>,
     pub log_level: Option<String>,
     pub trim_stages: Vec<String>,
+    /// Auto-start the HTTPS intercepting proxy on this port when set.
+    pub proxy_port: Option<u16>,
 }
 
 /// Generate a default config file with comments for user reference
@@ -801,6 +832,7 @@ mod tests {
             herdr_socket: Some(PathBuf::from("/cli/sock")),
             log_level: Some("warn".into()),
             trim_stages: vec!["pfc1".into()],
+            proxy_port: Some(8443),
         };
         let c = Config::default().apply_cli_overrides(cli);
         assert_eq!(c.data_dir, PathBuf::from("/cli/data"));
@@ -810,19 +842,16 @@ mod tests {
         assert_eq!(c.herdr.socket_path, Some(PathBuf::from("/cli/sock")));
         assert_eq!(c.logging.level, "warn");
         assert_eq!(c.trim.default_stages, vec!["pfc1"]);
+        assert_eq!(c.proxy.port, Some(8443));
     }
 
     #[test]
-    fn test_validate_rejects_port_zero() {
+    fn test_validate_accepts_port_zero_for_ephemeral() {
+        // Port 0 means "let the OS pick"; we accept it for http and proxy.
         let mut c = Config::default();
         c.http.port = Some(0);
-        assert!(c.validate().is_err());
-        assert!(
-            c.validate()
-                .unwrap_err()
-                .to_string()
-                .contains("cannot be 0")
-        );
+        c.proxy.port = Some(0);
+        c.validate().expect("port 0 should be valid (ephemeral)");
     }
 
     #[test]

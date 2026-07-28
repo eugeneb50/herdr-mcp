@@ -10,6 +10,8 @@ import { Playground } from "./components/Playground";
 import { TrimDashboard } from "./components/TrimDashboard";
 import { VariablesPage } from "./components/VariablesPage";
 import { VariableProvider } from "./components/VariableStore";
+import { Overview } from "./components/Overview";
+import { Settings } from "./components/Settings";
 
 export default function App() {
   return (
@@ -31,9 +33,11 @@ export default function App() {
             <Routes>
               <Route path="/" element={<><Hero /><Architecture /><Tools /><Install /></>} />
               <Route path="/docs" element={<Documentation />} />
+              <Route path="/overview" element={<Overview />} />
               <Route path="/playground" element={<Playground />} />
               <Route path="/trim" element={<TrimDashboard />} />
               <Route path="/variables" element={<VariablesPage />} />
+              <Route path="/settings" element={<Settings />} />
             </Routes>
           </main>
           <Footer />
@@ -68,9 +72,11 @@ function Header() {
         <nav className="hidden md:flex items-center gap-7 text-sm">
           {link("/", "Home")}
           {link("/docs", "Docs")}
+          {link("/overview", "Overview")}
           {link("/playground", "Playground")}
           {link("/trim", "Trim")}
           {link("/variables", "Variables")}
+          {link("/settings", "Settings")}
         </nav>
         <a
           href="https://github.com"

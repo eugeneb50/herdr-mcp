@@ -34,7 +34,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Terminal, backend::CrosstermBackend};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tui_textarea::{Input as TaInput, Key as TaKey, TextArea};
 
 use std::io::Write;
@@ -71,15 +71,17 @@ pub enum Tab {
     Trim,
     Variables,
     Settings,
+    Proxy,
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [
+    const ALL: [Tab; 6] = [
         Tab::Overview,
         Tab::Playground,
         Tab::Trim,
         Tab::Variables,
         Tab::Settings,
+        Tab::Proxy,
     ];
 
     fn label(self) -> &'static str {
@@ -89,6 +91,7 @@ impl Tab {
             Tab::Trim => "Trim",
             Tab::Variables => "Variables",
             Tab::Settings => "Settings",
+            Tab::Proxy => "Proxy",
         }
     }
 
@@ -99,6 +102,7 @@ impl Tab {
             Tab::Trim => "3",
             Tab::Variables => "4",
             Tab::Settings => "5",
+            Tab::Proxy => "6",
         }
     }
 }
@@ -269,6 +273,8 @@ pub struct App {
     pub variables_state: VariablesState,
     /// settings sub-state
     pub settings: SettingsState,
+    /// proxy sub-state
+    pub proxy: ProxyState,
     /// whether the HTTP bridge is currently reachable
     pub bridge_connected: bool,
     /// layout hit-areas captured during draw for mouse handling
@@ -289,6 +295,33 @@ pub struct App {
 }
 
 /// Playground tab state (tool runner + recipe builder).
+#[derive(Clone, Debug)]
+pub struct RecipeStep {
+    pub id: String,
+    pub tool: String,
+    pub params: Map<String, Value>,
+    pub description: Option<String>,
+}
+
+impl Default for RecipeStep {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            tool: String::new(),
+            params: Map::new(),
+            description: None,
+        }
+    }
+}
+
+/// A tool category for the builder picker.
+#[derive(Clone, Debug)]
+pub struct ToolCategory {
+    pub label: String,
+    pub tools: Vec<(String, String)>, // (name, description)
+}
+
+/// Playground tab state (tool runner + recipe builder).
 pub struct PlaygroundState {
     pub sub_tab: PlaygroundSub,
     pub tool_index: usize,
@@ -304,6 +337,37 @@ pub struct PlaygroundState {
     pub focused_frame: usize,
     pub result: Option<Value>,
     pub error: Option<String>,
+
+    // --- Builder sub-tab state ---
+    pub builder_recipe_name: String,
+    pub builder_steps: Vec<RecipeStep>,
+    pub builder_step_focus: usize,  // focused step index
+    pub builder_param_focus: usize, // focused param index within step
+    pub builder_tool_categories: Vec<ToolCategory>,
+    pub builder_picker_open: bool,
+    pub builder_picker_category: usize,
+    pub builder_picker_tool: usize,
+    pub builder_picker_search: String,
+    pub builder_show_library: bool,
+    pub builder_library_focus: usize,
+    pub builder_library_tab: BuilderLibraryTab,
+    pub builder_result: Option<Value>,
+    pub builder_error: Option<String>,
+    pub builder_loading: bool,
+    /// Track the id of the recipe loaded into the builder (None = new recipe).
+    pub builder_editing_recipe_id: Option<String>,
+    /// Whether a param value is actively being edited (TextArea open).
+    pub builder_editing_param: bool,
+    /// Live TextArea for editing a param value.
+    pub builder_param_edit_area: TextArea<'static>,
+    /// Which step's params are shown in the detail panel (None = none).
+    pub builder_open_step: Option<usize>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BuilderLibraryTab {
+    Templates,
+    Saved,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -396,6 +460,34 @@ pub struct ClipboardSettingsState {
     pub save_msg: String,
 }
 
+/// Proxy tab state.
+pub struct ProxyState {
+    /// Last diagnose response from the bridge.
+    pub diagnose: Option<Value>,
+    /// Last startup response (bind addr, ca fingerprint).
+    pub startup_result: Option<Value>,
+    /// Selected pane index in the active policies list.
+    pub pane_index: usize,
+    /// Selected stage index in the policy editor.
+    pub stage_index: usize,
+    /// Editing mode for the policy editor.
+    pub editing: bool,
+    /// Local copy of trim_outbound for the selected pane policy.
+    pub trim_outbound: bool,
+    /// Local copy of trim_inbound for the selected pane policy.
+    pub trim_inbound: bool,
+    /// Local copy of stages for the selected pane policy.
+    pub stages: Vec<String>,
+    /// Stage picker overlay open.
+    pub stage_picker_open: bool,
+    /// Selected item in the stage picker.
+    pub stage_picker_index: usize,
+    /// Last operation result message.
+    pub policy_msg: String,
+    /// Which frame has keyboard focus (0=diagnose, 1=pane list, 2=editor).
+    pub focused_frame: usize,
+}
+
 /// Clipboard backend presets offered in the Settings radio.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BackendPreset {
@@ -478,6 +570,26 @@ impl App {
                 focused_frame: 0,
                 result: None,
                 error: None,
+                // Builder state
+                builder_recipe_name: String::new(),
+                builder_steps: Vec::new(),
+                builder_step_focus: 0,
+                builder_param_focus: 0,
+                builder_tool_categories: Vec::new(),
+                builder_picker_open: false,
+                builder_picker_category: 0,
+                builder_picker_tool: 0,
+                builder_picker_search: String::new(),
+                builder_show_library: true,
+                builder_library_focus: 0,
+                builder_library_tab: BuilderLibraryTab::Templates,
+                builder_result: None,
+                builder_error: None,
+                builder_loading: false,
+                builder_editing_recipe_id: None,
+                builder_editing_param: false,
+                builder_param_edit_area: TextArea::default(),
+                builder_open_step: None,
             },
             trim: TrimState {
                 diagnose: None,
@@ -525,6 +637,20 @@ impl App {
                     test_msg: String::new(),
                     save_msg: String::new(),
                 },
+                focused_frame: 0,
+            },
+            proxy: ProxyState {
+                diagnose: None,
+                startup_result: None,
+                pane_index: 0,
+                stage_index: 0,
+                editing: false,
+                trim_outbound: false,
+                trim_inbound: false,
+                stages: Vec::new(),
+                stage_picker_open: false,
+                stage_picker_index: 0,
+                policy_msg: String::new(),
                 focused_frame: 0,
             },
             bridge_connected: false,
@@ -780,6 +906,12 @@ impl App {
             Tab::Playground if self.playground.editing_field => {
                 Some(&mut self.playground.edit_area)
             }
+            Tab::Playground
+                if self.playground.builder_editing_param
+                    && self.playground.sub_tab == PlaygroundSub::Builder =>
+            {
+                Some(&mut self.playground.builder_param_edit_area)
+            }
             Tab::Variables if self.variables_state.editing => {
                 if self.variables_state.edit_field == EditField::Key {
                     Some(&mut self.variables_state.edit_key_area)
@@ -795,6 +927,12 @@ impl App {
     fn active_textarea_ref(&self) -> Option<&TextArea<'static>> {
         match self.tab {
             Tab::Playground if self.playground.editing_field => Some(&self.playground.edit_area),
+            Tab::Playground
+                if self.playground.builder_editing_param
+                    && self.playground.sub_tab == PlaygroundSub::Builder =>
+            {
+                Some(&self.playground.builder_param_edit_area)
+            }
             Tab::Variables if self.variables_state.editing => {
                 if self.variables_state.edit_field == EditField::Key {
                     Some(&self.variables_state.edit_key_area)
@@ -1282,9 +1420,12 @@ fn draw_tab_bar(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
-    // Settings tab needs &mut (stores click hit-areas during render).
     if app.tab == Tab::Settings {
         tabs::settings::render(frame, area, app);
+        return;
+    }
+    if app.tab == Tab::Proxy {
+        tabs::proxy::render(frame, area, app);
         return;
     }
     match app.tab {
@@ -1298,7 +1439,7 @@ fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
 /// Footer with status message + keybindings.
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let bindings = "Ctrl+1-5:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
+    let bindings = "Ctrl+1-6:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
     let mut line = Line::from(vec![Span::styled(bindings, dim_style())]);
     if !app.status_msg.is_empty() {
         line = Line::from(vec![
@@ -1327,6 +1468,7 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
         Tab::Variables => tabs::variables::handle_key(app, code, mods).await?,
         Tab::Settings => tabs::settings::handle_key(app, code, mods).await?,
         Tab::Trim => tabs::trim::handle_key(app, code, mods).await?,
+        Tab::Proxy => tabs::proxy::handle_key(app, code, mods).await?,
     };
     if consumed {
         return Ok(());
@@ -1361,7 +1503,7 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
             app.refresh().await;
             app.status_msg = "refreshed".to_string();
         }
-        KeyCode::Char(c @ '1'..='5') if mods.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(c @ '1'..='6') if mods.contains(KeyModifiers::CONTROL) => {
             let idx = (c as u8 - b'1') as usize;
             if let Some(t) = Tab::ALL.get(idx).copied() {
                 app.tab = t;
@@ -1598,6 +1740,18 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                     && app.trim.stage_index + 1 < app.trim.stages.len() =>
             {
                 app.trim.stage_index += 1;
+            }
+            Tab::Proxy
+                if app.proxy.focused_frame == 1
+                    && app.proxy.pane_index + 1 < app.herdr.panes.len() =>
+            {
+                app.proxy.pane_index += 1;
+            }
+            Tab::Proxy
+                if app.proxy.focused_frame == 2
+                    && app.proxy.stage_index + 1 < app.proxy.stages.len() =>
+            {
+                app.proxy.stage_index += 1;
             }
             _ => {}
         },

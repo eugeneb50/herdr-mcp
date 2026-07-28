@@ -38,7 +38,7 @@ export function RecipeStepCard({ step, index, onChange, onRemove, tools }: Props
   };
 
   const schema = tools.find((t) => t.name === step.tool)?.inputSchema ?? null;
-  const { variableNames: varNames, substitute } = useVariables();
+  const { varNames, substitute } = useVariables();
 
   const schemaProps = (schema?.properties as Record<string, unknown>) ?? null;
   const schemaRequired = (schema?.required as string[]) ?? [];
@@ -48,7 +48,6 @@ export function RecipeStepCard({ step, index, onChange, onRemove, tools }: Props
     const oldTool = tools.find((t) => t.name === step.tool);
     const newToolInfo = tools.find((t) => t.name === newTool);
     if (oldTool && newToolInfo) {
-      const oldProps = (oldTool.inputSchema?.properties as Record<string, unknown>) ?? {};
       const newProps = (newToolInfo.inputSchema?.properties as Record<string, unknown>) ?? {};
       const preserved: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(step.params)) {
@@ -76,10 +75,12 @@ export function RecipeStepCard({ step, index, onChange, onRemove, tools }: Props
         <button
           {...attributes}
           {...listeners}
+          type="button"
           className="cursor-grab text-neutral-600 hover:text-neutral-400 transition-colors"
           title="Drag to reorder"
+          aria-label="Drag to reorder"
         >
-          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+          <svg aria-hidden="true" className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
             <path d="M8 6h2v2H8V6zm6 0h2v2h-2V6zM8 11h2v2H8v-2zm6 0h2v2h-2v-2zm-6 5h2v2H8v-2zm6 0h2v2h-2v-2z" />
           </svg>
         </button>
@@ -90,11 +91,12 @@ export function RecipeStepCard({ step, index, onChange, onRemove, tools }: Props
           onChange={handleToolChange}
         />
         <button
+          type="button"
           onClick={onRemove}
           className="ml-auto text-neutral-600 hover:text-rose-400 transition-colors"
           title="Remove step"
         >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+          <svg aria-hidden="true" className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
             <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
           </svg>
         </button>
@@ -184,6 +186,7 @@ function ToolAutocomplete({
         <div className="absolute z-10 top-full mt-1 left-0 right-0 bg-neutral-900 border border-neutral-700 rounded-md shadow-lg max-h-48 overflow-y-auto">
           {filtered.map((o) => (
             <button
+              type="button"
               key={o.name}
               onMouseDown={() => {
                 onChange(o.name);
