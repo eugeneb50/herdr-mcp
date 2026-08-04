@@ -282,6 +282,8 @@ pub struct App {
     pub tool_list_inner: Rect,
     pub var_list_inner: Rect,
     pub result_inner: Rect,
+    /// Hit-area for the Overview pane table (mouse click → select pane).
+    pub pane_table_inner: Rect,
     /// hit-areas for clipboard preset rows in Settings (one Rect per preset)
     pub clipboard_preset_rects: Vec<Rect>,
     /// hit-areas for clipboard action buttons (0=Test, 1=Save)
@@ -658,6 +660,7 @@ impl App {
             tool_list_inner: Rect::default(),
             var_list_inner: Rect::default(),
             result_inner: Rect::default(),
+            pane_table_inner: Rect::default(),
             clipboard_preset_rects: Vec::new(),
             clipboard_btn_rects: Vec::new(),
             clipboard_field_rects: Vec::new(),
@@ -990,7 +993,59 @@ impl App {
             let full = ta.lines().join("\n");
             return Some(textarea_selection_or_full(ta, full));
         }
-        self.focused_field_text()
+        self.focused_field_text().or_else(|| self.focused_copyable_text())
+    }
+
+    /// Resolve the copy target for any tab/frame based on what the user
+    /// is currently focused on. Used as the final fallback when no
+    /// interactive editor or playground field is active.
+    fn focused_copyable_text(&self) -> Option<String> {
+        match self.tab {
+            Tab::Overview => {
+                let pane = self.herdr.panes.get(self.overview.pane_index)?;
+                Some(pane.pane_id.clone())
+            }
+            Tab::Trim if self.trim.focused_frame == 1 => {
+                let pane = self.herdr.panes.get(self.trim.pane_index)?;
+                Some(pane.pane_id.clone())
+            }
+            Tab::Trim if self.trim.focused_frame == 2 => {
+                self.trim.stages.get(self.trim.stage_index).cloned()
+            }
+            Tab::Variables if !self.variables_state.editing => {
+                self.variables_state
+                    .entries
+                    .get(self.variables_state.selected)
+                    .map(|(k, v)| format!("{k} = {v}"))
+            }
+            Tab::Settings if self.settings.focused_frame == 0 => {
+                let row = self.settings.selected;
+                match row {
+                    0 => Some(self.settings.http_port.to_string()),
+                    1 => Some(self.settings.data_dir.clone()),
+                    2 => Some(self.settings.herdr_socket.clone()),
+                    _ => None,
+                }
+            }
+            Tab::Settings if self.settings.focused_frame == 1
+                && self.settings.clipboard.field_focus == 1 =>
+            {
+                Some(self.settings.clipboard.copy_cmd.clone())
+            }
+            Tab::Settings if self.settings.focused_frame == 1
+                && self.settings.clipboard.field_focus == 2 =>
+            {
+                Some(self.settings.clipboard.paste_cmd.clone())
+            }
+            Tab::Proxy if self.proxy.focused_frame == 1 => {
+                let pane = self.herdr.panes.get(self.proxy.pane_index)?;
+                Some(pane.pane_id.clone())
+            }
+            Tab::Proxy if self.proxy.focused_frame == 2 => {
+                self.proxy.stages.get(self.proxy.stage_index).cloned()
+            }
+            _ => None,
+        }
     }
 
     /// True when the current copy target is the read-only Result pane (so
@@ -1660,6 +1715,19 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 let idx = (m.row - app.var_list_inner.y) as usize;
                 if idx < app.variables_state.entries.len() {
                     app.variables_state.selected = idx;
+                }
+                return Ok(());
+            }
+            // Overview pane table click.
+            if app.tab == Tab::Overview
+                && m.column >= app.pane_table_inner.x
+                && m.column < app.pane_table_inner.right()
+                && m.row >= app.pane_table_inner.y
+                && m.row < app.pane_table_inner.bottom()
+            {
+                let idx = (m.row - app.pane_table_inner.y) as usize;
+                if idx < app.herdr.panes.len() {
+                    app.overview.pane_index = idx;
                 }
                 return Ok(());
             }

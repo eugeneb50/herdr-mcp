@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::trim::AVAILABLE_STAGES;
 use crate::tui::App;
-use crate::tui::theme::{accent_style, dim_style, panel_block, selected_style};
+use crate::tui::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
 use crate::tui::truncate;
 
 /// Returns `true` if the key was consumed.
@@ -321,7 +321,11 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 fn render_diagnose(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = panel_block(" Proxy Diagnostics ");
+    let block = if app.proxy.focused_frame == 0 {
+        focused_panel_block(" Proxy Diagnostics ")
+    } else {
+        panel_block(" Proxy Diagnostics ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -425,7 +429,11 @@ fn render_diagnose(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_policy_panel(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
-    let block = panel_block(" Proxy Policies ");
+    let block = if app.proxy.focused_frame == 1 || app.proxy.focused_frame == 2 {
+        focused_panel_block(" Proxy Policies ")
+    } else {
+        panel_block(" Proxy Policies ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

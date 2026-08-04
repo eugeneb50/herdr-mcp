@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use crate::tui::App;
-use crate::tui::theme::{accent_style, dim_style, panel_block, selected_style};
+use crate::tui::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
 use crate::tui::truncate;
 
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
@@ -273,7 +273,11 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 fn render_clipboard(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
-    let block = panel_block(" Clipboard backend ");
+    let block = if app.settings.focused_frame == 1 {
+        focused_panel_block(" Clipboard backend ")
+    } else {
+        panel_block(" Clipboard backend ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -447,7 +451,11 @@ fn render_clipboard(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 fn render_runtime(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = panel_block(" Runtime ");
+    let block = if app.settings.focused_frame == 0 {
+        focused_panel_block(" Runtime ")
+    } else {
+        panel_block(" Runtime ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -474,7 +482,11 @@ fn render_runtime(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_env_and_sidecar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = panel_block(" Environment & sidecar ");
+    let block = if app.settings.focused_frame == 0 {
+        focused_panel_block(" Environment & sidecar ")
+    } else {
+        panel_block(" Environment & sidecar ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

@@ -8,9 +8,9 @@ use ratatui::text::Line;
 use ratatui::widgets::{Cell, Paragraph, Row, Table, Wrap};
 
 use crate::tui::App;
-use crate::tui::theme::{detail_line, panel_block};
+use crate::tui::theme::{detail_line, focused_panel_block, panel_block};
 
-pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -77,15 +77,20 @@ fn render_tabs_guide(frame: &mut ratatui::Frame, area: Rect) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let pane_count = app.herdr.panes.len();
     let title = if pane_count == 0 {
         " Panes "
     } else {
         &format!(" Panes ({}) ", pane_count)
     };
-    let block = panel_block(title);
+    let block = if app.overview.focused_frame == 0 {
+        focused_panel_block(title)
+    } else {
+        panel_block(title)
+    };
     let inner = block.inner(area);
+    app.pane_table_inner = inner;
     frame.render_widget(block, area);
 
     if pane_count == 0 {

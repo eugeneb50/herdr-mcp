@@ -71,6 +71,20 @@ pub fn panel_block(title: &str) -> Block<'static> {
     block
 }
 
+/// A bordered panel with accent-coloured border to indicate focus.
+///
+/// Same structure as [`panel_block`] but uses [`accent_style()`] for the
+/// border instead of [`dim_style()`].
+pub fn focused_panel_block(title: &str) -> Block<'static> {
+    let mut block = Block::default()
+        .borders(ratatui::widgets::Borders::ALL)
+        .border_style(accent_style());
+    if !title.is_empty() {
+        block = block.title(Span::styled(title.to_string(), title_style()));
+    }
+    block
+}
+
 /// A labelled value row (port of zerocode `dashboard.rs::detail_line`).
 ///
 /// `label` is left-padded to `label_w` display cells and rendered in the dim

@@ -14,7 +14,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use serde_json::{Map, Value};
 
 use crate::tui::theme::{
-    accent_style, dim_style, muted_style, panel_block, selected_style, warn_style,
+    accent_style, dim_style, focused_panel_block, muted_style, panel_block, selected_style, warn_style,
 };
 use crate::tui::{App, FieldKind, PlaygroundSub, RecipeStep, ToolCategory, ToolField};
 
@@ -1236,7 +1236,11 @@ fn render_runner(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 fn render_tool_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
-    let block = panel_block(" Tools ");
+    let block = if app.playground.focused_frame == 0 {
+        focused_panel_block(" Tools ")
+    } else {
+        panel_block(" Tools ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1301,7 +1305,11 @@ fn render_form_and_result(frame: &mut ratatui::Frame, area: Rect, app: &mut App)
 }
 
 fn render_form(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = panel_block(" Parameters ");
+    let block = if app.playground.focused_frame == 1 {
+        focused_panel_block(" Parameters ")
+    } else {
+        panel_block(" Parameters ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -1416,7 +1424,11 @@ fn render_field_value(f: &ToolField, value: &str, editing: bool) -> String {
 }
 
 fn render_result(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
-    let block = panel_block(" Result ");
+    let block = if app.playground.focused_frame == 2 {
+        focused_panel_block(" Result ")
+    } else {
+        panel_block(" Result ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
