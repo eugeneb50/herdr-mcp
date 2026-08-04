@@ -1,0 +1,21 @@
+[package]
+name = "herdr-mcp-proxy"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+herdr-mcp-core = { path = "../herdr-mcp-core" }
+herdr-mcp-trim = { path = "../herdr-mcp-trim" }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+time = "0.3"
+pem = "1.0"
+tempfile = { workspace = true }

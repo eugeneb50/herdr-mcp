@@ -5,6 +5,7 @@ members = [
     "crates/herdr-mcp-trim",
     "crates/herdr-mcp-server",
     "crates/herdr-mcp-cli",
+    "crates/herdr-mcp-proxy",
 ]
 
 [workspace.dependencies]
@@ -38,6 +39,9 @@ pretty_assertions = "1"
 rstest = "0.23"
 assert_cmd = "2"
 predicates = "3"
+rcgen = { version = "0.13", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 
 [profile.release]
 opt-level = 3

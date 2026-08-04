@@ -1,0 +1,138 @@
+# herdr-mcp — project memory (resume context)
+
+# TUI clipboard + right-click context menu (implemented)
+# Crate: herdr-mcp-trim (crates/herdr-mcp-trim/src/tui/*)
+#
+# Dependency note: tui-textarea 0.6/0.7 require crossterm 0.28 + ratatui 0.29,
+# but the workspace uses crossterm 0.29 + ratatui 0.30. Use the compatible fork
+# `tui-textarea-2` (v0.12) — Cargo.toml pins it with default-features=false,
+# features=["crossterm"]. Its `TextArea<'static>` implements `Widget` for
+# `&TextArea` (render with `frame.render_widget(&ta, rect)`), NOT by value.
+# Build `Input` via `crate::tui::to_textarea_input` (manual mapping, avoids the
+# crate's pinned crossterm version).
+#
+# Behavior:
+# - Right-click opens context menu (Copy/Cut/Paste/Paste to pane) at cursor.
+# - Hotkeys: Ctrl+C copy, Ctrl+V paste, Ctrl+X cut (global, also work while a
+#   TextArea is focused). Playground "clear fields" remapped Ctrl+c -> Ctrl+k.
+# - "Paste to pane" sends clipboard text via `herdr pane send-text <pane_id>`,
+#   targeting HerdrContext.pane_id (focused pane).
+# - Clipboard I/O goes through the HTTP bridge: HttpClient::clipboard_set /
+#   clipboard_get (tools clipboard_set/clipboard_get in herdr-mcp-server).
+# - Playground runner + Variables edit use tui_textarea::TextArea buffers
+#   (PlaygroundState.edit_area, VariablesState.edit_key_area/edit_value_area)
+#   for real range selection (Shift+arrows / textarea selection).
+#
+# Parse helper: http::parse_clipboard_text extracts from rmcp result
+# `content[].text`; returns empty when no text content (no arbitrary fallback).
+#
+# Tests: http::parse_clipboard_text_* (4 tests incl. multi-line roundtrip).
+# Full crate: `cargo test -p herdr-mcp-trim`.
+
+# Result selection + clipboard env override + Settings tab config UI (added)
+#
+# Clipboard backend override: detect_clipboard() resolution order:
+#   1. HERDR_MCP_CLIPBOARD_COPY / _PASTE env vars (both set & non-empty)
+#   2. [clipboard] copy-command / paste-command in Config (both set & non-empty)
+#      -> herdr-mcp-core::ClipboardConfig; lets Linux force xsel over wl-copy.
+#   3. Platform auto-detection (pbcopy / wl-copy / xclip / xsel).
+# Server resolves the pair at startup from Config (HerdrMcpServer::with_config),
+# stored as `clipboard: ClipboardConfig`. detect_clipboard(cfg: &ClipboardConfig)
+# is a free fn (NOT a method) — call sites pass &self.clipboard. Leaked to 'static.
+# CLI run_serve passes `config` into with_config for all 3 server constructions.
+# generate_default_config() documents the [clipboard] section with an xsel example.
+#
+# TUI Settings tab now has a Clipboard backend panel:
+# - Backend preset radio: xsel / xclip / wl-copy / pbcopy / custom.
+#   Left/Right arrows or click preset row cycle preset; copy/paste commands auto-fill unless Custom.
+# - Copy / Paste command fields (clickable to focus + start editing). Tab cycles: preset -> copy -> paste.
+# - [t] Test / [s] Save buttons are clickable; click the button or press t/s.
+# - Bridge status pill: shows "connected" or "not connected — start herdr-mcp serve --http 7676".
+# - Config file path displayed so user knows where Save writes.
+# Pre-populated from Config::load(None) at TUI startup (fallback = xsel preset).
+# Mouse: click preset row → select preset; click copy/paste field → focus + start editing;
+# click [t] Test or [s] Save buttons → run action; scroll wheel → scroll result pane
+# (when focused) or Settings runtime list. App stores clipboard_preset_rects,
+# clipboard_btn_rects, clipboard_field_rects for hit-testing.
+#
+# TUI result pane: PlaygroundState.result_area (TextArea) + result_focused
+# flag. Click/left-click on the result pane focuses it (result_focused=true);
+# App stores result_inner rect. Arrows scroll, Shift+arrows select,
+# right-click/Ctrl+C copies selection-or-full-result, Esc unfocuses.
+# App::selection_or_full_text() priority: result_focused -> active field
+# TextArea -> focused field value -> None. App::copy_target_is_readonly()
+# blocks Cut/Paste when result_focused (result pane is read-only).
+# run_tool populates result_area from pretty JSON (or error text).
+#
+# Tests added: server test_clipboard_env_override_and_roundtrip (env detection
+# + fake-backend set/get roundtrip; kept as ONE test because env vars are
+# process-global and the assertions race under parallel test threads).
+# TUI tests: selection_or_full_text_* (4), copy_target_is_readonly_only_for_result,
+# menu_rect_clamps_to_terminal, to_textarea_input_maps_keys_and_mods.
+# Core: test_upsert_clipboard_preserves_other_sections, test_upsert_clipboard_creates_missing_file,
+# test_clipboard_config_section_parses.
+#
+# rmcp gotcha: CallToolResult.content is Vec<Annotated<RawContent>>; extract
+# text via item.as_text() (Content derefs to RawContent). `#[cfg(test)]`
+# set_var/remove_var need `unsafe {}` (edition 2024).
+
+# TUI dashboard runs on top of serve (A1) — single process, no 2nd instance (added)
+#
+# Root cause fixed: the kitchen-sink TUI previously shelled out to `herdr pane
+# list` itself (herdr_mcp_trim::tui::mod.rs refresh_herdr) and held its OWN
+# `HerdrPane` cache — a duplicate of the canonical AgentRegistry (SSoT
+# violation per AGENTS.md). Failures were silently swallowed (no log), so the
+# Overview/Trim tabs showed "No herdr panes detected." with no diagnosis.
+#
+# Fix: `dashboard` subcommand now (1) builds the full serve stack in-process via
+# a new `serve_core()` (refactored out of run_serve) that spawns persistence,
+# the herdr Unix-socket event subscriber, the AgentRegistry, the trim poller,
+# and the HTTP bridge — then (2) runs the TUI on the main task. MCP stdio is
+# auto-disabled for dashboard (CliOverrides sets http_only=true) so the TUI
+# owns the terminal; stdout stays clean. The HTTP bridge is the single source
+# of truth the TUI reads.
+#
+# New HTTP routes (herdr_mcp_server::server.rs http_router):
+#   GET /api/agents?workspace_id=   -> registry.inner_snapshot() / list_for_ws()
+#       (canonical, event-fed; replaced the old CLI shell-out list_panes)
+#   GET /api/workspaces             -> herdr workspace list passthrough (sidecar header)
+# Refactored start_http() into a thin bind+serve wrapper calling http_router().
+#
+# TUI changes (herdr_mcp_trim::tui):
+#   - HttpClient: added list_agents(ws) + list_workspaces() helpers.
+#   - refresh_herdr now: list_workspaces (CLI passthrough for ws id), then
+#     http.list_agents (registry = canonical), with `herdr pane list` retained
+#     ONLY as a diagnostic fallback when the registry is empty/unreachable.
+#     First refresh error is surfaced via HerdrContext.last_error (shown on the
+#     Overview empty-state + logged to tui-debug.log).
+#   - HerdrPane extended: status (was agent_status), role, output, trim_policy,
+#     updated_at added (registry fields); cwd/focused/tab_id kept as CLI-fallback
+#     only. Overview + Trim tabs updated to read .status.
+#   - run_serve_headless() = serve_core() (no blocking) used by dashboard.
+#
+# Verified: `cargo clippy --all-targets -D warnings` clean, `cargo test --workspace`
+# (169 pass), `cargo fmt --all --check` clean. Manual curl of /api/agents against
+# a live herdr daemon returns the registered agents with role/status/label.
+
+# HTTP bridge also serves the frontend (added)
+#
+# The Axum HTTP bridge now serves the single-file frontend build at the root.
+# `http_router()` in server.rs builds an `AppState { server, index_html }`
+# struct — a Clone wrapper for the router state that caches `dist/index.html`
+# bytes (read once at startup) alongside the `HerdrMcpServer`.
+#
+# Routes:
+#   GET /                     -> index_html_handler (frontend HTML)
+#   .fallback(index_html_handler)  -> SPA fallback for react-router deep links
+#   GET /api/*                -> unchanged
+#
+# Dist file resolution: cwd-relative `./dist/index.html` matches the existing
+# `./data` convention. Server logs a `tracing::warn!` if missing; `/api/*` still
+# works. When dist is missing, `GET /` returns 404 with a plain-text hint to run
+# `npm run build`. When present, it returns 200 with `content-type: text/html;
+# charset=utf-8` and the inlined JS/CSS.
+#
+# All 18 existing HTTP handlers were updated from `State(server): State<HerdrMcpServer>`
+# to `State(AppState { server, .. }): State<AppState>`. `start_http` signature is
+# unchanged; `http_router` now accepts `HerdrMcpServer` and wraps internally.
+

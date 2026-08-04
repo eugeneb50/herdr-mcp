@@ -32,6 +32,9 @@ enum Command {
         data_dir: std::path::PathBuf,
         #[arg(long)]
         herdr_socket: Option<std::path::PathBuf>,
+        /// Auto-start the HTTPS intercepting proxy on this port when set.
+        #[arg(long)]
+        proxy_port: Option<u16>,
     },
 
     /// Run the message-trim pipeline on text or a file and print the result.
@@ -113,6 +116,7 @@ async fn main() -> Result<()> {
             http_only,
             data_dir,
             herdr_socket,
+            proxy_port,
         }) => Some(CliOverrides {
             data_dir: Some(data_dir.clone()),
             http_port: *http,
@@ -121,6 +125,7 @@ async fn main() -> Result<()> {
             herdr_socket: herdr_socket.clone(),
             log_level: None,
             trim_stages: Vec::new(),
+            proxy_port: *proxy_port,
         }),
         Some(Command::Trim { .. }) => None,
         Some(Command::Dashboard {
@@ -138,6 +143,7 @@ async fn main() -> Result<()> {
             herdr_socket: None,
             log_level: None,
             trim_stages: Vec::new(),
+            proxy_port: None,
         }),
         Some(Command::FolderKey { .. }) => None,
         None => Some(CliOverrides {
@@ -148,6 +154,7 @@ async fn main() -> Result<()> {
             herdr_socket: None,
             log_level: None,
             trim_stages: Vec::new(),
+            proxy_port: None,
         }),
     };
 
@@ -167,6 +174,7 @@ async fn main() -> Result<()> {
             http_only: _,
             data_dir: _,
             herdr_socket: _,
+            proxy_port: _,
         }) => run_serve(&config).await,
         Some(Command::Dashboard {
             data_dir,
@@ -325,6 +333,38 @@ async fn serve_core(config: &Config) -> Result<(AgentRegistry, std::sync::Arc<Pe
         });
         tracing::info!("HTTP playground listening on http://localhost:{port}");
     }
+
+    // Auto-start the HTTPS intercepting proxy if `--proxy-port` was set.
+    if let Some(proxy_port) = config.proxy.port {
+        let data_dir = persistence.data_dir().to_path_buf();
+        let bind = config
+            .proxy
+            .bind_addr
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".into());
+        let target_hosts = config.proxy.target_hosts.clone();
+        let policy = herdr_mcp_proxy::ProxyPolicy {
+            trim_outbound: config.proxy.trim_outbound,
+            trim_inbound: config.proxy.trim_inbound,
+            stages: config.proxy.trim_stages.clone(),
+        };
+        let bind_for_log = bind.clone();
+        tokio::spawn(async move {
+            if let Err(e) = herdr_mcp_proxy::run_proxy_listener(
+                proxy_port,
+                &bind,
+                &data_dir,
+                target_hosts,
+                policy,
+            )
+            .await
+            {
+                tracing::error!("proxy listener exited: {e}");
+            }
+        });
+        tracing::info!("Proxy listener auto-started on {bind_for_log}:{proxy_port}");
+    }
+
     Ok((registry, persistence))
 }
 

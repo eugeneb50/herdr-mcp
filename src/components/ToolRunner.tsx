@@ -18,7 +18,7 @@ export function ToolRunner() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [showVars, setShowVars] = useState(false);
-  const { substitute, extractFromResponse, varNames } = useVariables();
+  const { substitute, varNames } = useVariables();
 
   useEffect(() => {
     (async () => {
@@ -69,14 +69,14 @@ export function ToolRunner() {
         setError(data.error ?? `HTTP ${res.status}`);
       } else {
         setResponse(data);
-        extractFromResponse(selected, data);
+        // Variable extraction is now handled server-side
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Request failed");
     } finally {
       setLoading(false);
     }
-  }, [selected, params, substitute, extractFromResponse]);
+  }, [selected, params, substitute]);
 
   const previewParams = useMemo(() => {
     const resolved: Record<string, unknown> = {};

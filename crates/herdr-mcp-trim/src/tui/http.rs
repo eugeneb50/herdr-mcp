@@ -197,6 +197,37 @@ impl HttpClient {
         Ok(v)
     }
 
+    /// Fetch a single saved recipe by id.
+    pub async fn get_recipe(&self, id: &str) -> Result<Value> {
+        let url = format!("{}/api/recipes/{id}", self.base);
+        let v = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .json::<Value>()
+            .await
+            .with_context(|| format!("parsing {url} body"))?;
+        Ok(v)
+    }
+
+    /// Update an existing recipe (PUT /api/recipes/{id}).
+    pub async fn update_recipe(&self, id: &str, body: Value) -> Result<Value> {
+        let url = format!("{}/api/recipes/{id}", self.base);
+        let v = self
+            .inner
+            .put(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("PUT {url}"))?
+            .json::<Value>()
+            .await
+            .with_context(|| format!("parsing {url} body"))?;
+        Ok(v)
+    }
+
     /// Run a saved recipe by id.
     pub async fn run_recipe_by_id(&self, id: &str) -> Result<Value> {
         let url = format!("{}/api/recipes/{id}/run", self.base);
@@ -210,6 +241,18 @@ impl HttpClient {
             .await
             .with_context(|| format!("parsing {url} body"))?;
         Ok(v)
+    }
+
+    /// Delete a saved recipe by id.
+    pub async fn delete_recipe(&self, id: &str) -> Result<()> {
+        let url = format!("{}/api/recipes/{id}", self.base);
+        let _ = self
+            .inner
+            .delete(&url)
+            .send()
+            .await
+            .with_context(|| format!("DELETE {url}"))?;
+        Ok(())
     }
 
     /// Aggregate trim savings (optionally scoped to a workspace).
@@ -382,6 +425,42 @@ impl HttpClient {
             anyhow::bail!("clipboard_get HTTP {status}: {v}");
         }
         Ok(parse_clipboard_text(&v))
+    }
+
+    /// Proxy health report: CA status, default config, active per-pane policies.
+    pub async fn proxy_diagnose(&self) -> Result<Value> {
+        self.call_tool("proxy_diagnose", serde_json::json!({})).await
+    }
+
+    /// Start the HTTPS intercepting proxy listener.
+    pub async fn proxy_startup(&self, port: Option<u16>) -> Result<Value> {
+        let mut params = serde_json::json!({});
+        if let Some(p) = port {
+            params["port"] = serde_json::json!(p);
+        }
+        self.call_tool("proxy_startup", params).await
+    }
+
+    /// Set (or clear) the proxy policy for a target pane. `None` clears.
+    pub async fn proxy_policy_set(
+        &self,
+        target: &str,
+        trim_outbound: bool,
+        trim_inbound: bool,
+        stages: &[String],
+    ) -> Result<Value> {
+        let params = serde_json::json!({
+            "target": target,
+            "trim_outbound": trim_outbound,
+            "trim_inbound": trim_inbound,
+            "stages": stages,
+        });
+        self.call_tool("proxy_policy_set", params).await
+    }
+
+    /// Get the per-pane proxy interception policy for a target pane.
+    pub async fn proxy_policy_get(&self, target: &str) -> Result<Value> {
+        self.call_tool("proxy_policy_get", serde_json::json!({ "target": target })).await
     }
 }
 

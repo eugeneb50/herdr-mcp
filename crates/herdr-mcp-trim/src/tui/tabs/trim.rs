@@ -10,11 +10,10 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use super::overview::fmt_bytes;
 use crate::policy::TrimDirection;
 use crate::tui::App;
-use crate::tui::theme::{accent_style, dim_style, panel_block, selected_style};
+use crate::tui::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
 use crate::tui::truncate;
 
-/// Available trim stages for the command dropdown.
-const AVAILABLE_STAGES: &[(&str, &str)] = &[
+pub(crate) const AVAILABLE_STAGES: &[(&str, &str)] = &[
     ("caveman:lite", "Lite style compression"),
     ("caveman:full", "Full style compression"),
     ("caveman:ultra", "Ultra style compression"),
@@ -28,7 +27,7 @@ const DIRECTIONS: &[TrimDirection] = &[
     TrimDirection::OutboundWithAck,
 ];
 
-fn direction_label(d: &TrimDirection) -> &'static str {
+pub(crate) fn direction_label(d: &TrimDirection) -> &'static str {
     match d {
         TrimDirection::None => "none",
         TrimDirection::Outbound => "outbound",
@@ -412,7 +411,11 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = panel_block(" Trim Dashboard ");
+    let block = if app.trim.focused_frame == 0 {
+        focused_panel_block(" Trim Dashboard ")
+    } else {
+        panel_block(" Trim Dashboard ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -487,7 +490,11 @@ fn render_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_trim_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = panel_block(" Trim Policy ");
+    let block = if app.trim.focused_frame == 1 || app.trim.focused_frame == 2 {
+        focused_panel_block(" Trim Policy ")
+    } else {
+        panel_block(" Trim Policy ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

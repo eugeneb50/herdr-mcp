@@ -9,7 +9,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::tui::theme::{accent_style, dim_style, panel_block, selected_style};
+use crate::tui::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
 use crate::tui::{App, EditField, truncate};
 
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
@@ -181,7 +181,11 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 fn render_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
-    let block = panel_block(" Variables ");
+    let block = if app.variables_state.focused_frame == 0 {
+        focused_panel_block(" Variables ")
+    } else {
+        panel_block(" Variables ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -220,7 +224,11 @@ fn render_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 fn render_edit(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = panel_block(" Edit variable ");
+    let block = if app.variables_state.focused_frame == 0 {
+        focused_panel_block(" Edit variable ")
+    } else {
+        panel_block(" Edit variable ")
+    };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
