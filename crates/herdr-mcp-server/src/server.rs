@@ -201,7 +201,7 @@ pub struct RunCommandParams {
 #[must_use]
 #[serde(deny_unknown_fields)]
 pub struct SendAgentParams {
-    /// Agent target: terminal ID, agent name, or pane ID.
+    /// Agent target: unique agent name or pane ID.
     pub target: String,
     /// Text to send to the agent.
     pub text: String,
@@ -220,7 +220,7 @@ pub struct WaitOutputParams {
     pub match_text: String,
     /// Timeout in milliseconds.
     pub timeout_ms: Option<u32>,
-    /// Source: "visible" or "recent".
+    /// Source: "visible", "recent", or "recent-unwrapped".
     pub source: Option<String>,
     /// Whether to treat match_text as a regex pattern.
     pub use_regex: Option<bool>,
@@ -288,7 +288,7 @@ pub struct AgentSpawnParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 pub struct AgentMessageParams {
-    /// Target agent: role or pane id.
+    /// Target agent: role, label, pane id, or unique agent name.
     pub target: String,
     /// Text to send to the agent's stream.
     pub text: String,
@@ -340,11 +340,20 @@ pub struct VarGetParams {
     pub key: String,
 }
 
+/// schemars 对 `serde_json::Value` 会生成布尔字面量 `true`（任意值），
+/// 部分 MCP client（如 OpenClaw bundle-mcp）要求属性必须是 schema 对象——改为显式联合类型。
+fn any_json_value_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "number", "integer", "boolean", "object", "array", "null"]
+    })
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 pub struct VarSetParams {
     pub session_id: String,
     pub key: String,
+    #[schemars(schema_with = "any_json_value_schema")]
     pub value: serde_json::Value,
 }
 
@@ -1089,12 +1098,12 @@ impl HerdrMcpServer {
         run_herdr_json(&["pane", "run", &pid, &command]).await
     }
 
-    #[tool(description = "Send text directly to an agent's stream")]
+    #[tool(description = "Submit a prompt to an agent by unique agent name or pane id")]
     async fn send_agent(
         &self,
         Parameters(SendAgentParams { target, text }): Parameters<SendAgentParams>,
     ) -> Result<CallToolResult, McpError> {
-        run_herdr_json(&["agent", "send", &target, &text]).await
+        run_herdr_json(&["agent", "prompt", &target, &text]).await
     }
 
     // ── Synchronize ────────────────────────────────────────────────────
@@ -1115,15 +1124,17 @@ impl HerdrMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         let timeout_str = timeout_ms.map(|ms| ms.to_string());
-        let mut args = vec!["wait", "output", &pid, "--match", &match_text];
+        // herdr 0.8.0: `herdr pane wait-output <PANE> --match|--regex <TEXT>`
+        let mut args = if use_regex.unwrap_or(false) {
+            vec!["pane", "wait-output", &pid, "--regex", &match_text]
+        } else {
+            vec!["pane", "wait-output", &pid, "--match", &match_text]
+        };
         if let Some(ref ms) = timeout_str {
             args.extend(["--timeout", ms]);
         }
         if let Some(ref src) = source {
             args.extend(["--source", src]);
-        }
-        if use_regex.unwrap_or(false) {
-            args.push("--regex");
         }
         run_herdr_json(&args).await
     }
@@ -1142,7 +1153,8 @@ impl HerdrMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         let timeout_str = timeout_ms.map(|ms| ms.to_string());
-        let mut args = vec!["wait", "agent-status", &pid, "--status", &status];
+        // herdr 0.8.0: `herdr agent wait <TARGET> --until <STATUS>` (TARGET accepts pane id)
+        let mut args = vec!["agent", "wait", &pid, "--until", &status];
         if let Some(ref ms) = timeout_str {
             args.extend(["--timeout", ms]);
         }
@@ -1161,7 +1173,8 @@ impl HerdrMcpServer {
         }): Parameters<WaitAgentStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         let timeout_str = timeout_ms.map(|ms| ms.to_string());
-        let mut args = vec!["agent", "wait", &target, "--status", &status];
+        // herdr 0.8.0: `herdr agent wait <TARGET> --until <STATUS>`
+        let mut args = vec!["agent", "wait", &target, "--until", &status];
         if let Some(ref ms) = timeout_str {
             args.extend(["--timeout", ms]);
         }
@@ -1275,7 +1288,7 @@ impl HerdrMcpServer {
     }
 
     #[tool(
-        description = "Send a message (text) to another agent's stream. `target` may be a role or pane id. The text may interpolate {{role.output}} / {{pane_id.output}} from the session registry. Optional `compress` lists trim stages (e.g. [\"caveman:full\",\"pfc1\"]) applied to the wire bytes; if absent, the target's per-pane trim policy is used (default off)."
+        description = "Send a message (text) to another agent's stream. `target` may be a role, label, pane id, or unique agent name. The text may interpolate {{role.output}} / {{pane_id.output}} from the session registry. Optional `compress` lists trim stages (e.g. [\"caveman:full\",\"pfc1\"]) applied to the wire bytes; if absent, the target's per-pane trim policy is used (default off)."
     )]
     async fn agent_message(
         &self,
@@ -1289,7 +1302,8 @@ impl HerdrMcpServer {
         let wire = self
             .apply_outbound_trim(&pane, &text, compress.as_ref())
             .await;
-        run_herdr_json(&["agent", "send", &pane, &wire]).await
+        // herdr 0.8.0：消息投递改用 `agent prompt`（text+Enter）
+        run_herdr_json(&["agent", "prompt", &pane, &wire]).await
     }
 
     #[tool(
@@ -2369,12 +2383,76 @@ fn extract_pane_id(value: &serde_json::Value) -> Option<String> {
     extract_string(value, "pane_id")
 }
 
-/// Resolve an a2a target (role or pane id) to a concrete pane id.
+/// Confirm that a successful `herdr pane get` response names the requested pane.
+/// Structural parsing avoids false negatives when unrelated fields contain the word "error".
+fn pane_get_confirms_target(output: &str, target: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return false;
+    };
+    value
+        .pointer("/result/pane/pane_id")
+        .and_then(serde_json::Value::as_str)
+        == Some(target)
+}
+
+/// Collect the distinct panes whose live agent name exactly matches `target`.
+fn agent_name_pane_ids(value: &serde_json::Value, target: &str) -> Vec<String> {
+    let mut panes = value
+        .pointer("/result/agents")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|agent| agent.get("agent").and_then(serde_json::Value::as_str) == Some(target))
+        .filter_map(|agent| {
+            agent
+                .get("pane_id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|pane| !pane.is_empty())
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    panes.sort();
+    panes.dedup();
+    panes
+}
+
+/// Resolve an a2a target (role / label / pane id / agent name) to a concrete pane id.
+/// Fallback chain: in-memory registry → live pane id → agent name via `herdr agent list`.
 async fn resolve_target_pane(server: &HerdrMcpServer, target: &str) -> Result<String, McpError> {
-    if !target.is_empty()
-        && let Some(pane) = server.registry.resolve("", target).await
-    {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err(McpError {
+            code: rmcp::model::ErrorCode(-32602),
+            message: "Agent target must not be empty".into(),
+            data: None,
+        });
+    }
+    if let Some(pane) = server.registry.resolve("", target).await {
         return Ok(pane);
+    }
+    // herdr 0.8.0：registry 只含事件上报过的 pane；未上报的 pane id / agent 名走 CLI 实况解析
+    if let Ok(out) = herdr_cli(&["pane", "get", target]).await
+        && pane_get_confirms_target(&out, target)
+    {
+        return Ok(target.to_string());
+    }
+    let out = herdr_cli(&["agent", "list"]).await?;
+    let value = serde_json::from_str::<serde_json::Value>(&out).map_err(to_mcp_err)?;
+    let panes = agent_name_pane_ids(&value, target);
+    match panes.as_slice() {
+        [pane] => return Ok(pane.clone()),
+        [_, _, ..] => {
+            return Err(McpError {
+                code: rmcp::model::ErrorCode(-32000),
+                message: format!(
+                    "Agent name '{target}' is ambiguous across panes: {}",
+                    panes.join(", ")
+                )
+                .into(),
+                data: None,
+            });
+        }
+        [] => {}
     }
     Err(McpError {
         code: rmcp::model::ErrorCode(-32000),
@@ -4024,7 +4102,7 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
                 .get("text")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<text>");
-            format!("herdr agent send {target} {text:?}")
+            format!("herdr agent prompt {target} {text:?}")
         }
         "wait_output" => {
             let pid = params
@@ -4035,7 +4113,13 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
                 .get("match_text")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
-            let mut cmd = format!("herdr wait output {pid} --match {text:?}");
+            // herdr 0.8.0: `herdr pane wait-output <PANE> --match|--regex <TEXT>`（互斥）
+            let use_re = params
+                .get("use_regex")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let flag = if use_re { "--regex" } else { "--match" };
+            let mut cmd = format!("herdr pane wait-output {pid} {flag} {text:?}");
             if let Some(v) = params.get("timeout_ms")
                 && let Some(n) = v.as_u64()
             {
@@ -4044,13 +4128,6 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
             }
             if let Some(v) = params.get("source") {
                 push_str(&mut args, "source", v);
-            }
-            if params
-                .get("use_regex")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                args.push("--regex".into());
             }
             if !args.is_empty() {
                 cmd.push(' ');
@@ -4067,7 +4144,8 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
                 .get("status")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<status>");
-            let mut cmd = format!("herdr wait agent-status {pid} --status {status}");
+            // herdr 0.8.0: `herdr agent wait <TARGET> --until <STATUS>`（TARGET 收 pane id）
+            let mut cmd = format!("herdr agent wait {pid} --until {status}");
             if let Some(v) = params.get("timeout_ms")
                 && let Some(n) = v.as_u64()
             {
@@ -4089,7 +4167,8 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
                 .get("status")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<status>");
-            let mut cmd = format!("herdr agent wait {target} --status {status}");
+            // herdr 0.8.0: `--until` 而非 `--status`
+            let mut cmd = format!("herdr agent wait {target} --until {status}");
             if let Some(v) = params.get("timeout_ms")
                 && let Some(n) = v.as_u64()
             {
@@ -4654,5 +4733,130 @@ mod tests {
         // default target_hosts from Config::default()
         let hosts = json["ca"]["target_hosts"].as_array().unwrap();
         assert!(!hosts.is_empty());
+    }
+
+    // ── herdr 0.8.0 CLI 形状断言（step_to_shell export 路径）──────────────
+
+    fn params(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        v.as_object().unwrap().clone()
+    }
+
+    #[test]
+    fn test_export_wait_output_literal() {
+        let p = params(serde_json::json!({"pane_id": "w6:p1", "match_text": "DONE"}));
+        assert_eq!(
+            step_to_shell("wait_output", &p),
+            "herdr pane wait-output w6:p1 --match \"DONE\""
+        );
+    }
+
+    #[test]
+    fn test_export_wait_output_regex_exclusive() {
+        // use_regex=true 时用 --regex 带参，且不得同时出现 --match（0.8.0 互斥）
+        let p = params(serde_json::json!({
+            "pane_id": "w6:p1", "match_text": "D.*E", "use_regex": true
+        }));
+        let cmd = step_to_shell("wait_output", &p);
+        assert_eq!(cmd, "herdr pane wait-output w6:p1 --regex \"D.*E\"");
+        assert!(!cmd.contains("--match"));
+    }
+
+    #[test]
+    fn test_export_wait_output_timeout_and_source() {
+        let p = params(serde_json::json!({
+            "pane_id": "w6:p1", "match_text": "X", "timeout_ms": 5000,
+            "source": "recent-unwrapped"
+        }));
+        let cmd = step_to_shell("wait_output", &p);
+        assert!(cmd.starts_with("herdr pane wait-output w6:p1 --match \"X\""));
+        assert!(cmd.contains("--timeout 5000"));
+        assert!(cmd.contains("--source recent-unwrapped"));
+    }
+
+    #[test]
+    fn test_export_wait_pane_agent_status_until() {
+        let p = params(serde_json::json!({"pane_id": "w6:p6", "status": "idle"}));
+        assert_eq!(
+            step_to_shell("wait_pane_agent_status", &p),
+            "herdr agent wait w6:p6 --until idle"
+        );
+    }
+
+    #[test]
+    fn test_export_wait_agent_status_until_with_timeout() {
+        let p = params(serde_json::json!({"target": "w6:p1", "status": "done", "timeout_ms": 3000}));
+        assert_eq!(
+            step_to_shell("wait_agent_status", &p),
+            "herdr agent wait w6:p1 --until done --timeout 3000"
+        );
+    }
+
+    #[test]
+    fn test_export_send_agent_uses_prompt() {
+        let p = params(serde_json::json!({"target": "w6:p1", "text": "hello"}));
+        assert_eq!(
+            step_to_shell("send_agent", &p),
+            "herdr agent prompt w6:p1 \"hello\""
+        );
+    }
+
+    #[test]
+    fn test_var_set_value_schema_is_an_object_union() {
+        let schema = serde_json::to_value(schemars::schema_for!(VarSetParams)).unwrap();
+        let value_schema = schema.pointer("/properties/value").unwrap();
+        assert!(value_schema.is_object());
+        let types = value_schema
+            .get("type")
+            .and_then(serde_json::Value::as_array)
+            .unwrap();
+        for expected in [
+            "string", "number", "integer", "boolean", "object", "array", "null",
+        ] {
+            assert!(types.iter().any(|value| value.as_str() == Some(expected)));
+        }
+    }
+
+    #[test]
+    fn test_pane_get_confirmation_uses_structure_not_error_substring() {
+        let output = serde_json::json!({
+            "result": {"pane": {"pane_id": "w6:p6", "tokens": {"info": "mentions error"}}}
+        })
+        .to_string();
+        assert!(pane_get_confirms_target(&output, "w6:p6"));
+        assert!(!pane_get_confirms_target(
+            r#"{"error":{"code":"pane_not_found"}}"#,
+            "w6:p6"
+        ));
+    }
+
+    #[test]
+    fn test_agent_name_pane_ids_requires_exact_name_and_deduplicates() {
+        let value = serde_json::json!({"result": {"agents": [
+            {"agent": "hermes", "pane_id": "w6:p9"},
+            {"agent": "hermes", "pane_id": "w6:p9"},
+            {"agent": "hermes-helper", "pane_id": "w6:pA"}
+        ]}});
+        assert_eq!(agent_name_pane_ids(&value, "hermes"), vec!["w6:p9"]);
+    }
+
+    #[test]
+    fn test_agent_name_pane_ids_preserves_ambiguity() {
+        let value = serde_json::json!({"result": {"agents": [
+            {"agent": "codex", "pane_id": "w6:p6"},
+            {"agent": "codex", "pane_id": "w7:p2"}
+        ]}});
+        assert_eq!(
+            agent_name_pane_ids(&value, "codex"),
+            vec!["w6:p6", "w7:p2"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_target_pane_rejects_blank_target() {
+        let (server, _tmp) = make_proxy_test_server().await;
+        let err = resolve_target_pane(&server, "  \t")
+            .await
+            .expect_err("blank targets must be rejected before CLI fallback");
+        assert!(err.message.contains("must not be empty"));
     }
 }
