@@ -202,7 +202,7 @@ pub struct RunCommandParams {
 #[must_use]
 #[serde(deny_unknown_fields)]
 pub struct SendAgentParams {
-    /// Agent target: terminal ID, agent name, or pane ID.
+    /// Agent target: unique agent name or pane ID.
     pub target: String,
     /// Text to send to the agent.
     pub text: String,
@@ -221,7 +221,7 @@ pub struct WaitOutputParams {
     pub match_text: String,
     /// Timeout in milliseconds.
     pub timeout_ms: Option<u32>,
-    /// Source: "visible" or "recent".
+    /// Source: "visible", "recent", or "recent-unwrapped".
     pub source: Option<String>,
     /// Whether to treat match_text as a regex pattern.
     pub use_regex: Option<bool>,
@@ -978,12 +978,12 @@ impl HerdrMcpServer {
         run_herdr_json(&["pane", "run", &pid, &command]).await
     }
 
-    #[tool(description = "Send text directly to an agent's stream")]
+    #[tool(description = "Submit a prompt to an agent by unique agent name or pane id")]
     async fn send_agent(
         &self,
         Parameters(SendAgentParams { target, text }): Parameters<SendAgentParams>,
     ) -> Result<CallToolResult, McpError> {
-        run_herdr_json(&["agent", "send", &target, &text]).await
+        run_herdr_json(&["agent", "prompt", &target, &text]).await
     }
 
     // ── Synchronize ────────────────────────────────────────────────────
@@ -995,15 +995,17 @@ impl HerdrMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         let timeout_str = timeout_ms.map(|ms| ms.to_string());
-        let mut args = vec!["wait", "output", &pid, "--match", &match_text];
+        // herdr 0.8.0: `herdr pane wait-output <PANE> --match|--regex <TEXT>`
+        let mut args = if use_regex.unwrap_or(false) {
+            vec!["pane", "wait-output", &pid, "--regex", &match_text]
+        } else {
+            vec!["pane", "wait-output", &pid, "--match", &match_text]
+        };
         if let Some(ref ms) = timeout_str {
             args.extend(["--timeout", ms]);
         }
         if let Some(ref src) = source {
             args.extend(["--source", src]);
-        }
-        if use_regex.unwrap_or(false) {
-            args.push("--regex");
         }
         run_herdr_json(&args).await
     }
@@ -1015,7 +1017,8 @@ impl HerdrMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         let timeout_str = timeout_ms.map(|ms| ms.to_string());
-        let mut args = vec!["wait", "agent-status", &pid, "--status", &status];
+        // herdr 0.8.0: `herdr agent wait <TARGET> --until <STATUS>`
+        let mut args = vec!["agent", "wait", &pid, "--until", &status];
         if let Some(ref ms) = timeout_str {
             args.extend(["--timeout", ms]);
         }
@@ -1028,7 +1031,8 @@ impl HerdrMcpServer {
         Parameters(WaitAgentStatusParams { target, status, timeout_ms }): Parameters<WaitAgentStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         let timeout_str = timeout_ms.map(|ms| ms.to_string());
-        let mut args = vec!["agent", "wait", &target, "--status", &status];
+        // herdr 0.8.0: `--until` 而非 `--status`
+        let mut args = vec!["agent", "wait", &target, "--until", &status];
         if let Some(ref ms) = timeout_str {
             args.extend(["--timeout", ms]);
         }
@@ -1147,7 +1151,7 @@ impl HerdrMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let pane = resolve_target_pane(self, &target).await?;
         let wire = self.apply_outbound_trim(&pane, &text, compress.as_ref()).await;
-        run_herdr_json(&["agent", "send", &pane, &wire]).await
+        run_herdr_json(&["agent", "prompt", &pane, &wire]).await
     }
 
     #[tool(description = "Read an agent's output and store it as its work product in the registry. Returns {pane_id, role, agent, status, output}. `target` may be a role or pane id. `decompress` (default true) reverses any PFC1 header on the read so {{role.output}} stays byte-faithful.")]
