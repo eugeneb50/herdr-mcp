@@ -39,7 +39,6 @@ mod tests {
     use rustls::pki_types::{CertificateDer, ServerName};
     use std::time::Duration;
     use tempfile::tempdir;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio_rustls::{TlsAcceptor, TlsConnector};
 
     #[test]
@@ -57,9 +56,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let ca = Arc::new(CaManager::load_or_create(dir.path(), 3650).unwrap());
         let allowed_host = "api.openai.com".to_string();
-        let server_config = Arc::new(
-            make_server_config(ca.clone(), vec![allowed_host.clone()]).unwrap(),
-        );
+        let server_config =
+            Arc::new(make_server_config(ca.clone(), vec![allowed_host.clone()]).unwrap());
 
         // Bind ephemeral port and start a minimal TLS-accepting proxy.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -74,7 +72,9 @@ mod tests {
 
         // Build a client TLS config that trusts our CA.
         let mut root_store = rustls::RootCertStore::empty();
-        root_store.add(CertificateDer::from(ca.ca_cert_der().to_vec())).unwrap();
+        root_store
+            .add(CertificateDer::from(ca.ca_cert_der().to_vec()))
+            .unwrap();
         let client_config = rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();
@@ -83,13 +83,10 @@ mod tests {
 
         // Connect and complete TLS handshake.
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let tls = tokio::time::timeout(
-            Duration::from_secs(5),
-            connector.connect(server_name, tcp),
-        )
-        .await
-        .expect("TLS handshake timed out")
-        .expect("TLS handshake failed");
+        let tls = tokio::time::timeout(Duration::from_secs(5), connector.connect(server_name, tcp))
+            .await
+            .expect("TLS handshake timed out")
+            .expect("TLS handshake failed");
 
         // Verify a peer cert was presented.
         let (_io, conn) = tls.into_inner();
@@ -115,9 +112,8 @@ mod tests {
     async fn test_e2e_tls_disallowed_sni_fails() {
         let dir = tempdir().unwrap();
         let ca = Arc::new(CaManager::load_or_create(dir.path(), 3650).unwrap());
-        let server_config = Arc::new(
-            make_server_config(ca.clone(), vec!["api.openai.com".into()]).unwrap(),
-        );
+        let server_config =
+            Arc::new(make_server_config(ca.clone(), vec!["api.openai.com".into()]).unwrap());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -131,7 +127,9 @@ mod tests {
         });
 
         let mut root_store = rustls::RootCertStore::empty();
-        root_store.add(CertificateDer::from(ca.ca_cert_der().to_vec())).unwrap();
+        root_store
+            .add(CertificateDer::from(ca.ca_cert_der().to_vec()))
+            .unwrap();
         let client_config = rustls::ClientConfig::builder()
             .with_root_certificates(root_store)
             .with_no_client_auth();
@@ -139,17 +137,13 @@ mod tests {
         let server_name = ServerName::try_from("evil.com".to_string()).unwrap();
 
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            connector.connect(server_name, tcp),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(5), connector.connect(server_name, tcp)).await;
 
         // Either a timeout or an Err is acceptable; the strict assertion is
         // that we did NOT get a clean handshake back.
-        match result {
-            Ok(Ok(_)) => panic!("handshake to disallowed host should fail"),
-            Ok(Err(_)) | Err(_) => {}
+        if let Ok(Ok(_)) = result {
+            panic!("handshake to disallowed host should fail");
         }
         let _ = tokio::time::timeout(Duration::from_secs(2), server_task).await;
     }

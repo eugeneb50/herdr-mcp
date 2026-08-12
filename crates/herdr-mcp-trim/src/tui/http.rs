@@ -429,7 +429,8 @@ impl HttpClient {
 
     /// Proxy health report: CA status, default config, active per-pane policies.
     pub async fn proxy_diagnose(&self) -> Result<Value> {
-        self.call_tool("proxy_diagnose", serde_json::json!({})).await
+        self.call_tool("proxy_diagnose", serde_json::json!({}))
+            .await
     }
 
     /// Start the HTTPS intercepting proxy listener.
@@ -460,7 +461,8 @@ impl HttpClient {
 
     /// Get the per-pane proxy interception policy for a target pane.
     pub async fn proxy_policy_get(&self, target: &str) -> Result<Value> {
-        self.call_tool("proxy_policy_get", serde_json::json!({ "target": target })).await
+        self.call_tool("proxy_policy_get", serde_json::json!({ "target": target }))
+            .await
     }
 }
 

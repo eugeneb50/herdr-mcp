@@ -14,7 +14,8 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use serde_json::{Map, Value};
 
 use crate::tui::theme::{
-    accent_style, dim_style, focused_panel_block, muted_style, panel_block, selected_style, warn_style,
+    accent_style, dim_style, focused_panel_block, muted_style, panel_block, selected_style,
+    warn_style,
 };
 use crate::tui::{App, FieldKind, PlaygroundSub, RecipeStep, ToolCategory, ToolField};
 

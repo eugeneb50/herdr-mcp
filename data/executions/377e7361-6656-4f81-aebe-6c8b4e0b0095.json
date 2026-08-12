@@ -1,0 +1,49 @@
+{
+  "id": "377e7361-6656-4f81-aebe-6c8b4e0b0095",
+  "recipe_id": "00000000-0000-0000-0000-000000000000",
+  "started_at": "2026-07-29T15:23:52.499714967Z",
+  "completed_at": "2026-07-29T15:23:52.960445931Z",
+  "status": "Completed",
+  "results": {
+    "step1": {
+      "content": [
+        {
+          "text": "",
+          "type": "text"
+        }
+      ],
+      "isError": false
+    },
+    "step2": {
+      "content": [
+        {
+          "text": "",
+          "type": "text"
+        }
+      ],
+      "isError": false
+    }
+  },
+  "variables": {
+    "result.isError": false,
+    "step2": {
+      "content": [
+        {
+          "text": "",
+          "type": "text"
+        }
+      ],
+      "isError": false
+    },
+    "step1": {
+      "content": [
+        {
+          "text": "",
+          "type": "text"
+        }
+      ],
+      "isError": false
+    }
+  },
+  "error": null
+}

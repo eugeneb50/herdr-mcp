@@ -9,7 +9,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::trim::AVAILABLE_STAGES;
 use crate::tui::App;
-use crate::tui::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
+use crate::tui::theme::{
+    accent_style, dim_style, focused_panel_block, panel_block, selected_style,
+};
 use crate::tui::truncate;
 
 /// Returns `true` if the key was consumed.
@@ -148,9 +150,7 @@ async fn handle_frame_editor(app: &mut App, code: KeyCode, mods: KeyModifiers) -
             if app.proxy.stage_index < app.proxy.stages.len() {
                 app.proxy.stages.remove(app.proxy.stage_index);
             }
-            if !app.proxy.stages.is_empty()
-                && app.proxy.stage_index >= app.proxy.stages.len()
-            {
+            if !app.proxy.stages.is_empty() && app.proxy.stage_index >= app.proxy.stages.len() {
                 app.proxy.stage_index = app.proxy.stages.len() - 1;
             }
             Ok(true)
@@ -165,8 +165,7 @@ async fn handle_frame_editor(app: &mut App, code: KeyCode, mods: KeyModifiers) -
         }
         KeyCode::Down => {
             if !app.proxy.stages.is_empty() {
-                app.proxy.stage_index =
-                    (app.proxy.stage_index + 1).min(app.proxy.stages.len() - 1);
+                app.proxy.stage_index = (app.proxy.stage_index + 1).min(app.proxy.stages.len() - 1);
             }
             Ok(true)
         }
@@ -293,12 +292,17 @@ async fn apply_policy(app: &mut App) {
         "trim_inbound": app.proxy.trim_inbound,
     });
     app.proxy.policy_msg = "applying...".into();
-    match http.proxy_policy_set(&target, app.proxy.trim_outbound, app.proxy.trim_inbound, &app.proxy.stages).await {
+    match http
+        .proxy_policy_set(
+            &target,
+            app.proxy.trim_outbound,
+            app.proxy.trim_inbound,
+            &app.proxy.stages,
+        )
+        .await
+    {
         Ok(_) => {
-            app.proxy.policy_msg = format!(
-                "applied: {} stages",
-                app.proxy.stages.len()
-            );
+            app.proxy.policy_msg = format!("applied: {} stages", app.proxy.stages.len());
         }
         Err(e) => {
             app.proxy.policy_msg = format!("apply failed: {e}");
@@ -333,12 +337,24 @@ fn render_diagnose(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     if let Some(d) = &app.proxy.diagnose {
         let ca = d.get("ca");
-        let ca_exists = ca.and_then(|c| c.get("exists").and_then(|v| v.as_bool())).unwrap_or(false);
-        let ca_fp = ca.and_then(|c| c.get("fingerprint").and_then(|f| f.as_str())).unwrap_or("");
+        let ca_exists = ca
+            .and_then(|c| c.get("exists").and_then(|v| v.as_bool()))
+            .unwrap_or(false);
+        let ca_fp = ca
+            .and_then(|c| c.get("fingerprint").and_then(|f| f.as_str()))
+            .unwrap_or("");
 
         lines.push(Line::from(Span::styled(
-            if ca_exists { "CA: present" } else { "CA: missing" },
-            if ca_exists { accent_style() } else { Style::default().fg(ratatui::style::Color::Red) },
+            if ca_exists {
+                "CA: present"
+            } else {
+                "CA: missing"
+            },
+            if ca_exists {
+                accent_style()
+            } else {
+                Style::default().fg(ratatui::style::Color::Red)
+            },
         )));
         if !ca_fp.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -355,8 +371,14 @@ fn render_diagnose(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 format!("  bind: {}:{port}", bind, port = port),
                 dim_style(),
             )));
-            let trim_o = cfg.get("trim_outbound").and_then(|v| v.as_bool()).unwrap_or(false);
-            let trim_i = cfg.get("trim_inbound").and_then(|v| v.as_bool()).unwrap_or(false);
+            let trim_o = cfg
+                .get("trim_outbound")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let trim_i = cfg
+                .get("trim_inbound")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             lines.push(Line::from(Span::styled(
                 format!("  default trim: outbound={trim_o}, inbound={trim_i}"),
                 dim_style(),
@@ -365,7 +387,10 @@ fn render_diagnose(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
         lines.push(Line::from(""));
 
-        if let Some(targets) = d.get("ca").and_then(|c| c.get("target_hosts").and_then(|t| t.as_array())) {
+        if let Some(targets) = d
+            .get("ca")
+            .and_then(|c| c.get("target_hosts").and_then(|t| t.as_array()))
+        {
             lines.push(Line::from(Span::styled("Target hosts:", accent_style())));
             for t in targets {
                 if let Some(s) = t.as_str() {
@@ -384,11 +409,24 @@ fn render_diagnose(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             for p in plist.iter().take(8) {
                 let pid = p.get("pane_id").and_then(|v| v.as_str()).unwrap_or("?");
                 let label = p.get("label").and_then(|v| v.as_str()).unwrap_or("");
-                let o = p.get("trim_outbound").and_then(|v| v.as_bool()).unwrap_or(false);
-                let i = p.get("trim_inbound").and_then(|v| v.as_bool()).unwrap_or(false);
-                let stages = p.get("stages").and_then(|s| s.as_array()).map(|arr| {
-                    arr.iter().filter_map(|s| s.as_str()).collect::<Vec<_>>().join(",")
-                }).unwrap_or_default();
+                let o = p
+                    .get("trim_outbound")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let i = p
+                    .get("trim_inbound")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let stages = p
+                    .get("stages")
+                    .and_then(|s| s.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    })
+                    .unwrap_or_default();
                 lines.push(Line::from(Span::styled(
                     format!("  {label} ({pid}): out={o} in={i} [{stages}]"),
                     dim_style(),
@@ -404,11 +442,23 @@ fn render_diagnose(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     if let Some(s) = &app.proxy.startup_result {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("Startup:", accent_style().add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(
+            "Startup:",
+            accent_style().add_modifier(Modifier::BOLD),
+        )));
         let bind = s.get("bind").and_then(|v| v.as_str()).unwrap_or("");
-        let fp = s.get("ca_fingerprint").and_then(|v| v.as_str()).unwrap_or("");
-        lines.push(Line::from(Span::styled(format!("  bind: {bind}"), dim_style())));
-        lines.push(Line::from(Span::styled(format!("  CA fingerprint: {fp}"), dim_style())));
+        let fp = s
+            .get("ca_fingerprint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        lines.push(Line::from(Span::styled(
+            format!("  bind: {bind}"),
+            dim_style(),
+        )));
+        lines.push(Line::from(Span::styled(
+            format!("  CA fingerprint: {fp}"),
+            dim_style(),
+        )));
     }
 
     lines.push(Line::from(""));
@@ -470,10 +520,21 @@ fn render_policy_panel(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 truncate(&p.label, 16)
             };
             let agent = p.agent.as_deref().unwrap_or("—");
-            let style = if selected { selected_style() } else { Style::default() };
+            let style = if selected {
+                selected_style()
+            } else {
+                Style::default()
+            };
 
             lines.push(Line::from(vec![
-                Span::styled(marker, if selected { accent_style() } else { dim_style() }),
+                Span::styled(
+                    marker,
+                    if selected {
+                        accent_style()
+                    } else {
+                        dim_style()
+                    },
+                ),
                 Span::styled(format!("{:<14}", label), style),
                 Span::styled(format!(" {:<8}", agent), dim_style()),
             ]));
@@ -495,15 +556,27 @@ fn render_policy_panel(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
             accent_style().add_modifier(Modifier::BOLD),
         )));
 
-        let o_marker = if app.proxy.trim_outbound { "●" } else { "○" };
+        let o_marker = if app.proxy.trim_outbound {
+            "●"
+        } else {
+            "○"
+        };
         let i_marker = if app.proxy.trim_inbound { "●" } else { "○" };
         lines.push(Line::from(Span::styled(
             format!("  trim_outbound: {}", o_marker),
-            if app.proxy.trim_outbound { selected_style() } else { dim_style() },
+            if app.proxy.trim_outbound {
+                selected_style()
+            } else {
+                dim_style()
+            },
         )));
         lines.push(Line::from(Span::styled(
             format!("  trim_inbound:  {}", i_marker),
-            if app.proxy.trim_inbound { selected_style() } else { dim_style() },
+            if app.proxy.trim_inbound {
+                selected_style()
+            } else {
+                dim_style()
+            },
         )));
 
         lines.push(Line::from(""));
@@ -517,7 +590,11 @@ fn render_policy_panel(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
             for (i, stage) in app.proxy.stages.iter().enumerate() {
                 let selected = i == app.proxy.stage_index;
                 let marker = if selected { "● " } else { "○ " };
-                let style = if selected { selected_style() } else { Style::default() };
+                let style = if selected {
+                    selected_style()
+                } else {
+                    Style::default()
+                };
                 lines.push(Line::from(vec![
                     Span::styled(format!("  {marker}"), style),
                     Span::styled(stage.clone(), style),
@@ -580,11 +657,19 @@ fn render_stage_picker(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     for (i, (stage, desc)) in AVAILABLE_STAGES.iter().enumerate() {
         let selected = i == app.proxy.stage_picker_index;
         let marker = if selected { "▸ " } else { "  " };
-        let style = if selected { selected_style() } else { Style::default() };
+        let style = if selected {
+            selected_style()
+        } else {
+            Style::default()
+        };
         lines.push(Line::from(vec![
             Span::styled(
                 marker,
-                if selected { accent_style() } else { dim_style() },
+                if selected {
+                    accent_style()
+                } else {
+                    dim_style()
+                },
             ),
             Span::styled(format!("{:<18}", stage), style),
             Span::styled(truncate(desc, 18), dim_style()),

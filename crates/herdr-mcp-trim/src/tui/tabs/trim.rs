@@ -10,7 +10,9 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use super::overview::fmt_bytes;
 use crate::policy::TrimDirection;
 use crate::tui::App;
-use crate::tui::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
+use crate::tui::theme::{
+    accent_style, dim_style, focused_panel_block, panel_block, selected_style,
+};
 use crate::tui::truncate;
 
 pub(crate) const AVAILABLE_STAGES: &[(&str, &str)] = &[

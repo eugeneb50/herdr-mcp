@@ -281,17 +281,19 @@ async fn run_serve(
     // Build the shared agent registry + herdr event subscriber. The registry is
     // fed live by herdr's `pane.agent_status_changed` stream so recipe steps and
     // MCP tools can address agents by role/pane id across the workspace.
-    let herdr_client = build_herdr_client(&data_dir, herdr_socket);
+    let herdr_client = build_herdr_client(&data_dir, herdr_socket, 3, 500);
     herdr_client.spawn_subscriber();
     let registry = herdr_client.registry.clone();
 
     // Periodic trim-badge refresh so savings badges survive server restarts.
     server::spawn_trim_poller(std::sync::Arc::new(
-        server::HerdrMcpServer::new((*persistence).clone(), registry.clone()),
+        server::HerdrMcpServer::new((*persistence).clone(), registry.clone())
+            .with_herdr_client(herdr_client.clone()),
     ));
 
     if let Some(port) = http {
-        let server = server::HerdrMcpServer::new((*persistence).clone(), registry.clone());
+        let server = server::HerdrMcpServer::new((*persistence).clone(), registry.clone())
+            .with_herdr_client(herdr_client.clone());
         tokio::spawn(async move {
             if let Err(e) = server::start_http(server, port).await {
                 tracing::error!("HTTP server failed: {e}");
@@ -309,7 +311,8 @@ async fn run_serve(
 
     tracing::info!("Starting herdr-mcp MCP server");
 
-    let server = server::HerdrMcpServer::new((*persistence).clone(), registry.clone());
+    let server = server::HerdrMcpServer::new((*persistence).clone(), registry)
+        .with_herdr_client(herdr_client);
     let service = server.serve(stdio()).await?;
 
     tracing::info!("herdr-mcp server initialized, waiting for requests");
@@ -325,21 +328,21 @@ async fn run_serve(
 fn build_herdr_client(
     data_dir: &std::path::Path,
     herdr_socket: Option<std::path::PathBuf>,
+    reconnect_attempts: u32,
+    reconnect_backoff_ms: u64,
 ) -> std::sync::Arc<herdr_client::HerdrClient> {
-    let socket_path = match herdr_socket {
-        Some(p) => p,
-        None => {
-            let from_env = std::env::var("HERDR_SOCKET_PATH").ok().map(std::path::PathBuf::from);
-            from_env.unwrap_or_else(|| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                std::path::PathBuf::from(home).join(".config/herdr/herdr.sock")
-            })
-        }
-    };
+    // The socket path is already resolved by the caller (run_serve) using the same
+    // logic as Config::herdr_socket_path(). No need to re-check env here.
+    let socket_path = herdr_socket.unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        std::path::PathBuf::from(home).join(".config/herdr/herdr.sock")
+    });
     let persistence = persistence::Persistence::new(data_dir.to_path_buf());
     let client = herdr_client::HerdrClient::new(
         std::sync::Arc::new(persistence),
         socket_path,
+        reconnect_attempts,
+        reconnect_backoff_ms,
     );
     std::sync::Arc::new(client)
 }
