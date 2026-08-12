@@ -6,7 +6,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::herdr_client::AgentRegistry;
+use crate::herdr_client::{AgentRegistry, HerdrClient, SubscriberPhase};
 use crate::persistence::Persistence;
 use crate::scheduler::Scheduler;
 use crate::templates as tmpl;
@@ -654,6 +654,8 @@ pub struct HerdrMcpServer {
     pub data_dir: std::path::PathBuf,
     /// Resolved clipboard backend config (source of truth: `Config`).
     pub clipboard: herdr_mcp_core::ClipboardConfig,
+    /// Optional reference to the herdr event subscriber client (for status reporting).
+    pub herdr_client: Option<std::sync::Arc<HerdrClient>>,
 }
 
 #[tool_router]
@@ -677,7 +679,14 @@ impl HerdrMcpServer {
             registry,
             data_dir,
             clipboard: config.clipboard.clone(),
+            herdr_client: None,
         }
+    }
+
+    /// Attach a HerdrClient for socket/subscriber status reporting.
+    pub fn with_herdr_client(mut self, client: std::sync::Arc<HerdrClient>) -> Self {
+        self.herdr_client = Some(client);
+        self
     }
 
     // ── Trim helpers ─────────────────────────────────────────────────
@@ -813,11 +822,55 @@ impl HerdrMcpServer {
         herdr_mcp_trim::runner::save_memory(&path, key).await;
     }
 
+    /// Run `herdr status --json` and parse the JSON output.
+    async fn run_herdr_status_json(&self) -> Result<serde_json::Value, McpError> {
+        let output = herdr_cli(&["status", "--json"]).await?;
+        serde_json::from_str(&output).map_err(|e| McpError {
+            code: rmcp::model::ErrorCode(-32603),
+            message: format!("Failed to parse herdr status JSON: {e}").into(),
+            data: None,
+        })
+    }
+
     // ── Discovery ──────────────────────────────────────────────────────
 
     #[tool(description = "Get overall herdr server status, server status, and client status")]
     async fn status(&self) -> Result<CallToolResult, McpError> {
-        run_herdr_json(&["status"]).await
+        // Get herdr's native status
+        let herdr_status = self.run_herdr_status_json().await.unwrap_or_else(
+            |_| serde_json::json!({"error": "herdr CLI unavailable or status failed"}),
+        );
+
+        // Get herdr-mcp's socket/subscriber state
+        let (socket_active, subscriber_phase) = match &self.herdr_client {
+            Some(client) => {
+                let active = client.is_socket_active().await;
+                let phase = client.subscriber_state().await;
+                (active, phase)
+            }
+            None => (false, SubscriberPhase::Stopped),
+        };
+
+        let inside_herdr = herdr_mcp_core::session_context::inside_herdr();
+        let pane_id = herdr_mcp_core::session_context::pane_id();
+
+        let merged = serde_json::json!({
+            "herdr": herdr_status,
+            "herdr_mcp": {
+                "inside_herdr": inside_herdr,
+                "pane_id": pane_id,
+                "socket_active": socket_active,
+                "subscriber": format!("{:?}", subscriber_phase),
+            }
+        });
+
+        let content = Content::json(merged).map_err(|e| McpError {
+            code: rmcp::model::ErrorCode(-32603),
+            message: format!("Failed to serialize merged status: {e}").into(),
+            data: None,
+        })?;
+
+        Ok(CallToolResult::success(vec![content]))
     }
 
     #[tool(description = "List all workspaces in the current session")]
@@ -4517,16 +4570,12 @@ mod tests {
     // ── Proxy integration tests ─────────────────────────────────────────────
 
     /// Build a test server with temp data_dir.
-    async fn make_proxy_test_server()
-    -> (HerdrMcpServer, tempfile::TempDir) {
+    async fn make_proxy_test_server() -> (HerdrMcpServer, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let pers = Persistence::new(tmp.path().join("data"));
         let pers_arc = std::sync::Arc::new(pers);
         let registry = AgentRegistry::new(pers_arc);
-        let server = HerdrMcpServer::new(
-            Persistence::new(tmp.path().join("data")),
-            registry,
-        );
+        let server = HerdrMcpServer::new(Persistence::new(tmp.path().join("data")), registry);
         (server, tmp)
     }
 
@@ -4569,10 +4618,7 @@ mod tests {
             trim_inbound: true,
             stages: vec!["pfc1".into()],
         };
-        server
-            .registry
-            .set_proxy_policy("p1", Some(policy))
-            .await;
+        server.registry.set_proxy_policy("p1", Some(policy)).await;
         assert!(server.registry.get_proxy_policy("p1").await.is_some());
         server.registry.set_proxy_policy("p1", None).await;
         assert!(server.registry.get_proxy_policy("p1").await.is_none());
@@ -4622,7 +4668,7 @@ mod tests {
             .unwrap();
         let json = call_tool_json(result);
         assert_eq!(json["status"], serde_json::json!("started"));
-        assert!(json["ca_fingerprint"].as_str().unwrap().len() > 0);
+        assert!(!json["ca_fingerprint"].as_str().unwrap().is_empty());
         assert!(json["bind"].as_str().unwrap().contains("127.0.0.1"));
         // Allow the spawned listener task to do its work.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -4650,7 +4696,7 @@ mod tests {
             .unwrap();
         let json = call_tool_json(result);
         assert_eq!(json["ca"]["exists"], serde_json::json!(true));
-        assert!(json["ca"]["fingerprint"].as_str().unwrap().len() > 0);
+        assert!(!json["ca"]["fingerprint"].as_str().unwrap().is_empty());
         // default target_hosts from Config::default()
         let hosts = json["ca"]["target_hosts"].as_array().unwrap();
         assert!(!hosts.is_empty());

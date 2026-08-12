@@ -611,6 +611,8 @@ pub struct HerdrMcpServer {
     pub registry: AgentRegistry,
     /// Data directory, used by the trim layer for persistent PFC1 memory.
     pub data_dir: std::path::PathBuf,
+    /// Optional reference to the herdr event subscriber client (for status reporting).
+    pub herdr_client: Option<std::sync::Arc<crate::herdr_client::HerdrClient>>,
 }
 
 #[tool_router]
@@ -624,7 +626,14 @@ impl HerdrMcpServer {
             scheduler,
             registry,
             data_dir,
+            herdr_client: None,
         }
+    }
+
+    /// Attach a HerdrClient for socket/subscriber status reporting.
+    pub fn with_herdr_client(mut self, client: std::sync::Arc<crate::herdr_client::HerdrClient>) -> Self {
+        self.herdr_client = Some(client);
+        self
     }
 
     // ── Trim helpers ─────────────────────────────────────────────────
@@ -764,7 +773,41 @@ impl HerdrMcpServer {
 
     #[tool(description = "Get overall herdr server status, server status, and client status")]
     async fn status(&self) -> Result<CallToolResult, McpError> {
-        run_herdr_json(&["status"]).await
+        // Get herdr's native status
+        let herdr_status = self.run_herdr_status_json().await.unwrap_or_else(
+            |_| serde_json::json!({"error": "herdr CLI unavailable or status failed"}),
+        );
+
+        // Get herdr-mcp's socket/subscriber state
+        let (socket_active, subscriber_phase) = match &self.herdr_client {
+            Some(client) => {
+                let active = client.is_socket_active().await;
+                let phase = client.subscriber_state().await;
+                (active, phase)
+            }
+            None => (false, crate::herdr_client::SubscriberPhase::Stopped),
+        };
+
+        let inside_herdr = crate::session_context::inside_herdr();
+        let pane_id = crate::session_context::pane_id();
+
+        let merged = serde_json::json!({
+            "herdr": herdr_status,
+            "herdr_mcp": {
+                "inside_herdr": inside_herdr,
+                "pane_id": pane_id,
+                "socket_active": socket_active,
+                "subscriber": format!("{:?}", subscriber_phase),
+            }
+        });
+
+        let content = Content::json(merged).map_err(|e| McpError {
+            code: rmcp::model::ErrorCode(-32603),
+            message: format!("Failed to serialize merged status: {e}").into(),
+            data: None,
+        })?;
+
+        Ok(CallToolResult::success(vec![content]))
     }
 
     #[tool(description = "List all workspaces in the current session")]

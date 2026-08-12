@@ -303,29 +303,39 @@ async fn run_trim(
 /// Build the full serve stack (persistence, herdr subscriber, registry, HTTP
 /// bridge) and spawn its background tasks. Does NOT block — the spawned tasks
 /// live on the Tokio runtime until it shuts down. Returns the shared
-/// `AgentRegistry` + `Persistence` so callers can build a stdio server against
+/// `AgentRegistry` + `Persistence` + `HerdrClient` so callers can build a stdio server against
 /// the exact same registry the HTTP bridge uses. Shared by both `serve` and
 /// `dashboard`: the former awaits the MCP/HTTP server afterwards, the latter
 /// runs the TUI on the main task against the same registry.
-async fn serve_core(config: &Config) -> Result<(AgentRegistry, std::sync::Arc<Persistence>)> {
+async fn serve_core(
+    config: &Config,
+) -> Result<(
+    AgentRegistry,
+    std::sync::Arc<Persistence>,
+    std::sync::Arc<HerdrClient>,
+)> {
     let data_dir = config.data_dir.clone();
     let persistence = Persistence::new(data_dir.clone());
     persistence.init().await?;
     let persistence = std::sync::Arc::new(persistence);
 
-    let herdr_client = build_herdr_client(&data_dir, config.herdr.socket_path.clone());
+    let herdr_client = build_herdr_client(
+        &data_dir,
+        config.herdr.socket_path.clone(),
+        config.herdr.reconnect_attempts,
+        config.herdr.reconnect_backoff_ms,
+    );
     herdr_client.spawn_subscriber();
     let registry = herdr_client.registry.clone();
 
     // Periodic trim-badge refresh so savings badges survive server restarts.
-    spawn_trim_poller(std::sync::Arc::new(HerdrMcpServer::with_config(
-        (*persistence).clone(),
-        registry.clone(),
-        config,
-    )));
+    let trim_server = HerdrMcpServer::with_config((*persistence).clone(), registry.clone(), config)
+        .with_herdr_client(herdr_client.clone());
+    spawn_trim_poller(std::sync::Arc::new(trim_server));
 
     if let Some(port) = config.http.port {
-        let server = HerdrMcpServer::with_config((*persistence).clone(), registry.clone(), config);
+        let server = HerdrMcpServer::with_config((*persistence).clone(), registry.clone(), config)
+            .with_herdr_client(herdr_client.clone());
         tokio::spawn(async move {
             if let Err(e) = start_http(server, port).await {
                 tracing::error!("HTTP server failed: {e}");
@@ -365,12 +375,12 @@ async fn serve_core(config: &Config) -> Result<(AgentRegistry, std::sync::Arc<Pe
         tracing::info!("Proxy listener auto-started on {bind_for_log}:{proxy_port}");
     }
 
-    Ok((registry, persistence))
+    Ok((registry, persistence, herdr_client))
 }
 
 /// `serve` — full MCP server (stdio + optional HTTP).
 async fn run_serve(config: &Config) -> Result<()> {
-    let (registry, persistence) = serve_core(config).await?;
+    let (registry, persistence, herdr_client) = serve_core(config).await?;
 
     if config.http.http_only {
         tracing::info!("HTTP-only mode — waiting for shutdown signal");
@@ -380,7 +390,8 @@ async fn run_serve(config: &Config) -> Result<()> {
     }
 
     tracing::info!("Starting herdr-mcp MCP server");
-    let server = HerdrMcpServer::with_config((*persistence).clone(), registry, config);
+    let server = HerdrMcpServer::with_config((*persistence).clone(), registry, config)
+        .with_herdr_client(herdr_client);
     let service = server.serve(stdio()).await?;
     tracing::info!("herdr-mcp server initialized, waiting for requests");
     service.waiting().await?;
@@ -399,20 +410,22 @@ async fn run_serve_headless(config: &Config) -> Result<()> {
 fn build_herdr_client(
     data_dir: &std::path::Path,
     herdr_socket: Option<std::path::PathBuf>,
+    reconnect_attempts: u32,
+    reconnect_backoff_ms: u64,
 ) -> std::sync::Arc<HerdrClient> {
-    let socket_path = match herdr_socket {
-        Some(p) => p,
-        None => {
-            let from_env = std::env::var("HERDR_SOCKET_PATH")
-                .ok()
-                .map(std::path::PathBuf::from);
-            from_env.unwrap_or_else(|| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                std::path::PathBuf::from(home).join(".config/herdr/herdr.sock")
-            })
-        }
-    };
+    // The socket path is already resolved by Config::herdr_socket_path() which
+    // includes env override (HERDR_SOCKET_PATH) and HERDR_SESSION fallback.
+    // No need to re-check env here.
+    let socket_path = herdr_socket.unwrap_or_else(|| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+        std::path::PathBuf::from(home).join(".config/herdr/herdr.sock")
+    });
     let persistence = Persistence::new(data_dir.to_path_buf());
-    let client = HerdrClient::new(std::sync::Arc::new(persistence), socket_path);
+    let client = HerdrClient::new(
+        std::sync::Arc::new(persistence),
+        socket_path,
+        reconnect_attempts,
+        reconnect_backoff_ms,
+    );
     std::sync::Arc::new(client)
 }

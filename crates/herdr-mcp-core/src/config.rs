@@ -516,8 +516,25 @@ impl Config {
     }
 
     /// Get the resolved herdr socket path
+    ///
+    /// Precedence (mirrors herdr's `active_api_socket_path()` in `src/session.rs`):
+    /// 1. Explicit `Config.herdr.socket_path` (from config file / env / CLI)
+    /// 2. `HERDR_SESSION` env var → `~/.config/herdr/sessions/<name>/herdr.sock`
+    ///    (only for named sessions; `default` is skipped)
+    /// 3. Default: `~/.config/herdr/herdr.sock`
     pub fn herdr_socket_path(&self) -> PathBuf {
         self.herdr.socket_path.clone().unwrap_or_else(|| {
+            // Named session (herdr session attach <name>) → sessions/<name>/herdr.sock
+            if let Ok(session) = env::var("HERDR_SESSION")
+                && !session.is_empty()
+                && session != "default"
+            {
+                let home = env::var("HOME").unwrap_or_else(|_| ".".into());
+                return PathBuf::from(home)
+                    .join(".config/herdr/sessions")
+                    .join(session)
+                    .join("herdr.sock");
+            }
             let home = env::var("HOME").unwrap_or_else(|_| ".".into());
             PathBuf::from(home).join(".config/herdr/herdr.sock")
         })
@@ -684,6 +701,13 @@ pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Env vars are process-global; serialize tests that touch them.
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    fn env_lock() -> &'static Mutex<()> {
+        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_default_config_validates() {
@@ -715,6 +739,54 @@ mod tests {
         let config = Config::default();
         let socket = config.herdr_socket_path();
         assert!(socket.ends_with(".config/herdr/herdr.sock"));
+    }
+
+    #[test]
+    fn test_herdr_socket_path_named_session() {
+        let _g = env_lock().lock().unwrap();
+        let saved = std::env::var("HERDR_SESSION").ok();
+        unsafe {
+            std::env::set_var("HERDR_SESSION", "work");
+        }
+        let config = Config::default();
+        let socket = config.herdr_socket_path();
+        assert!(
+            socket
+                .to_string_lossy()
+                .ends_with(".config/herdr/sessions/work/herdr.sock")
+        );
+        match saved {
+            Some(v) => unsafe {
+                std::env::set_var("HERDR_SESSION", v);
+            },
+            None => unsafe {
+                std::env::remove_var("HERDR_SESSION");
+            },
+        }
+    }
+
+    #[test]
+    fn test_herdr_socket_path_named_session_default_is_skipped() {
+        let _g = env_lock().lock().unwrap();
+        let saved = std::env::var("HERDR_SESSION").ok();
+        unsafe {
+            std::env::set_var("HERDR_SESSION", "default");
+        }
+        let config = Config::default();
+        let socket = config.herdr_socket_path();
+        assert!(
+            socket
+                .to_string_lossy()
+                .ends_with(".config/herdr/herdr.sock")
+        );
+        match saved {
+            Some(v) => unsafe {
+                std::env::set_var("HERDR_SESSION", v);
+            },
+            None => unsafe {
+                std::env::remove_var("HERDR_SESSION");
+            },
+        }
     }
 
     #[test]

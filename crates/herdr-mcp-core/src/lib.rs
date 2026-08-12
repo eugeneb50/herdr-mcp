@@ -1,6 +1,7 @@
 pub mod config;
 pub mod error;
 pub mod keybindings;
+pub mod session_context;
 
 // Selective re-exports — no glob `use config::*`
 pub use config::{
@@ -9,3 +10,4 @@ pub use config::{
 };
 pub use error::{Context, Result, bail};
 pub use keybindings::{KeyCombo, Keybindings, parse_keybinding};
+pub use session_context::inside_herdr;

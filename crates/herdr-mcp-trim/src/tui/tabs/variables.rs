@@ -9,7 +9,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::tui::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
+use crate::tui::theme::{
+    accent_style, dim_style, focused_panel_block, panel_block, selected_style,
+};
 use crate::tui::{App, EditField, truncate};
 
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {

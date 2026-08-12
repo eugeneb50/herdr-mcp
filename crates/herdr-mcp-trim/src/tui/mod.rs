@@ -993,7 +993,8 @@ impl App {
             let full = ta.lines().join("\n");
             return Some(textarea_selection_or_full(ta, full));
         }
-        self.focused_field_text().or_else(|| self.focused_copyable_text())
+        self.focused_field_text()
+            .or_else(|| self.focused_copyable_text())
     }
 
     /// Resolve the copy target for any tab/frame based on what the user
@@ -1012,12 +1013,11 @@ impl App {
             Tab::Trim if self.trim.focused_frame == 2 => {
                 self.trim.stages.get(self.trim.stage_index).cloned()
             }
-            Tab::Variables if !self.variables_state.editing => {
-                self.variables_state
-                    .entries
-                    .get(self.variables_state.selected)
-                    .map(|(k, v)| format!("{k} = {v}"))
-            }
+            Tab::Variables if !self.variables_state.editing => self
+                .variables_state
+                .entries
+                .get(self.variables_state.selected)
+                .map(|(k, v)| format!("{k} = {v}")),
             Tab::Settings if self.settings.focused_frame == 0 => {
                 let row = self.settings.selected;
                 match row {
@@ -1027,13 +1027,13 @@ impl App {
                     _ => None,
                 }
             }
-            Tab::Settings if self.settings.focused_frame == 1
-                && self.settings.clipboard.field_focus == 1 =>
+            Tab::Settings
+                if self.settings.focused_frame == 1 && self.settings.clipboard.field_focus == 1 =>
             {
                 Some(self.settings.clipboard.copy_cmd.clone())
             }
-            Tab::Settings if self.settings.focused_frame == 1
-                && self.settings.clipboard.field_focus == 2 =>
+            Tab::Settings
+                if self.settings.focused_frame == 1 && self.settings.clipboard.field_focus == 2 =>
             {
                 Some(self.settings.clipboard.paste_cmd.clone())
             }
