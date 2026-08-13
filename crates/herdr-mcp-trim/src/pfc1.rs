@@ -483,15 +483,21 @@ pub fn parse_header(text: &str) -> Option<(CompressionKey, String)> {
     let after_key = &text[key_start + "KEY:".len()..];
 
     let mut key = CompressionKey::new();
-    let mut body_start = after_key.len();
-    let scanning_keys = true;
-    for line in after_key.lines() {
+    let mut body_start = 0usize;
+    let mut found_separator = false;
+    let mut line_idx = 0;
+
+    for (idx, line) in after_key.lines().enumerate() {
         let trimmed = line.trim();
-        if !scanning_keys {
-            break;
-        }
         if trimmed == "---" {
-            body_start = line_as_ptr_offset(after_key, line);
+            // Calculate body start: sum lengths of all previous lines + newlines
+            body_start = after_key
+                .lines()
+                .take(idx)
+                .map(|l| l.len() + 1) // +1 for the newline character
+                .sum();
+            found_separator = true;
+            line_idx = idx;
             break;
         }
         if trimmed.is_empty() {
@@ -499,7 +505,12 @@ pub fn parse_header(text: &str) -> Option<(CompressionKey, String)> {
         }
         if !trimmed.contains('=') {
             // First non-key line: it and everything after is the body.
-            body_start = line_as_ptr_offset(after_key, line);
+            body_start = after_key
+                .lines()
+                .take(idx)
+                .map(|l| l.len() + 1)
+                .sum();
+            line_idx = idx;
             break;
         }
         if let Some((sym, term)) = trimmed.split_once('=')
@@ -510,17 +521,19 @@ pub fn parse_header(text: &str) -> Option<(CompressionKey, String)> {
         }
     }
 
-    let body = after_key[body_start..]
-        .trim_start_matches("---\n")
-        .trim_start_matches("---\r\n")
-        .trim_start()
-        .to_string();
+    // Extract body, skipping the "---" separator line if found
+    let body = if found_separator {
+        // Skip past the separator line
+        let separator_offset = after_key
+            .lines()
+            .take(line_idx + 1)
+            .map(|l| l.len() + 1)
+            .sum();
+        after_key[separator_offset..].trim_start().to_string()
+    } else {
+        after_key[body_start..].trim_start().to_string()
+    };
     Some((key, body))
-}
-
-/// Byte offset of `line` (a sub-slice of `haystack` from `.lines()`) within `haystack`.
-fn line_as_ptr_offset(haystack: &str, line: &str) -> usize {
-    line.as_ptr() as usize - haystack.as_ptr() as usize
 }
 
 /// Compute stats for an original/compressed pair plus the key used.

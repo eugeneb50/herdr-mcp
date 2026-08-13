@@ -58,6 +58,17 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
             Ok(true)
         }
         KeyCode::Char('e') if mods.contains(KeyModifiers::CONTROL) => {
+            // Don't allow editing auto-stored variables (they're regenerated on each run)
+            let (k, _) = app
+                .variables_state
+                .entries
+                .get(app.variables_state.selected)
+                .cloned()
+                .unwrap_or_default();
+            if is_auto_stored_key(&k) {
+                app.status_msg = "auto-stored variables cannot be edited".into();
+                return Ok(true);
+            }
             let (k, v) = app
                 .variables_state
                 .entries
@@ -85,6 +96,11 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
                 .cloned()
                 && let Some(http) = app.http.clone()
             {
+                // Can only delete user-created variables, not auto-stored ones
+                if is_auto_stored_key(&k) {
+                    app.status_msg = "auto-stored variables are regenerated on each run".into();
+                    return Ok(true);
+                }
                 if let Err(e) = http.delete_variable(&k).await {
                     app.status_msg = format!("delete failed: {e}");
                 } else {
@@ -96,6 +112,13 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
         }
         _ => Ok(false),
     }
+}
+
+/// Check if a variable key indicates it was auto-stored from a tool result.
+fn is_auto_stored_key(key: &str) -> bool {
+    key.starts_with("_") || 
+    key.starts_with("pane_") || 
+    key.contains("[")
 }
 
 async fn handle_edit(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
@@ -179,7 +202,21 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    render_list(frame, body, app);
+    // Legend for variable types
+    let legend = Paragraph::new(Line::from(vec![
+        Span::styled("⟐ ", muted_style()),
+        Span::styled("auto-stored from tool results   ", dim_style()),
+        Span::styled("▸ ", muted_style()),
+        Span::styled("user-created", dim_style()),
+    ]));
+    frame.render_widget(legend, Rect::new(area.x, area.y + 1, area.width, 1));
+
+    render_list(frame, Rect::new(
+        area.x,
+        area.y + 2,
+        area.width,
+        area.height.saturating_sub(2),
+    ), app);
 }
 
 fn render_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
@@ -204,15 +241,37 @@ fn render_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         .take(inner.height as usize)
         .enumerate()
         .map(|(i, (k, v))| {
+            let is_auto = is_auto_stored_key(k);
             let style = if i == app.variables_state.selected {
                 selected_style()
             } else {
                 Style::default()
             };
+            let marker = if is_auto {
+                "⟐ " // Diamond marker for auto-stored variables
+            } else {
+                "▸ "
+            };
+            let key_display = if is_auto {
+                format!("{:>18} ", truncate(k, 18))
+            } else {
+                format!("{:>20} = ", truncate(k, 20))
+            };
+            let value_display = if is_auto {
+                truncate(v, 40)
+            } else {
+                truncate(v, 50)
+            };
             ListItem::new(Line::from(vec![
-                Span::styled("▸ ", accent_style()),
-                Span::styled(format!("{:>20} = ", truncate(k, 20)), dim_style()),
-                Span::styled(truncate(v, 50), Style::default()),
+                Span::styled(marker, accent_style()),
+                Span::styled(key_display, if is_auto { dim_style() } else { dim_style() }),
+                Span::styled(value_display, Style::default()),
+                // Auto-stored indicator
+                if is_auto {
+                    Span::styled(" [auto]", muted_style())
+                } else {
+                    Span::styled("", Style::default())
+                },
             ]))
             .style(style)
         })

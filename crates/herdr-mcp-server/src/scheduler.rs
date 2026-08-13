@@ -24,6 +24,8 @@ struct SchedulerInner {
     executor: tokio::sync::RwLock<Option<ExecutorFn>>,
     schedules: DashMap<Uuid, ActiveSchedule>,
     handles: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Track in-flight executions to prevent concurrent runs of the same recipe.
+    in_flight: DashMap<Uuid, ()>,
 }
 
 #[derive(Clone)]
@@ -42,8 +44,39 @@ impl Scheduler {
                 executor: tokio::sync::RwLock::new(None),
                 schedules: DashMap::new(),
                 handles: tokio::sync::Mutex::new(Vec::new()),
+                in_flight: DashMap::new(),
             }),
         }
+    }
+
+    /// Load persisted schedules from disk and re-spawn their runners.
+    /// This ensures schedules survive server restarts.
+    pub async fn load_existing(&self) -> anyhow::Result<()> {
+        let schedules = self.inner.persistence.list_schedules().await?;
+        for schedule in schedules {
+            if schedule.enabled {
+                let cron = Schedule::from_str(&schedule.cron_schedule)
+                    .map_err(|e| anyhow::anyhow!("invalid cron in persisted schedule: {e}"))?;
+                let next_run = cron
+                    .upcoming(Utc)
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("cron never fires"))?;
+                let active = ActiveSchedule {
+                    recipe_id: schedule.recipe_id,
+                    cron,
+                    next_run,
+                    enabled: schedule.enabled,
+                };
+                self.inner
+                    .schedules
+                    .insert(schedule.id, active.clone());
+                let handle = self.spawn_runner(schedule.id, active);
+                let mut handles = self.inner.handles.lock().await;
+                handles.retain(|h| !h.is_finished());
+                handles.push(handle);
+            }
+        }
+        Ok(())
     }
 
     pub async fn schedule_one(&self, s: ScheduledRecipe) -> anyhow::Result<()> {
@@ -84,9 +117,27 @@ impl Scheduler {
                     tokio::time::sleep(dur).await;
                 }
 
+                // Check if this recipe is already running — skip to next scheduled time
+                if inner.in_flight.contains_key(&active.recipe_id) {
+                    tracing::debug!(
+                        recipe_id = %active.recipe_id,
+                        "scheduled recipe already running, skipping this tick"
+                    );
+                    // Compute next run and continue without executing
+                    active.next_run = match active.cron.upcoming(Utc).next() {
+                        Some(t) => t,
+                        None => break,
+                    };
+                    inner.schedules.insert(id, active.clone());
+                    continue;
+                }
+
                 // Trigger the executor if available
                 let exec = inner.executor.read().await.clone();
                 if let Some(exec_fn) = exec {
+                    // Mark as in-flight before executing
+                    inner.in_flight.insert(active.recipe_id, ());
+
                     let (tx, rx) = tokio::sync::oneshot::channel();
                     let exec_fn = Arc::clone(&exec_fn);
                     let recipe_id = active.recipe_id;
@@ -113,6 +164,9 @@ impl Scheduler {
                         let _ = tx.send(());
                     });
                     let _ = rx.await;
+
+                    // Remove from in-flight after execution completes
+                    inner.in_flight.remove(&recipe_id);
                 } else {
                     tracing::warn!("no executor available for scheduled recipe");
                 }
@@ -253,5 +307,32 @@ mod tests {
         let p = Persistence::new(tmp.path().to_path_buf());
         let sched = Scheduler::new(std::sync::Arc::new(p));
         assert!(!sched.set_enabled(Uuid::new_v4(), false).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_load_existing_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let sched = Scheduler::new(std::sync::Arc::new(p));
+        // Should not error when there are no schedules
+        sched.load_existing().await.unwrap();
+        assert!(sched.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_existing_loads_persisted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        // First save a schedule
+        let sched1 = Scheduler::new(std::sync::Arc::new(p.clone()));
+        let s = scheduled();
+        sched1.schedule_one(s.clone()).await.unwrap();
+
+        // Create a new scheduler and load existing
+        let sched2 = Scheduler::new(std::sync::Arc::new(p));
+        sched2.load_existing().await.unwrap();
+        let list = sched2.list().await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, s.id);
     }
 }

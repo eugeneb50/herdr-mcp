@@ -257,12 +257,11 @@ fn substitute_template_vars(
     vars: &HashMap<String, serde_json::Value>,
 ) {
     use regex::Regex;
-    lazy_static::lazy_static! {
-        static ref RE: Regex = Regex::new(r"\{\{\s*([\w.]+)\s*\}\}").unwrap();
-    }
+    static TEMPLATE_VAR_RE: once_cell::sync::Lazy<Regex> =
+        once_cell::sync::Lazy::new(|| Regex::new(r"\{\{\s*([\w.]+)\s*\}\}").unwrap());
     match value {
         serde_json::Value::String(s) => {
-            *s = RE
+            *s = TEMPLATE_VAR_RE
                 .replace_all(s, |caps: &regex::Captures| {
                     let key = &caps[1];
                     match vars.get(key) {
