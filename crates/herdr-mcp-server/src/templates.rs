@@ -203,6 +203,179 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 },
             ],
         },
+        RecipeTemplate {
+            id: "a2a-pane-inventory".to_string(),
+            name: "A2A Pane Inventory".to_string(),
+            description: "List panes + registry agents and store labels/ids as session variables (panes.snapshot, agents.snapshot)".to_string(),
+            category: "a2a".to_string(),
+            variables: vec![
+                TemplateVariable {
+                    name: "workspace_id".to_string(),
+                    description: "Workspace filter for agent_list (empty = all)".to_string(),
+                    default_value: Some(serde_json::json!("")),
+                    required: false,
+                },
+                TemplateVariable {
+                    name: "session_id".to_string(),
+                    description: "Session scope for stored snapshot variables".to_string(),
+                    default_value: Some(serde_json::json!("w1")),
+                    required: true,
+                },
+            ],
+            steps: vec![
+                RecipeStep {
+                    id: "panes".to_string(),
+                    tool: "list_panes".to_string(),
+                    params: serde_json::json!({}),
+                    description: Some("List panes (ids + labels)".to_string()),
+                },
+                RecipeStep {
+                    id: "agents".to_string(),
+                    tool: "agent_list".to_string(),
+                    params: serde_json::json!({
+                        "workspace_id": "{{ template.workspace_id }}"
+                    }),
+                    description: Some("List registry agents".to_string()),
+                },
+                RecipeStep {
+                    id: "store_panes".to_string(),
+                    tool: "var_set".to_string(),
+                    params: serde_json::json!({
+                        "session_id": "{{ template.session_id }}",
+                        "key": "panes.snapshot",
+                        "value": "{{ panes.result }}"
+                    }),
+                    description: Some("Store pane labels/ids".to_string()),
+                },
+                RecipeStep {
+                    id: "store_agents".to_string(),
+                    tool: "var_set".to_string(),
+                    params: serde_json::json!({
+                        "session_id": "{{ template.session_id }}",
+                        "key": "agents.snapshot",
+                        "value": "{{ agents.result }}"
+                    }),
+                    description: Some("Store agent labels/ids".to_string()),
+                },
+            ],
+        },
+        RecipeTemplate {
+            id: "a2a-ping".to_string(),
+            name: "A2A Ping".to_string(),
+            description: "Send a message to one agent and read its output back".to_string(),
+            category: "a2a".to_string(),
+            variables: vec![
+                TemplateVariable {
+                    name: "target".to_string(),
+                    description: "Target agent role or pane id".to_string(),
+                    default_value: None,
+                    required: true,
+                },
+                TemplateVariable {
+                    name: "message".to_string(),
+                    description: "Text to send".to_string(),
+                    default_value: Some(serde_json::json!("ping from recipe")),
+                    required: false,
+                },
+            ],
+            steps: vec![
+                RecipeStep {
+                    id: "send".to_string(),
+                    tool: "agent_message".to_string(),
+                    params: serde_json::json!({
+                        "target": "{{ template.target }}",
+                        "text": "{{ template.message }}"
+                    }),
+                    description: Some("Message the agent".to_string()),
+                },
+                RecipeStep {
+                    id: "read".to_string(),
+                    tool: "agent_read".to_string(),
+                    params: serde_json::json!({
+                        "target": "{{ template.target }}"
+                    }),
+                    description: Some("Read its output".to_string()),
+                },
+            ],
+        },
+        RecipeTemplate {
+            id: "a2a-fanout-collect".to_string(),
+            name: "A2A Fanout Collect".to_string(),
+            description: "Message two agents, read both outputs, store the pair as a session variable".to_string(),
+            category: "a2a".to_string(),
+            variables: vec![
+                TemplateVariable {
+                    name: "session_id".to_string(),
+                    description: "Session scope for the collected variable".to_string(),
+                    default_value: Some(serde_json::json!("w1")),
+                    required: true,
+                },
+                TemplateVariable {
+                    name: "target_a".to_string(),
+                    description: "First agent role or pane id".to_string(),
+                    default_value: None,
+                    required: true,
+                },
+                TemplateVariable {
+                    name: "target_b".to_string(),
+                    description: "Second agent role or pane id".to_string(),
+                    default_value: None,
+                    required: true,
+                },
+                TemplateVariable {
+                    name: "message".to_string(),
+                    description: "Text to send to both".to_string(),
+                    default_value: Some(serde_json::json!("task from recipe")),
+                    required: false,
+                },
+            ],
+            steps: vec![
+                RecipeStep {
+                    id: "send_a".to_string(),
+                    tool: "agent_message".to_string(),
+                    params: serde_json::json!({
+                        "target": "{{ template.target_a }}",
+                        "text": "{{ template.message }}"
+                    }),
+                    description: Some("Message agent A".to_string()),
+                },
+                RecipeStep {
+                    id: "send_b".to_string(),
+                    tool: "agent_message".to_string(),
+                    params: serde_json::json!({
+                        "target": "{{ template.target_b }}",
+                        "text": "{{ template.message }}"
+                    }),
+                    description: Some("Message agent B".to_string()),
+                },
+                RecipeStep {
+                    id: "read_a".to_string(),
+                    tool: "agent_read".to_string(),
+                    params: serde_json::json!({
+                        "target": "{{ template.target_a }}"
+                    }),
+                    description: Some("Read agent A output".to_string()),
+                },
+                RecipeStep {
+                    id: "read_b".to_string(),
+                    tool: "agent_read".to_string(),
+                    params: serde_json::json!({
+                        "target": "{{ template.target_b }}"
+                    }),
+                    description: Some("Read agent B output".to_string()),
+                },
+                RecipeStep {
+                    id: "collect".to_string(),
+                    tool: "var_set".to_string(),
+                    params: serde_json::json!({
+                        "session_id": "{{ template.session_id }}",
+                        "key": "a2a.collected",
+                        "value": "{{ read_a.result }}"
+                    }),
+                    description: Some("Store collected output".to_string()),
+                },
+            ],
+        },
     ]
 }
 
@@ -305,6 +478,9 @@ mod tests {
         assert!(find_template("build-and-test").is_some());
         assert!(find_template("restart-agent").is_some());
         assert!(find_template("health-check").is_some());
+        assert!(find_template("a2a-pane-inventory").is_some());
+        assert!(find_template("a2a-ping").is_some());
+        assert!(find_template("a2a-fanout-collect").is_some());
     }
 
     #[test]
@@ -403,5 +579,54 @@ mod tests {
     #[test]
     fn test_instantiate_unknown_returns_none() {
         assert!(instantiate("nope", HashMap::new(), None).is_none());
+    }
+
+    #[test]
+    fn test_instantiate_a2a_pane_inventory() {
+        let mut vars = HashMap::new();
+        vars.insert("session_id".to_string(), serde_json::json!("w1"));
+        let recipe = instantiate("a2a-pane-inventory", vars, None).expect("should instantiate");
+        assert!(recipe.steps.iter().any(|s| s.tool == "list_panes"));
+        assert!(recipe.steps.iter().any(|s| s.tool == "agent_list"));
+        assert!(recipe.steps.iter().any(|s| s.tool == "var_set"));
+        // Template vars are substituted; runtime step refs ({{ panes.result }}) remain.
+        assert!(
+            !recipe
+                .steps
+                .iter()
+                .any(|s| s.params.to_string().contains("{{ template."))
+        );
+        assert!(
+            recipe
+                .steps
+                .iter()
+                .any(|s| s.params.to_string().contains("{{ panes.result }}"))
+        );
+    }
+
+    #[test]
+    fn test_instantiate_a2a_ping() {
+        let mut vars = HashMap::new();
+        vars.insert("target".to_string(), serde_json::json!("agentA"));
+        let recipe = instantiate("a2a-ping", vars, None).expect("should instantiate");
+        let send = recipe
+            .steps
+            .iter()
+            .find(|s| s.tool == "agent_message")
+            .unwrap();
+        assert!(send.params.to_string().contains("agentA"));
+        assert!(send.params.to_string().contains("ping from recipe"));
+    }
+
+    #[test]
+    fn test_instantiate_a2a_fanout_collect() {
+        let mut vars = HashMap::new();
+        vars.insert("target_a".to_string(), serde_json::json!("agentA"));
+        vars.insert("target_b".to_string(), serde_json::json!("agentB"));
+        vars.insert("session_id".to_string(), serde_json::json!("w1"));
+        let recipe = instantiate("a2a-fanout-collect", vars, None).expect("should instantiate");
+        assert_eq!(recipe.steps.len(), 5);
+        assert!(recipe.steps.iter().any(|s| s.tool == "agent_read"));
+        assert!(recipe.steps.iter().any(|s| s.tool == "var_set"));
     }
 }

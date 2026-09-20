@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { listVariables, saveVariable, deleteVariable, clearVariables } from "../api/variables";
+import { listVariables, saveVariable, deleteVariable, clearVariables, listAutoVariables } from "../api/variables";
 
 type Vars = Record<string, string>;
 
@@ -10,6 +10,8 @@ type Ctx = {
   autoVars: Vars;
   setUserVar: (name: string, value: string) => Promise<void>;
   setUserVars: (vars: Vars) => Promise<void>;
+  setAutoVars: (vars: Vars) => void;
+  refreshAutoVars: (workspaceId?: string) => Promise<void>;
   removeUserVar: (name: string) => Promise<void>;
   clearUserVars: () => Promise<void>;
   clearAutoVars: () => void; // no-op, kept for compatibility
@@ -38,8 +40,27 @@ export function VariableProvider({ children }: { children: ReactNode }) {
       } catch {
         setUserVarsState({});
       }
+      try {
+        const auto = await listAutoVariables();
+        setAutoVarsState(auto);
+      } catch {
+        setAutoVarsState({});
+      }
     }
     load();
+  }, []);
+
+  const setAutoVars = useCallback((vars: Vars) => {
+    setAutoVarsState((prev) => ({ ...prev, ...vars }));
+  }, []);
+
+  const refreshAutoVars = useCallback(async (workspaceId?: string) => {
+    try {
+      const auto = await listAutoVariables(workspaceId);
+      setAutoVarsState(auto);
+    } catch {
+      // keep existing auto vars on failure
+    }
   }, []);
 
   const setUserVar = useCallback(async (name: string, value: string) => {
@@ -99,6 +120,8 @@ export function VariableProvider({ children }: { children: ReactNode }) {
       autoVars,
       setUserVar,
       setUserVars,
+      setAutoVars,
+      refreshAutoVars,
       removeUserVar,
       clearUserVars,
       clearAutoVars,
@@ -114,6 +137,8 @@ export function VariableProvider({ children }: { children: ReactNode }) {
       autoVars,
       setUserVar,
       setUserVars,
+      setAutoVars,
+      refreshAutoVars,
       removeUserVar,
       clearUserVars,
       clearAutoVars,

@@ -285,6 +285,56 @@ impl HttpClient {
         Ok(v)
     }
 
+    /// `GET /api/variables/auto?workspace_id=` — pane variables resolved
+    /// on demand from the server `AgentRegistry` + persisted `SessionVars`.
+    pub async fn list_auto_vars(&self, workspace_id: Option<&str>) -> Result<Value> {
+        let url = match workspace_id.filter(|s| !s.is_empty()) {
+            Some(ws) => format!("{}/api/variables/auto?workspace_id={ws}", self.base),
+            None => format!("{}/api/variables/auto", self.base),
+        };
+        let v = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .json::<Value>()
+            .await
+            .with_context(|| format!("parsing {url} body"))?;
+        Ok(v)
+    }
+
+    /// `GET /api/playground?workspace_id=` — last-used playground values.
+    pub async fn get_playground(&self, workspace_id: &str) -> Result<Value> {
+        let url = format!("{}/api/playground?workspace_id={workspace_id}", self.base);
+        let v = self
+            .inner
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?
+            .json::<Value>()
+            .await
+            .with_context(|| format!("parsing {url} body"))?;
+        Ok(v)
+    }
+
+    /// `POST /api/playground` — persist last-used playground values.
+    pub async fn save_playground(&self, body: Value) -> Result<Value> {
+        let url = format!("{}/api/playground", self.base);
+        let v = self
+            .inner
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .context("POST /api/playground")?
+            .json::<Value>()
+            .await
+            .context("parsing /api/playground body")?;
+        Ok(v)
+    }
+
     /// Save a variable (key + value).
     pub async fn save_variable(&self, body: Value) -> Result<Value> {
         let url = format!("{}/api/variables", self.base);

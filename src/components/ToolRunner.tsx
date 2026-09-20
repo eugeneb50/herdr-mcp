@@ -3,6 +3,7 @@ import { DynamicForm } from "./DynamicForm";
 import { ResponseViewer } from "./ResponseViewer";
 import { VariablePanel } from "./VariablePanel";
 import { useVariables } from "./VariableStore";
+import { getPlayground, savePlayground } from "../api/variables";
 
 type ToolInfo = {
   name: string;
@@ -12,13 +13,19 @@ type ToolInfo = {
 
 export function ToolRunner() {
   const [tools, setTools] = useState<ToolInfo[]>([]);
-  const [selected, setSelected] = useState<string>("");
+  const [selected, setSelected] = useState<string>(() => {
+    try {
+      return localStorage.getItem("herdr-mcp.playground.tool") ?? "";
+    } catch {
+      return "";
+    }
+  });
   const [params, setParams] = useState<Record<string, unknown>>({});
   const [response, setResponse] = useState<unknown>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [showVars, setShowVars] = useState(false);
-  const { substitute, varNames } = useVariables();
+  const { substitute, varNames, refreshAutoVars } = useVariables();
 
   useEffect(() => {
     (async () => {
@@ -26,7 +33,23 @@ export function ToolRunner() {
         const res = await fetch("/api/tools");
         const data = await res.json();
         setTools(data.tools ?? []);
-        if (data.tools?.length > 0) setSelected(data.tools[0].name);
+        const names: string[] = (data.tools ?? []).map((t: ToolInfo) => t.name);
+        // Restore last-used tool: localStorage first, server snapshot fallback.
+        let initial = "";
+        try {
+          initial = localStorage.getItem("herdr-mcp.playground.tool") ?? "";
+        } catch {
+          initial = "";
+        }
+        if (!initial || !names.includes(initial)) {
+          const snap = await getPlayground("default");
+          if (snap?.tool_name && names.includes(snap.tool_name)) {
+            initial = snap.tool_name;
+          } else {
+            initial = names[0] ?? "";
+          }
+        }
+        if (initial) setSelected(initial);
       } catch {
         setError("Cannot connect to server. Start with --http <port>.");
       }
@@ -37,11 +60,36 @@ export function ToolRunner() {
   const schema = currentTool?.inputSchema ?? {};
   const properties = (schema as Record<string, unknown>).properties as Record<string, unknown> | undefined;
 
+  // Restore per-tool params when the selected tool changes; last-used values
+  // persist in localStorage so tab navigation never loses context.
   useEffect(() => {
-    setParams({});
+    if (!selected) return;
+    try {
+      localStorage.setItem("herdr-mcp.playground.tool", selected);
+    } catch {
+      // ignore storage failures
+    }
+    let restored: Record<string, unknown> = {};
+    try {
+      const raw = localStorage.getItem(`herdr-mcp.playground.params.${selected}`);
+      if (raw) restored = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      restored = {};
+    }
+    setParams(restored);
     setResponse(null);
     setError(null);
   }, [selected]);
+
+  // Persist params per tool on every change.
+  useEffect(() => {
+    if (!selected) return;
+    try {
+      localStorage.setItem(`herdr-mcp.playground.params.${selected}`, JSON.stringify(params));
+    } catch {
+      // ignore storage failures
+    }
+  }, [selected, params]);
 
   const run = useCallback(async () => {
     if (!selected) return;
@@ -69,14 +117,34 @@ export function ToolRunner() {
         setError(data.error ?? `HTTP ${res.status}`);
       } else {
         setResponse(data);
-        // Variable extraction is now handled server-side
+        // Server persists pane variables on list_panes; refresh auto vars so
+        // the Variables panel populates without a page reload.
+        if (selected === "list_panes") {
+          const ws =
+            typeof resolved["workspace_id"] === "string"
+              ? (resolved["workspace_id"] as string)
+              : undefined;
+          await refreshAutoVars(ws);
+        }
+        // Persist last-used values server-side for cross-session restore.
+        const fieldValues: Record<string, string> = {};
+        for (const [k, v] of Object.entries(params)) {
+          fieldValues[k] = typeof v === "string" ? v : JSON.stringify(v);
+        }
+        await savePlayground({
+          workspace_id: "default",
+          tool_name: selected,
+          field_values: fieldValues,
+          builder_recipe_name: "",
+          builder_steps: [],
+        });
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Request failed");
     } finally {
       setLoading(false);
     }
-  }, [selected, params, substitute]);
+  }, [selected, params, substitute, refreshAutoVars]);
 
   const previewParams = useMemo(() => {
     const resolved: Record<string, unknown> = {};

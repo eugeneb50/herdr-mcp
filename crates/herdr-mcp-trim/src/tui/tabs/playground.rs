@@ -1183,6 +1183,8 @@ async fn run_tool(app: &mut App) {
             app.status_msg = format!("{name} failed");
         }
     }
+    // Persist last-used values so tab navigation + restarts restore context.
+    app.persist_playground().await;
 }
 
 pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {

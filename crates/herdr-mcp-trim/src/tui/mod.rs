@@ -294,6 +294,9 @@ pub struct App {
     pub context_menu: ContextMenu,
     /// True when state has changed and a redraw is needed. Reset after draw.
     pub dirty: bool,
+    /// Whether playground last-used values were restored from the server this
+    /// session. In-memory marker created here — never persisted.
+    pub playground_restored: bool,
 }
 
 /// Playground tab state (tool runner + recipe builder).
@@ -332,9 +335,12 @@ pub struct PlaygroundState {
     pub fields: Vec<ToolField>,            // parsed schema for current tool
     pub field_values: Vec<String>,         // current values aligned to `fields`
     pub field_focus: usize,                // focused field index
-    pub fields_for_index: Option<usize>,   // tool_index the fields were parsed for
-    pub edit_area: TextArea<'static>,      // live editor for the focused field
-    pub result_area: TextArea<'static>,    // selectable view of the last result
+    /// Tool name the fields were parsed for. Keyed by name (not index) so a
+    /// tools-list reorder on refresh never attaches the wrong schema.
+    /// Derived materialization from the canonical tools payload — not stored.
+    pub fields_for_tool: Option<String>,
+    pub edit_area: TextArea<'static>, // live editor for the focused field
+    pub result_area: TextArea<'static>, // selectable view of the last result
     /// Which frame has keyboard focus (0=tool list, 1=fields, 2=result).
     pub focused_frame: usize,
     pub result: Option<Value>,
@@ -566,7 +572,7 @@ impl App {
                 fields: Vec::new(),
                 field_values: Vec::new(),
                 field_focus: 0,
-                fields_for_index: None,
+                fields_for_tool: None,
                 edit_area: TextArea::default(),
                 result_area: TextArea::default(),
                 focused_frame: 0,
@@ -671,6 +677,7 @@ impl App {
                 index: 0,
             },
             dirty: true,
+            playground_restored: false,
         }
         .tap_debug()
     }
@@ -736,6 +743,11 @@ impl App {
             if let Ok(v) = http.list_recipes().await {
                 self.recipes = Some(v);
             }
+            // Restore last-used playground values once per session so tab
+            // navigation and restarts keep the user's context.
+            if !self.playground_restored {
+                self.restore_playground().await;
+            }
             if !ok {
                 self.bridge_connected = false;
             }
@@ -762,16 +774,35 @@ impl App {
     }
 
     /// Re-parse the schema of the currently selected tool if needed.
+    /// Keyed by tool name (not positional index) so list reorders never
+    /// attach the wrong schema (B4). Preserves `field_values` when the same
+    /// tool stays selected; resets to defaults on tool switch.
     pub fn sync_tool_fields(&mut self) {
-        if self.playground.fields_for_index == Some(self.playground.tool_index) {
+        let current_name = self
+            .playground
+            .tools_list
+            .get(self.playground.tool_index)
+            .map(|(n, _)| n.clone());
+        if self.playground.fields_for_tool == current_name {
             return;
         }
         let tool = self
             .tools
             .as_ref()
             .and_then(|v| v.get("tools"))
-            .and_then(|t| t.get(self.playground.tool_index))
-            .cloned();
+            .and_then(|t| {
+                // Prefer name match; fall back to positional index.
+                if let Some(ref name) = current_name {
+                    t.as_array().and_then(|arr| {
+                        arr.iter()
+                            .find(|item| item.get("name").and_then(|n| n.as_str()) == Some(name))
+                            .cloned()
+                    })
+                } else {
+                    None
+                }
+                .or_else(|| t.get(self.playground.tool_index).cloned())
+            });
         if let Some(tool) = tool {
             let fields = parse_tool_schema(&tool);
             let values = fields
@@ -782,8 +813,94 @@ impl App {
             self.playground.field_values = values;
             self.playground.field_focus = 0;
             self.playground.editing_field = false;
-            self.playground.fields_for_index = Some(self.playground.tool_index);
+            self.playground.fields_for_tool = current_name;
         }
+    }
+
+    /// Workspace key for playground persistence. Resolves from the live herdr
+    /// context on demand — never stored (SOT: herdr workspace list).
+    pub fn playground_workspace(&self) -> String {
+        self.herdr
+            .workspace
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "default".to_string())
+    }
+
+    /// Restore last-used playground values from `GET /api/playground`.
+    /// Canonical store is the server `data/sessions/{ws}.playground.json`.
+    async fn restore_playground(&mut self) {
+        let Some(http) = self.http.clone() else {
+            return;
+        };
+        let ws = self.playground_workspace();
+        let Ok(v) = http.get_playground(&ws).await else {
+            self.playground_restored = true;
+            return;
+        };
+        // Tool selection by name so index drift can't mis-select.
+        if let Some(name) = v.get("tool_name").and_then(|n| n.as_str())
+            && let Some(idx) = self
+                .playground
+                .tools_list
+                .iter()
+                .position(|(n, _)| n == name)
+        {
+            self.playground.tool_index = idx;
+        }
+        // Field values are keyed by field name on the server; map back onto
+        // the current schema order. Falls back to positional `field_values`
+        // array for older snapshots.
+        if let Some(map) = v.get("field_values").and_then(|m| m.as_object()) {
+            self.sync_tool_fields();
+            for (i, f) in self.playground.fields.iter().enumerate() {
+                if let Some(val) = map.get(&f.name).and_then(|x| x.as_str())
+                    && let Some(slot) = self.playground.field_values.get_mut(i)
+                {
+                    *slot = val.to_string();
+                }
+            }
+            self.playground.fields_for_tool = self
+                .playground
+                .tools_list
+                .get(self.playground.tool_index)
+                .map(|(n, _)| n.clone());
+        }
+        if let Some(name) = v.get("builder_recipe_name").and_then(|n| n.as_str()) {
+            self.playground.builder_recipe_name = name.to_string();
+        }
+        self.playground_restored = true;
+        self.dirty = true;
+    }
+
+    /// Persist current playground values to `POST /api/playground`.
+    /// Best-effort — never blocks the UI on failure.
+    pub async fn persist_playground(&self) {
+        let Some(http) = self.http.clone() else {
+            return;
+        };
+        let tool_name = self
+            .playground
+            .tools_list
+            .get(self.playground.tool_index)
+            .map(|(n, _)| n.clone());
+        let mut field_map = serde_json::Map::new();
+        for (f, val) in self
+            .playground
+            .fields
+            .iter()
+            .zip(self.playground.field_values.iter())
+        {
+            field_map.insert(f.name.clone(), serde_json::Value::String(val.clone()));
+        }
+        let body = serde_json::json!({
+            "workspace_id": self.playground_workspace(),
+            "tool_name": tool_name,
+            "field_values": field_map,
+            "builder_recipe_name": self.playground.builder_recipe_name,
+            "builder_steps": [],
+        });
+        let _ = http.save_playground(body).await;
     }
 
     /// Resolve current herdr workspace/pane context.

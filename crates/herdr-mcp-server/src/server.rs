@@ -899,7 +899,35 @@ impl HerdrMcpServer {
         if let Some(ref wid) = workspace_id {
             args.extend(["--workspace", wid]);
         }
-        run_herdr_json(&args).await
+        let result = run_herdr_json(&args).await?;
+        // Populate pane variables for the playground: merge the result into the
+        // canonical SessionVars store so `{{panes.snapshot}}` and flattened
+        // `{{panes.*}}` resolve in later recipe steps / Variables tab.
+        // Source of truth is SessionVars at `data/sessions/{ws}.json` — this
+        // writes to the canonical store, never a duplicate cache.
+        let ws = workspace_id
+            .clone()
+            .filter(|s| !s.trim().is_empty() && !s.contains("{{"))
+            .unwrap_or_else(|| "default".to_string());
+        let json = serde_json::to_value(&result).unwrap_or_default();
+        let mut extracted = crate::variables::extract_variables(&json);
+        // Also expose the full payload under a stable key for the UI.
+        extracted.insert("panes.snapshot".to_string(), json.clone());
+        if !extracted.is_empty() {
+            let mut bag = self.persistence.load_session_vars(&ws).await.unwrap_or(
+                crate::persistence::SessionVars {
+                    session_id: ws.clone(),
+                    variables: std::collections::HashMap::new(),
+                    updated_at: chrono::Utc::now(),
+                },
+            );
+            bag.variables.extend(extracted);
+            bag.updated_at = chrono::Utc::now();
+            if let Err(e) = self.persistence.save_session_vars(&bag).await {
+                tracing::debug!("list_panes: failed to persist pane vars for {ws}: {e}");
+            }
+        }
+        Ok(result)
     }
 
     #[tool(description = "List all detected agents in the session")]
@@ -1469,6 +1497,15 @@ impl HerdrMcpServer {
             value,
         }): Parameters<VarSetParams>,
     ) -> Result<CallToolResult, McpError> {
+        // Guard against unresolved `{{ template.session_id }}` literals leaking
+        // into the session store as a filename (B3). Canonical session ids are
+        // herdr workspace ids; fall back to "w1" (template default).
+        let session_id = if session_id.trim().is_empty() || session_id.contains("{{") {
+            tracing::debug!("var_set: sanitized session_id {session_id:?} -> w1");
+            "w1".to_string()
+        } else {
+            session_id
+        };
         let mut vars = self
             .persistence
             .load_session_vars(&session_id)
@@ -2824,6 +2861,11 @@ fn http_router(server: HerdrMcpServer) -> Router {
             "/api/variables",
             get(list_variables_handler).post(save_variable_handler),
         )
+        .route("/api/variables/auto", get(auto_variables_handler))
+        .route(
+            "/api/playground",
+            get(get_playground_handler).post(save_playground_handler),
+        )
         .route(
             "/api/variables/{key}",
             get(get_variable_handler).delete(delete_variable_handler),
@@ -3419,11 +3461,27 @@ async fn execute_recipe(
     let mut results = HashMap::new();
     let mut accumulated = HashMap::new();
 
+    // Resolve `{{ template.session_id }}` / `{{ template.workspace_id }}` in
+    // ad-hoc runs the same way saved runs do. Without this, inline builder runs
+    // leave the literal behind and `var_set` writes
+    // `data/sessions/{{ template.session_id }}.json` (B3).
+    let effective_ws = session_id
+        .filter(|s| !s.trim().is_empty() && !s.contains("{{"))
+        .unwrap_or("w1");
+    accumulated.insert(
+        "template.session_id".to_string(),
+        serde_json::json!(effective_ws),
+    );
+    accumulated.insert(
+        "template.workspace_id".to_string(),
+        serde_json::json!(effective_ws),
+    );
+
     // Seed agent handles (pane_id/role -> output) for the session workspace.
-    if let Some(ws) = session_id {
-        for (key, value) in server.registry.seed(ws).await {
-            accumulated.insert(key, value);
-        }
+    // Always seed with the effective workspace so ad-hoc runs without an
+    // explicit session still resolve pane variables.
+    for (key, value) in server.registry.seed(effective_ws).await {
+        accumulated.insert(key, value);
     }
 
     let execution_id = uuid::Uuid::new_v4();
@@ -3464,6 +3522,9 @@ async fn execute_recipe(
                     }),
                 );
 
+                // Ad-hoc (unsaved) recipe run: nil recipe_id signals "no saved
+                // recipe". Saved runs via run_recipe_by_id_handler persist the
+                // real id instead.
                 let execution = ExecutionResult {
                     id: execution_id,
                     recipe_id: uuid::Uuid::nil(),
@@ -3743,6 +3804,46 @@ async fn run_recipe_by_id_handler(
 
     let mut results = HashMap::new();
     let mut accumulated = recipe.variables.clone();
+    // Seed `{{pane_id.output}}` / `{{role.output}}` from the live registry.
+    // Workspace hint comes from saved variables when present; otherwise fall
+    // back to the global snapshot so role-based A2A interpolation still works.
+    {
+        let mut workspaces: Vec<String> = accumulated
+            .get("session_id")
+            .or_else(|| accumulated.get("workspace_id"))
+            .and_then(|v| v.as_str())
+            .map(|s| vec![s.to_string()])
+            .unwrap_or_default();
+        // Also honor `template.*` workspace hints from instantiated templates.
+        for key in ["template.session_id", "template.workspace_id"] {
+            if let Some(ws) = accumulated.get(key).and_then(|v| v.as_str())
+                && !ws.is_empty()
+                && !workspaces.contains(&ws.to_string())
+            {
+                workspaces.push(ws.to_string());
+            }
+        }
+        for ws in &workspaces {
+            accumulated.extend(server.registry.seed(ws).await);
+        }
+        for handle in server.registry.inner_snapshot().await {
+            let obj = serde_json::json!({
+                "pane_id": handle.pane_id,
+                "workspace_id": handle.workspace_id,
+                "tab_id": handle.tab_id,
+                "agent": handle.agent,
+                "role": handle.role,
+                "status": handle.status,
+                "output": handle.output,
+            });
+            accumulated
+                .entry(handle.pane_id.clone())
+                .or_insert(obj.clone());
+            if !handle.role.is_empty() {
+                accumulated.entry(handle.role.clone()).or_insert(obj);
+            }
+        }
+    }
     let mut status = ExecutionStatus::Running;
     let mut error_msg: Option<String> = None;
 
@@ -3756,6 +3857,17 @@ async fn run_recipe_by_id_handler(
                 let extracted = crate::variables::extract_variables(&json_result);
                 accumulated.extend(extracted.clone());
                 accumulated.insert(step.id.clone(), json_result.clone());
+                // Expose agent handles under pane_id + role like execute_recipe.
+                if let Some(obj) = json_result.as_object()
+                    && let Some(pane_id) = obj.get("pane_id").and_then(|v| v.as_str())
+                {
+                    accumulated.insert(pane_id.to_string(), json_result.clone());
+                    if let Some(role) = obj.get("role").and_then(|v| v.as_str())
+                        && !role.is_empty()
+                    {
+                        accumulated.insert(role.to_string(), json_result.clone());
+                    }
+                }
                 results.insert(step.id.clone(), json_result);
             }
             Err((code, msg)) => {
@@ -4161,6 +4273,23 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
 
 // ── Variables API ──────────────────────────────────────────────────────
 
+/// Flexible save body: the playground sends `{key, value}` while MCP clients
+/// may send a full `VariableStore`. Workspace scoping for herdr (`w1`, …)
+/// lives in `SessionVars` via `var_set`; `VariableStore.session_id` stays
+/// `Option<Uuid>` and is only populated when the caller passes a real UUID.
+#[derive(Debug, Deserialize)]
+struct SaveVariableRequest {
+    key: String,
+    #[serde(default)]
+    value: serde_json::Value,
+    #[serde(default)]
+    id: Option<uuid::Uuid>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    execution_id: Option<String>,
+}
+
 async fn list_variables_handler(
     State(AppState { server, .. }): State<AppState>,
 ) -> Result<Json<Vec<crate::persistence::VariableStore>>, (StatusCode, String)> {
@@ -4172,13 +4301,95 @@ async fn list_variables_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
-async fn save_variable_handler(
+/// `GET /api/variables/auto?workspace_id=w1` — on-demand materialized view of
+/// pane variables resolved from the live `AgentRegistry` (single source of
+/// truth) merged with persisted `SessionVars` for the workspace. Never stored;
+/// clients (web VariableStore, TUI) resolve it on call.
+async fn auto_variables_handler(
     State(AppState { server, .. }): State<AppState>,
-    Json(req): Json<crate::persistence::VariableStore>,
+    Query(params): Query<TrimStatusParams>,
+) -> Json<serde_json::Value> {
+    let ws = params
+        .workspace_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "w1".to_string());
+    let mut merged = server.registry.seed(&ws).await;
+    // Merge persisted session vars so `panes.snapshot` from `list_panes`
+    // shows up alongside live registry handles.
+    if let Ok(bag) = server.persistence.load_session_vars(&ws).await {
+        merged.extend(bag.variables);
+    }
+    // Include global snapshot handles as fallback so role-based lookup works.
+    for handle in server.registry.inner_snapshot().await {
+        let obj = serde_json::json!({
+            "pane_id": handle.pane_id,
+            "workspace_id": handle.workspace_id,
+            "tab_id": handle.tab_id,
+            "agent": handle.agent,
+            "role": handle.role,
+            "status": handle.status,
+            "output": handle.output,
+        });
+        merged.entry(handle.pane_id.clone()).or_insert(obj.clone());
+        if !handle.role.is_empty() {
+            merged.entry(handle.role.clone()).or_insert(obj);
+        }
+    }
+    Json(serde_json::json!({ "workspace_id": ws, "variables": merged }))
+}
+
+/// `GET /api/playground?workspace_id=w1` — load last-used playground values.
+/// Canonical store is `data/sessions/{ws}.playground.json` via `Persistence`.
+async fn get_playground_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Query(params): Query<TrimStatusParams>,
+) -> Result<Json<crate::persistence::PlaygroundSnapshot>, (StatusCode, String)> {
+    let ws = params
+        .workspace_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    server
+        .persistence
+        .load_playground(&ws)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// `POST /api/playground` — save last-used playground values.
+async fn save_playground_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Json(snapshot): Json<crate::persistence::PlaygroundSnapshot>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     server
         .persistence
-        .save_variable(&req)
+        .save_playground(&snapshot)
+        .await
+        .map(|()| StatusCode::CREATED)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+async fn save_variable_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Json(req): Json<SaveVariableRequest>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    if req.key.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "key must not be empty".into()));
+    }
+    let now = chrono::Utc::now();
+    let parse_uuid = |s: Option<String>| s.as_deref().and_then(|v| uuid::Uuid::parse_str(v).ok());
+    let var = crate::persistence::VariableStore {
+        id: req.id.unwrap_or_else(uuid::Uuid::new_v4),
+        session_id: parse_uuid(req.session_id),
+        execution_id: parse_uuid(req.execution_id),
+        key: req.key,
+        value: req.value,
+        created_at: now,
+        updated_at: now,
+    };
+    server
+        .persistence
+        .save_variable(&var)
         .await
         .map(|()| StatusCode::CREATED)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
@@ -4201,10 +4412,16 @@ async fn get_variable_handler(
 }
 
 async fn delete_variable_handler(
-    State(_state): State<AppState>,
-    Path(_key): Path<String>,
+    State(AppState { server, .. }): State<AppState>,
+    Path(key): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    Ok(StatusCode::NO_CONTENT)
+    server
+        .persistence
+        .delete_variable(&key)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .then_some(StatusCode::NO_CONTENT)
+        .ok_or((StatusCode::NOT_FOUND, "Variable not found".into()))
 }
 
 // ── Executions API ────────────────────────────────────────────────────

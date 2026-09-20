@@ -7,9 +7,25 @@ import type { RecipeDef } from "../recipes";
 type Tab = "runner" | "builder";
 
 export function Playground() {
-  const [tab, setTab] = useState<Tab>("runner");
+  const [tab, setTab] = useState<Tab>(() => {
+    try {
+      const saved = localStorage.getItem("herdr-mcp.playground.tab");
+      return saved === "builder" ? "builder" : "runner";
+    } catch {
+      return "runner";
+    }
+  });
   const [currentRecipe, setCurrentRecipe] = useState<RecipeDef | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
+
+  const switchTab = (next: Tab) => {
+    setTab(next);
+    try {
+      localStorage.setItem("herdr-mcp.playground.tab", next);
+    } catch {
+      // ignore storage failures
+    }
+  };
 
   return (
     <div className="w-full px-6 py-12">
@@ -26,7 +42,7 @@ export function Playground() {
 
       <div className="flex gap-1 mb-8 border-b border-neutral-800/60">
         <button
-          onClick={() => setTab("runner")}
+          onClick={() => switchTab("runner")}
           className={`px-4 py-2.5 text-sm font-mono transition-colors border-b-2 -mb-[1px] ${
             tab === "runner"
               ? "border-emerald-400 text-neutral-100"
@@ -36,7 +52,7 @@ export function Playground() {
           Tool Runner
         </button>
         <button
-          onClick={() => setTab("builder")}
+          onClick={() => switchTab("builder")}
           className={`px-4 py-2.5 text-sm font-mono transition-colors border-b-2 -mb-[1px] ${
             tab === "builder"
               ? "border-emerald-400 text-neutral-100"
@@ -47,17 +63,21 @@ export function Playground() {
         </button>
       </div>
 
-      {tab === "runner" && <ToolRunner />}
-      {tab === "builder" && (
-        <div className="grid lg:grid-cols-[280px_1fr] gap-6">
-          <RecipeLibrary onSelect={(r) => setCurrentRecipe(r)} refreshKey={refreshKey} />
-          <RecipeBuilder
-            key={currentRecipe?.name ?? "new"}
-            initialRecipe={currentRecipe}
-            onSaved={() => setRefreshKey((k) => k + 1)}
-          />
-        </div>
-      )}
+      {/* Keep both tabs mounted so last-used values survive tab switches. */}
+      <div style={{ display: tab === "runner" ? undefined : "none" }}>
+        <ToolRunner />
+      </div>
+      <div
+        className="grid lg:grid-cols-[280px_1fr] gap-6"
+        style={{ display: tab === "builder" ? undefined : "none" }}
+      >
+        <RecipeLibrary onSelect={(r) => setCurrentRecipe(r)} refreshKey={refreshKey} />
+        <RecipeBuilder
+          key={currentRecipe?.name ?? "new"}
+          initialRecipe={currentRecipe}
+          onSaved={() => setRefreshKey((k) => k + 1)}
+        />
+      </div>
     </div>
   );
 }

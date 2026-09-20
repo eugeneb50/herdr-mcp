@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::variables::{ExecutionResult, Recipe, ScheduledRecipe};
+use crate::variables::{ExecutionResult, Recipe, RecipeStep, ScheduledRecipe};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariableStore {
@@ -26,6 +26,20 @@ pub struct VariableStore {
 pub struct SessionVars {
     pub session_id: String,
     pub variables: std::collections::HashMap<String, serde_json::Value>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Playground last-used UI state (tool selection + field values + builder).
+/// Source of truth: created here — `data/sessions/{ws}.playground.json`.
+/// This is the canonical store for "last used values persist between sessions".
+/// TUI and web resolve it on demand via `GET /api/playground`; never cached.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PlaygroundSnapshot {
+    pub workspace_id: String,
+    pub tool_name: Option<String>,
+    pub field_values: std::collections::HashMap<String, String>,
+    pub builder_recipe_name: String,
+    pub builder_steps: Vec<RecipeStep>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -70,6 +84,9 @@ impl Persistence {
             return Ok(None);
         }
         let content = fs::read_to_string(path).await?;
+        if content.trim().is_empty() {
+            return Ok(None);
+        }
         let recipe: Recipe = serde_json::from_str(&content)?;
         Ok(Some(recipe))
     }
@@ -78,11 +95,19 @@ impl Persistence {
         let recipes_dir = self.data_dir.join("recipes");
         let mut recipes = Vec::new();
 
+        if !tokio::fs::try_exists(&recipes_dir).await.unwrap_or(false) {
+            return Ok(recipes);
+        }
         let mut entries = fs::read_dir(recipes_dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             if entry.path().extension().is_some_and(|ext| ext == "json") {
                 let content = fs::read_to_string(entry.path()).await?;
-                let recipe: Recipe = serde_json::from_str(&content)?;
+                if content.trim().is_empty() {
+                    continue;
+                }
+                let Ok(recipe) = serde_json::from_str::<Recipe>(&content) else {
+                    continue;
+                };
                 if let Some(template_only) = is_template
                     && recipe.is_template != template_only
                 {
@@ -115,6 +140,19 @@ impl Persistence {
         Ok(())
     }
 
+    pub async fn delete_variable(&self, key: &str) -> anyhow::Result<bool> {
+        let path = self
+            .data_dir
+            .join("variables")
+            .join(format!("{}.json", key));
+        if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            fs::remove_file(path).await?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub async fn load_variables(
         &self,
         session_id: Option<Uuid>,
@@ -129,7 +167,12 @@ impl Persistence {
         while let Some(entry) = entries.next_entry().await? {
             if entry.path().extension().is_some_and(|ext| ext == "json") {
                 let content = fs::read_to_string(entry.path()).await?;
-                let var: VariableStore = serde_json::from_str(&content)?;
+                if content.trim().is_empty() {
+                    continue;
+                }
+                let Ok(var) = serde_json::from_str::<VariableStore>(&content) else {
+                    continue;
+                };
                 if session_id.is_none_or(|sid| var.session_id == Some(sid))
                     && execution_id.is_none_or(|eid| var.execution_id == Some(eid))
                 {
@@ -184,6 +227,63 @@ impl Persistence {
         Ok(())
     }
 
+    fn playground_path(&self, workspace_id: &str) -> PathBuf {
+        let safe: String = workspace_id
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let safe = if safe.is_empty() {
+            "default".into()
+        } else {
+            safe
+        };
+        self.data_dir
+            .join("sessions")
+            .join(format!("{safe}.playground.json"))
+    }
+
+    pub async fn save_playground(&self, snapshot: &PlaygroundSnapshot) -> anyhow::Result<()> {
+        fs::create_dir_all(self.data_dir.join("sessions")).await?;
+        let mut snapshot = snapshot.clone();
+        snapshot.updated_at = chrono::Utc::now();
+        let path = self.playground_path(&snapshot.workspace_id);
+        fs::write(path, serde_json::to_string_pretty(&snapshot)?).await?;
+        Ok(())
+    }
+
+    pub async fn load_playground(&self, workspace_id: &str) -> anyhow::Result<PlaygroundSnapshot> {
+        let ws = if workspace_id.trim().is_empty() || workspace_id.contains("{{") {
+            "default".to_string()
+        } else {
+            workspace_id.to_string()
+        };
+        let path = self.playground_path(&ws);
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(PlaygroundSnapshot {
+                workspace_id: ws,
+                updated_at: chrono::Utc::now(),
+                ..Default::default()
+            });
+        }
+        let content = fs::read_to_string(path).await?;
+        if content.trim().is_empty() {
+            return Ok(PlaygroundSnapshot {
+                workspace_id: ws,
+                updated_at: chrono::Utc::now(),
+                ..Default::default()
+            });
+        }
+        let mut snapshot: PlaygroundSnapshot = serde_json::from_str(&content)?;
+        snapshot.workspace_id = ws;
+        Ok(snapshot)
+    }
+
     pub async fn save_execution(&self, result: &ExecutionResult) -> anyhow::Result<()> {
         let path = self
             .data_dir
@@ -204,6 +304,9 @@ impl Persistence {
             return Ok(None);
         }
         let content = fs::read_to_string(path).await?;
+        if content.trim().is_empty() {
+            return Ok(None);
+        }
         let result: ExecutionResult = serde_json::from_str(&content)?;
         Ok(Some(result))
     }
@@ -439,5 +542,113 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = Persistence::new(tmp.path().to_path_buf());
         assert!(p.load_recipe(&Uuid::new_v4()).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_delete_variable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let var = VariableStore {
+            id: Uuid::new_v4(),
+            session_id: None,
+            execution_id: None,
+            key: "delkey".into(),
+            value: serde_json::json!("v"),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        p.save_variable(&var).await.unwrap();
+        assert!(p.delete_variable("delkey").await.unwrap());
+        assert!(!p.delete_variable("delkey").await.unwrap());
+        assert!(
+            p.load_variables(None, None)
+                .await
+                .unwrap()
+                .iter()
+                .all(|v| v.key != "delkey")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_variables_skips_empty_and_corrupt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        tokio::fs::create_dir_all(tmp.path().join("variables"))
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("variables").join("empty.json"), "")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            tmp.path().join("variables").join("corrupt.json"),
+            "{not json",
+        )
+        .await
+        .unwrap();
+        let loaded = p.load_variables(None, None).await.unwrap();
+        assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_recipes_missing_dir_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().join("nonexistent"));
+        assert!(p.list_recipes(None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_save_load_playground_state_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let mut field_values = HashMap::new();
+        field_values.insert("workspace_id".into(), "w1".into());
+        let snapshot = PlaygroundSnapshot {
+            workspace_id: "w1".into(),
+            tool_name: Some("list_panes".into()),
+            field_values,
+            builder_recipe_name: "my recipe".into(),
+            builder_steps: vec![RecipeStep {
+                id: "s1".into(),
+                tool: "list_panes".into(),
+                params: serde_json::json!({}),
+                description: None,
+            }],
+            updated_at: chrono::Utc::now(),
+        };
+        p.save_playground(&snapshot).await.unwrap();
+        let loaded = p.load_playground("w1").await.unwrap();
+        assert_eq!(loaded.workspace_id, "w1");
+        assert_eq!(loaded.tool_name.as_deref(), Some("list_panes"));
+        assert_eq!(
+            loaded.field_values.get("workspace_id"),
+            Some(&"w1".to_string())
+        );
+        assert_eq!(loaded.builder_recipe_name, "my recipe");
+        assert_eq!(loaded.builder_steps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_load_playground_state_default_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let loaded = p.load_playground("missing").await.unwrap();
+        assert_eq!(loaded.workspace_id, "missing");
+        assert!(loaded.tool_name.is_none());
+        assert!(loaded.field_values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_playground_state_isolated_per_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let mut a = PlaygroundSnapshot {
+            workspace_id: "w1".into(),
+            updated_at: chrono::Utc::now(),
+            ..Default::default()
+        };
+        a.tool_name = Some("list_panes".into());
+        p.save_playground(&a).await.unwrap();
+        let b = p.load_playground("w2").await.unwrap();
+        assert!(b.tool_name.is_none());
     }
 }
