@@ -673,6 +673,19 @@ impl HerdrMcpServer {
         let data_dir = persistence.data_dir().to_path_buf();
         let persistence = std::sync::Arc::new(persistence);
         let scheduler = Scheduler::new(persistence.clone());
+        // Load persisted schedules so they survive server restarts. Deferred
+        // to a background task: constructors stay sync (used in non-runtime
+        // test contexts), and startup never blocks on disk I/O.
+        {
+            let loader = scheduler.clone();
+            if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::spawn(async move {
+                    if let Err(e) = loader.load_existing().await {
+                        tracing::warn!("failed to load existing schedules: {e}");
+                    }
+                });
+            }
+        }
         Self {
             persistence,
             scheduler,
@@ -2426,6 +2439,24 @@ fn to_mcp_err(e: impl std::fmt::Display) -> McpError {
     }
 }
 
+/// Escape a string for safe use in a shell command.
+/// Uses single-quote escaping which is safe for all characters except single quotes.
+fn shell_escape(s: &str) -> String {
+    let mut escaped = String::with_capacity(s.len() + 2);
+    escaped.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            // Can't escape single quotes inside single quotes; end quote,
+            // add escaped quote, restart quote
+            escaped.push_str("'\''");
+        } else {
+            escaped.push(c);
+        }
+    }
+    escaped.push('\'');
+    escaped
+}
+
 /// Recursively find a string value for `key` anywhere in a JSON tree.
 fn extract_string(value: &serde_json::Value, key: &str) -> Option<String> {
     match value {
@@ -2878,7 +2909,22 @@ fn http_router(server: HerdrMcpServer) -> Router {
             "/api/trim/dashboard/open",
             post(trim_dashboard_open_http_handler),
         )
-        .layer(CorsLayer::permissive())
+        .layer(
+            CorsLayer::new()
+                .allow_origin(axum::http::HeaderValue::from_str("http://localhost:5173").unwrap())
+                .allow_origin(axum::http::HeaderValue::from_str("http://localhost:7676").unwrap())
+                .allow_methods(vec![
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::PUT,
+                    axum::http::Method::DELETE,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers(vec![
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::AUTHORIZATION,
+                ]),
+        )
         .fallback(index_html_handler)
         .with_state(state)
 }
@@ -2901,14 +2947,14 @@ async fn health_handler() -> &'static str {
 async fn config_handler(
     State(AppState { server, .. }): State<AppState>,
 ) -> Json<serde_json::Value> {
+    // Return the runtime configuration available to the server
     Json(serde_json::json!({
-        "http_port": std::env::var("HERDR_MCP_HTTP_PORT")
-            .unwrap_or_else(|_| "8080".into()),
-        "data_dir": server.data_dir,
+        "data_dir": server.data_dir.display().to_string(),
         "herdr_socket": std::env::var("HERDR_SOCKET_PATH")
-            .unwrap_or_default(),
+            .unwrap_or_else(|_| "~/.config/herdr/herdr.sock".into()),
         "herdr_bin": std::env::var("HERDR_BIN")
             .unwrap_or_else(|_| "herdr".into()),
+        "clipboard": server.clipboard,
     }))
 }
 
@@ -3578,8 +3624,9 @@ async fn run_recipe_handler(
 fn resolve_variables(value: &mut serde_json::Value, results: &HashMap<String, serde_json::Value>) {
     match value {
         serde_json::Value::String(s) => {
-            let re = Regex::new(r"\{\{([^}]+)\}\}").expect("regex pattern is valid");
-            *s = re
+            static VARIABLE_RE: std::sync::LazyLock<Regex> =
+                std::sync::LazyLock::new(|| Regex::new(r"\{\{([^}]+)\}\}").unwrap());
+            *s = VARIABLE_RE
                 .replace_all(s, |caps: &regex::Captures| {
                     let path = caps[1].trim();
                     match resolve_json_path(results, path) {
@@ -3949,7 +3996,7 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
             && !s.is_empty()
         {
             args.push(format!("--{key}"));
-            args.push(s.clone());
+            args.push(shell_escape(s));
         }
     };
 
@@ -4151,7 +4198,7 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
                 .get("text")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<text>");
-            format!("herdr pane send-text {pid} {text:?}")
+            format!("herdr pane send-text {pid} {text}")
         }
         "send_keys" => {
             let pid = params
@@ -4163,7 +4210,7 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
                 for k in keys {
                     if let serde_json::Value::String(s) = k {
                         cmd.push(' ');
-                        cmd.push_str(s);
+                        cmd.push_str(&shell_escape(s));
                     }
                 }
             }
@@ -4178,7 +4225,7 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
                 .get("command")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<command>");
-            format!("herdr pane run {pid} {command:?}")
+            format!("herdr pane run {pid} {command}")
         }
         "send_agent" => {
             let target = params
@@ -4189,7 +4236,7 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
                 .get("text")
                 .and_then(|v| v.as_str())
                 .unwrap_or("<text>");
-            format!("herdr agent send {target} {text:?}")
+            format!("herdr agent send {target} {text}")
         }
         "wait_output" => {
             let pid = params
@@ -4200,7 +4247,7 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
                 .get("match_text")
                 .and_then(|v| v.as_str())
                 .unwrap_or(".");
-            let mut cmd = format!("herdr wait output {pid} --match {text:?}");
+            let mut cmd = format!("herdr wait output {pid} --match {text}");
             if let Some(v) = params.get("timeout_ms")
                 && let Some(n) = v.as_u64()
             {
@@ -4419,9 +4466,14 @@ async fn delete_variable_handler(
         .persistence
         .delete_variable(&key)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .then_some(StatusCode::NO_CONTENT)
-        .ok_or((StatusCode::NOT_FOUND, "Variable not found".into()))
+        .map(|deleted| {
+            if deleted {
+                StatusCode::NO_CONTENT
+            } else {
+                StatusCode::NOT_FOUND
+            }
+        })
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 // ── Executions API ────────────────────────────────────────────────────

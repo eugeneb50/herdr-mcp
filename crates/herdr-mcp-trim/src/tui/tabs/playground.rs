@@ -13,6 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use serde_json::{Map, Value};
 
+use super::variables::is_auto_stored_key;
 use crate::tui::theme::{
     accent_style, dim_style, focused_panel_block, muted_style, panel_block, selected_style,
     warn_style,
@@ -167,6 +168,91 @@ pub fn parse_tool_categories(tools: &Value) -> Vec<ToolCategory> {
 /// Auto-generate a step ID from the tool name and step index.
 fn auto_step_id(tool: &str, index: usize) -> String {
     format!("{tool}_{index}")
+}
+
+/// Validate a recipe step for common issues.
+/// Returns a list of validation errors (empty = valid).
+fn validate_recipe_step(step: &RecipeStep, all_steps: &[RecipeStep]) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    // Check for empty/missing ID
+    if step.id.is_empty() {
+        errors.push("step ID is empty".to_string());
+    }
+
+    // Check for empty tool name
+    if step.tool.is_empty() {
+        errors.push("tool name is empty".to_string());
+    }
+
+    // Check for duplicate IDs
+    if all_steps.iter().filter(|s| s.id == step.id).count() > 1 {
+        errors.push(format!("duplicate step ID '{}'", step.id));
+    }
+
+    // Check params for {{ }} variable references that might be invalid.
+    // `params` is the schema object itself (`Map`), so iterate it directly.
+    {
+        let params = &step.params;
+        for (key, value) in params {
+            if let Some(str_val) = value.as_str() {
+                // Check for malformed variable references
+                if str_val.contains("{{") && !str_val.contains("}}") {
+                    errors.push(format!("unclosed variable reference in param '{}'", key));
+                }
+                if !str_val.contains("{{") && str_val.contains("}}") {
+                    errors.push(format!("unopened variable reference in param '{}'", key));
+                }
+            }
+        }
+    }
+
+    errors
+}
+
+/// Validate the entire recipe for issues.
+/// Returns validation warnings/errors.
+fn validate_recipe(steps: &[RecipeStep]) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if steps.is_empty() {
+        warnings.push("recipe has no steps".to_string());
+        return warnings;
+    }
+
+    // Validate each step
+    static STEP_REF_RE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\{\{\s*(\w+)\.").unwrap());
+    for (i, step) in steps.iter().enumerate() {
+        let step_errors = validate_recipe_step(step, steps);
+        for err in step_errors {
+            warnings.push(format!("step {i} ({}): {}", step.tool, err));
+        }
+
+        // Check for variable references to steps that don't exist.
+        // `params` is the schema object itself (`Map`), so iterate it directly.
+        {
+            let params = &step.params;
+            for (key, value) in params {
+                if let Some(str_val) = value.as_str() {
+                    // Extract step references from {{ stepId.result.path }} patterns
+                    for cap in STEP_REF_RE.captures_iter(str_val) {
+                        let ref_step_id = &cap[1];
+                        // Check if this step ID exists
+                        let exists = steps.iter().any(|s| s.id == *ref_step_id);
+                        if !exists {
+                            warnings.push(format!(
+                                "step {i} references non-existent step '{}' in param '{}'",
+                                ref_step_id, key
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    warnings
 }
 
 /// Compute the index of the focused tool within the current picker category,
@@ -923,6 +1009,19 @@ async fn handle_builder_global(app: &mut App, code: KeyCode, mods: KeyModifiers)
             builder_run_inline(app).await;
             return Ok(true);
         }
+        KeyCode::Char('v') if mods.contains(KeyModifiers::CONTROL) => {
+            // Show validation status
+            let warnings = validate_recipe(&app.playground.builder_steps);
+            if warnings.is_empty() {
+                app.status_msg = "✓ recipe validates cleanly".into();
+                app.playground.builder_error = None;
+            } else {
+                let warning_text = warnings.join("\n");
+                app.playground.builder_error = Some(format!("Validation issues:\n{warning_text}"));
+                app.status_msg = format!("✗ {} validation issue(s)", warnings.len());
+            }
+            return Ok(true);
+        }
         KeyCode::Char('r')
             if mods.contains(KeyModifiers::CONTROL) && mods.contains(KeyModifiers::SHIFT) =>
         {
@@ -1022,6 +1121,15 @@ async fn builder_save(app: &mut App) {
         return;
     };
 
+    // Validate the recipe first
+    let warnings = validate_recipe(&app.playground.builder_steps);
+    if !warnings.is_empty() {
+        let warning_text = warnings.join("\n");
+        app.playground.builder_error = Some(format!("Validation warnings:\n{warning_text}"));
+        app.status_msg = "recipe has validation issues - save anyway?".into();
+        // Still allow saving, but surface the warnings
+    }
+
     let steps: Vec<Value> = app
         .playground
         .builder_steps
@@ -1072,6 +1180,16 @@ async fn builder_run_inline(app: &mut App) {
         app.playground.builder_error = Some("bridge not connected".into());
         return;
     };
+
+    // Validate the recipe before running
+    let warnings = validate_recipe(&app.playground.builder_steps);
+    if !warnings.is_empty() {
+        let warning_text = warnings.join("\n");
+        app.playground.builder_error =
+            Some(format!("Cannot run: validation errors:\n{warning_text}"));
+        app.status_msg = "recipe validation failed".into();
+        return;
+    }
 
     let steps: Vec<Value> = app
         .playground
@@ -1175,6 +1293,9 @@ async fn run_tool(app: &mut App) {
             app.playground.result_area =
                 crate::tui::TextArea::new(pretty.lines().map(str::to_string).collect());
             app.status_msg = format!("{name} ok");
+
+            // Auto-extract and store variables from the result
+            extract_and_store_variables(app, &name, &v).await;
         }
         Err(e) => {
             app.playground.error = Some(e.to_string());
@@ -1185,6 +1306,172 @@ async fn run_tool(app: &mut App) {
     }
     // Persist last-used values so tab navigation + restarts restore context.
     app.persist_playground().await;
+}
+
+/// Extract useful variables from a tool result and store them for later use.
+/// This enables recipes to reference pane IDs, agent info, etc. from previous steps.
+async fn extract_and_store_variables(app: &mut App, tool_name: &str, result: &Value) {
+    let Some(http) = app.http.clone() else {
+        return;
+    };
+
+    // List of tools whose results should be auto-stored as variables
+    let auto_store_tools: &[&str] = &[
+        "list_workspaces",
+        "list_tabs",
+        "list_panes",
+        "list_agents",
+        "get_pane",
+        "get_agent",
+        "status",
+        "agent_spawn",
+        "agent_read",
+    ];
+
+    if !auto_store_tools.contains(&tool_name) {
+        return;
+    }
+
+    // Extract the result content
+    let result_content = extract_result_content(result);
+
+    // Generate a variable name based on the tool and timestamp
+    let var_key = format!("_{tool_name}_result");
+
+    // Store the full result as a variable
+    let var_store = serde_json::json!({
+        "id": uuid::Uuid::new_v4(),
+        "session_id": None::<String>,
+        "execution_id": None::<String>,
+        "key": var_key.clone(),
+        "value": result_content.clone(),
+        "created_at": chrono::Utc::now(),
+        "updated_at": chrono::Utc::now(),
+    });
+
+    if let Err(e) = http.save_variable(var_store).await {
+        app.log_debug(format!("Failed to store variable {}: {}", var_key, e));
+    }
+
+    // For list_* tools, also store individual items as indexed variables
+    if let Some(arr) = result_content.as_array() {
+        for (i, item) in arr.iter().enumerate() {
+            let item_key = format!("{}_[{}]", var_key, i);
+            let item_var_store = serde_json::json!({
+                "id": uuid::Uuid::new_v4(),
+                "session_id": None::<String>,
+                "execution_id": None::<String>,
+                "key": item_key.clone(),
+                "value": item.clone(),
+                "created_at": chrono::Utc::now(),
+                "updated_at": chrono::Utc::now(),
+            });
+            if let Err(e) = http.save_variable(item_var_store).await {
+                app.log_debug(format!("Failed to store variable {}: {}", item_key, e));
+            }
+        }
+    }
+
+    // For pane/agent results, extract specific fields as named variables
+    if (tool_name == "list_panes" || tool_name == "get_pane")
+        && let Some(arr) = result_content.as_array()
+    {
+        for (i, pane) in arr.iter().enumerate() {
+            if let Some(pane_id) = pane.get("pane_id").and_then(|v| v.as_str()) {
+                let pane_var_key = format!("pane_{}_id", i);
+                let pv = serde_json::json!({
+                    "id": uuid::Uuid::new_v4(),
+                    "session_id": None::<String>,
+                    "execution_id": None::<String>,
+                    "key": pane_var_key.clone(),
+                    "value": Value::String(pane_id.to_string()),
+                    "created_at": chrono::Utc::now(),
+                    "updated_at": chrono::Utc::now(),
+                });
+                if let Err(e) = http.save_variable(pv).await {
+                    app.log_debug(format!("Failed to store {}: {}", pane_var_key, e));
+                }
+            }
+            if let Some(label) = pane.get("label").and_then(|v| v.as_str()) {
+                let label_var_key = format!("pane_{}_label", i);
+                let lv = serde_json::json!({
+                    "id": uuid::Uuid::new_v4(),
+                    "session_id": None::<String>,
+                    "execution_id": None::<String>,
+                    "key": label_var_key.clone(),
+                    "value": Value::String(label.to_string()),
+                    "created_at": chrono::Utc::now(),
+                    "updated_at": chrono::Utc::now(),
+                });
+                if let Err(e) = http.save_variable(lv).await {
+                    app.log_debug(format!("Failed to store {}: {}", label_var_key, e));
+                }
+            }
+            if let Some(status) = pane.get("agent_status").and_then(|v| v.as_str()) {
+                let status_var_key = format!("pane_{}_status", i);
+                let sv = serde_json::json!({
+                    "id": uuid::Uuid::new_v4(),
+                    "session_id": None::<String>,
+                    "execution_id": None::<String>,
+                    "key": status_var_key.clone(),
+                    "value": Value::String(status.to_string()),
+                    "created_at": chrono::Utc::now(),
+                    "updated_at": chrono::Utc::now(),
+                });
+                if let Err(e) = http.save_variable(sv).await {
+                    app.log_debug(format!("Failed to store {}: {}", status_var_key, e));
+                }
+            }
+        }
+    }
+
+    // Update the variables tab to show the new variables
+    if let Ok(v) = http.list_variables().await {
+        app.variables = Some(v.clone());
+        app.variables_state.entries = crate::tui::parse_variables(&v);
+    }
+
+    app.log_debug(format!(
+        "Extracted and stored {} variables from {}",
+        if result_content.is_array() {
+            result_content.as_array().unwrap().len()
+        } else {
+            1
+        },
+        tool_name
+    ));
+}
+
+/// Extract the useful content from a tool result for variable storage.
+/// MCP results have content array; we extract JSON from text content.
+fn extract_result_content(result: &Value) -> Value {
+    // If result has a content array with JSON, extract it
+    if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
+        for item in content {
+            if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                // Try to parse as JSON
+                if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                    return parsed;
+                }
+                // Return as string if not JSON
+                return Value::String(text.to_string());
+            }
+            // Check for JSON content type
+            if item.get("type").and_then(|t| t.as_str()) == Some("json")
+                && let Some(json) = item.get("data")
+            {
+                return json.clone();
+            }
+        }
+    }
+
+    // If result has direct JSON data (not wrapped in content)
+    if result.get("result").is_some() {
+        return result.get("result").unwrap().clone();
+    }
+
+    // Return the whole result if nothing else worked
+    result.clone()
 }
 
 pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
@@ -1488,7 +1775,7 @@ fn render_builder(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         ),
         Span::styled(format!("   {recipe_label}{edit_marker}"), accent_style()),
         Span::styled(
-            "   (Ctrl+T pick  Ctrl+L lib  Ctrl+N name  Ctrl+W save  Ctrl+R run)",
+            "   (Ctrl+T pick  Ctrl+L lib  Ctrl+N name  Ctrl+W save  Ctrl+R run  Ctrl+V validate)",
             dim_style(),
         ),
         Span::styled(loading, warn_style()),
@@ -1703,14 +1990,33 @@ fn render_step_detail(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             .map(|s| s.id.clone())
             .collect();
         lines.push(Line::from(vec![
-            Span::styled("refs: ", dim_style()),
+            Span::styled("step refs: ", dim_style()),
             Span::styled(refs.join(", "), muted_style()),
         ]));
     }
 
+    // Available stored variables (for {{ variable_name }} interpolation)
+    if !app.variables_state.entries.is_empty() {
+        lines.push(Line::from(""));
+        let var_keys: Vec<String> = app
+            .variables_state
+            .entries
+            .iter()
+            .filter(|(k, _)| !is_auto_stored_key(k) || k.starts_with("pane_")) // Show useful auto-stored vars
+            .take(10)
+            .map(|(k, _)| k.clone())
+            .collect();
+        if !var_keys.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("vars: ", dim_style()),
+                Span::styled(var_keys.join(", "), muted_style()),
+            ]));
+        }
+    }
+
     lines.push(Line::from(""));
     lines.push(Line::from(
-        "Enter edit param  ↑/↓ nav  Ctrl+D remove  Esc back",
+        "Enter edit param  ↑/↓ nav  Ctrl+D remove  Esc back  {{ var }} interpolate",
     ));
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

@@ -14,6 +14,7 @@
 
 pub mod http;
 pub mod nav;
+pub mod persistence;
 pub mod tabs;
 pub mod theme;
 

@@ -340,6 +340,23 @@ impl Persistence {
             Ok(false)
         }
     }
+
+    pub async fn list_schedules(&self) -> anyhow::Result<Vec<ScheduledRecipe>> {
+        let schedules_dir = self.data_dir.join("schedules");
+        let mut schedules = Vec::new();
+        if !tokio::fs::try_exists(&schedules_dir).await.unwrap_or(false) {
+            return Ok(schedules);
+        }
+        let mut entries = fs::read_dir(schedules_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.path().extension().is_some_and(|ext| ext == "json") {
+                let content = fs::read_to_string(entry.path()).await?;
+                let schedule: ScheduledRecipe = serde_json::from_str(&content)?;
+                schedules.push(schedule);
+            }
+        }
+        Ok(schedules)
+    }
 }
 
 #[cfg(test)]
@@ -550,23 +567,17 @@ mod tests {
         let p = Persistence::new(tmp.path().to_path_buf());
         let var = VariableStore {
             id: Uuid::new_v4(),
-            session_id: None,
-            execution_id: None,
-            key: "delkey".into(),
-            value: serde_json::json!("v"),
+            session_id: Some(Uuid::new_v4()),
+            execution_id: Some(Uuid::new_v4()),
+            key: "deleteme".into(),
+            value: serde_json::json!("test"),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
         p.save_variable(&var).await.unwrap();
-        assert!(p.delete_variable("delkey").await.unwrap());
-        assert!(!p.delete_variable("delkey").await.unwrap());
-        assert!(
-            p.load_variables(None, None)
-                .await
-                .unwrap()
-                .iter()
-                .all(|v| v.key != "delkey")
-        );
+        assert!(p.delete_variable("deleteme").await.unwrap());
+        assert!(!p.delete_variable("deleteme").await.unwrap());
+        assert!(p.load_variables(None, None).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -650,5 +661,32 @@ mod tests {
         p.save_playground(&a).await.unwrap();
         let b = p.load_playground("w2").await.unwrap();
         assert!(b.tool_name.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_schedules_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let schedules = p.list_schedules().await.unwrap();
+        assert!(schedules.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_list_schedules_after_save() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Persistence::new(tmp.path().to_path_buf());
+        let sched = ScheduledRecipe {
+            id: Uuid::new_v4(),
+            recipe_id: Uuid::new_v4(),
+            cron_schedule: "0 * * * *".into(),
+            next_run: None,
+            last_run: None,
+            enabled: true,
+            created_at: chrono::Utc::now(),
+        };
+        p.save_schedule(&sched).await.unwrap();
+        let schedules = p.list_schedules().await.unwrap();
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].cron_schedule, "0 * * * *");
     }
 }
