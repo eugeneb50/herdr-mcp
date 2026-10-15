@@ -220,7 +220,7 @@ pub struct WaitOutputParams {
     pub match_text: String,
     /// Timeout in milliseconds.
     pub timeout_ms: Option<u32>,
-    /// Source: "visible" or "recent".
+    /// Snapshot source: "visible", "recent" (default) or "recent-unwrapped".
     pub source: Option<String>,
     /// Whether to treat match_text as a regex pattern.
     pub use_regex: Option<bool>,
@@ -1210,7 +1210,8 @@ impl HerdrMcpServer {
         &self,
         Parameters(SendAgentParams { target, text }): Parameters<SendAgentParams>,
     ) -> Result<CallToolResult, McpError> {
-        run_herdr_json(&["agent", "send", &target, &text]).await
+        let args = agent_submit_args(&target, &text);
+        run_herdr_json(&as_strs(&args)).await
     }
 
     // ── Synchronize ────────────────────────────────────────────────────
@@ -1230,18 +1231,14 @@ impl HerdrMcpServer {
         }): Parameters<WaitOutputParams>,
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
-        let timeout_str = timeout_ms.map(|ms| ms.to_string());
-        let mut args = vec!["wait", "output", &pid, "--match", &match_text];
-        if let Some(ref ms) = timeout_str {
-            args.extend(["--timeout", ms]);
-        }
-        if let Some(ref src) = source {
-            args.extend(["--source", src]);
-        }
-        if use_regex.unwrap_or(false) {
-            args.push("--regex");
-        }
-        run_herdr_json(&args).await
+        let args = wait_output_args(
+            &pid,
+            &match_text,
+            use_regex.unwrap_or(false),
+            source.as_deref(),
+            timeout_ms,
+        );
+        run_herdr_json(&as_strs(&args)).await
     }
 
     #[tool(
@@ -1257,12 +1254,8 @@ impl HerdrMcpServer {
         }): Parameters<WaitPaneAgentStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
-        let timeout_str = timeout_ms.map(|ms| ms.to_string());
-        let mut args = vec!["wait", "agent-status", &pid, "--status", &status];
-        if let Some(ref ms) = timeout_str {
-            args.extend(["--timeout", ms]);
-        }
-        run_herdr_json(&args).await
+        let args = agent_wait_args(&pid, &status, timeout_ms);
+        run_herdr_json(&as_strs(&args)).await
     }
 
     #[tool(
@@ -1276,12 +1269,8 @@ impl HerdrMcpServer {
             timeout_ms,
         }): Parameters<WaitAgentStatusParams>,
     ) -> Result<CallToolResult, McpError> {
-        let timeout_str = timeout_ms.map(|ms| ms.to_string());
-        let mut args = vec!["agent", "wait", &target, "--status", &status];
-        if let Some(ref ms) = timeout_str {
-            args.extend(["--timeout", ms]);
-        }
-        run_herdr_json(&args).await
+        let args = agent_wait_args(&target, &status, timeout_ms);
+        run_herdr_json(&as_strs(&args)).await
     }
 
     // ── A2A primitives ─────────────────────────────────────────────────
@@ -1405,7 +1394,8 @@ impl HerdrMcpServer {
         let wire = self
             .apply_outbound_trim(&pane, &text, compress.as_ref())
             .await;
-        run_herdr_json(&["agent", "send", &pane, &wire]).await
+        let args = agent_submit_args(&pane, &wire);
+        run_herdr_json(&as_strs(&args)).await
     }
 
     #[tool(
@@ -2512,6 +2502,52 @@ fn extract_string(value: &serde_json::Value, key: &str) -> Option<String> {
 /// Find the `pane_id` field anywhere in a herdr JSON response.
 fn extract_pane_id(value: &serde_json::Value) -> Option<String> {
     extract_string(value, "pane_id")
+}
+
+// ── herdr 0.9 argv builders ─────────────────────────────────────────────
+// Pure, so the exact command lines are pinned by tests.
+
+fn as_strs(args: &[String]) -> Vec<&str> {
+    args.iter().map(String::as_str).collect()
+}
+
+/// Submit `text` (+ Enter) to an agent: `agent prompt` (0.9 has no `agent send`).
+fn agent_submit_args(target: &str, text: &str) -> Vec<String> {
+    ["agent", "prompt", target, text].map(String::from).to_vec()
+}
+
+/// `agent wait <target> --until <status> [--timeout ms]` (0.9: `--until`,
+/// not `--status`; also takes pane ids, replacing `wait agent-status`).
+fn agent_wait_args(target: &str, status: &str, timeout_ms: Option<u32>) -> Vec<String> {
+    let mut args: Vec<String> = ["agent", "wait", target, "--until", status]
+        .map(String::from)
+        .to_vec();
+    if let Some(ms) = timeout_ms {
+        args.extend(["--timeout".to_string(), ms.to_string()]);
+    }
+    args
+}
+
+/// `pane wait-output <pane> (--match T | --regex P) [--source S] [--timeout ms]`
+/// (0.9 moved it under `pane`; `--regex` takes the pattern itself).
+fn wait_output_args(
+    pane: &str,
+    pattern: &str,
+    regex: bool,
+    source: Option<&str>,
+    timeout_ms: Option<u32>,
+) -> Vec<String> {
+    let flag = if regex { "--regex" } else { "--match" };
+    let mut args: Vec<String> = ["pane", "wait-output", pane, flag, pattern]
+        .map(String::from)
+        .to_vec();
+    if let Some(src) = source {
+        args.extend(["--source".to_string(), src.to_string()]);
+    }
+    if let Some(ms) = timeout_ms {
+        args.extend(["--timeout".to_string(), ms.to_string()]);
+    }
+    args
 }
 
 /// Resolve an a2a target (role or pane id) to a concrete pane id.
@@ -4958,6 +4994,45 @@ mod tests {
         assert_eq!(herdr_mcp_api::tool_text(&err), "boom");
         let ok = serde_json::to_value(CallToolResult::success(vec![Content::text("x")])).unwrap();
         assert!(!herdr_mcp_api::tool_is_error(&ok));
+    }
+
+    /// Command lines match herdr 0.9's CLI (checked against `herdr … --help`).
+    #[test]
+    fn herdr_09_argv() {
+        assert_eq!(
+            agent_submit_args("w1:p2", "hi"),
+            ["agent", "prompt", "w1:p2", "hi"]
+        );
+        assert_eq!(
+            agent_wait_args("rev", "idle", Some(5000)),
+            [
+                "agent",
+                "wait",
+                "rev",
+                "--until",
+                "idle",
+                "--timeout",
+                "5000"
+            ]
+        );
+        assert_eq!(
+            wait_output_args("p", "done", false, None, None),
+            ["pane", "wait-output", "p", "--match", "done"]
+        );
+        assert_eq!(
+            wait_output_args("p", "ok|err", true, Some("recent"), Some(10)),
+            [
+                "pane",
+                "wait-output",
+                "p",
+                "--regex",
+                "ok|err",
+                "--source",
+                "recent",
+                "--timeout",
+                "10"
+            ]
+        );
     }
 
     #[tokio::test]
