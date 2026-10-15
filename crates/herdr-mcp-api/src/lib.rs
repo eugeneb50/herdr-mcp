@@ -16,9 +16,9 @@ pub mod variables;
 pub use agents::{AgentHandle, AgentsResponse, ProxyPolicy, TrimDirection, TrimPolicy};
 pub use client::{ApiClient, ApiError, tool_text};
 pub use recipe::{
-    CreateRecipeRequest, ExecutionResult, ExecutionStatus, ExportScriptResponse, Recipe,
-    RecipeRequest, RecipeResponse, RecipeStep, RecipeTemplate, TemplateVariable,
-    UpdateRecipeRequest,
+    CreateRecipeRequest, ExecutionResult, ExecutionStatus, ExportScriptResponse,
+    InstantiateTemplateRequest, Recipe, RecipeRequest, RecipeResponse, RecipeStep, RecipeTemplate,
+    TemplateVariable, UpdateRecipeRequest,
 };
 pub use trim::{DiagnoseReport, PaneStatus, SampleRoundtrip, TrimStatusResponse};
 /// Re-exported so clients name recipe/execution ids without their own uuid dep.

@@ -10,9 +10,9 @@ use uuid::Uuid;
 
 use crate::{
     AgentHandle, AgentsResponse, AutoVariablesResponse, CreateRecipeRequest, DiagnoseReport,
-    ExecutionResult, ExportScriptResponse, PlaygroundSnapshot, ProxyPolicy, Recipe, RecipeRequest,
-    RecipeResponse, RecipeTemplate, SaveVariableRequest, ToolsResponse, TrimPolicy,
-    TrimStatusResponse, UpdateRecipeRequest, VariableStore,
+    ExecutionResult, ExportScriptResponse, InstantiateTemplateRequest, PlaygroundSnapshot,
+    ProxyPolicy, Recipe, RecipeRequest, RecipeResponse, RecipeTemplate, SaveVariableRequest,
+    ToolsResponse, TrimPolicy, TrimStatusResponse, UpdateRecipeRequest, VariableStore,
 };
 
 /// Errors from [`ApiClient`].
@@ -326,6 +326,17 @@ impl ApiClient {
     /// `GET /api/templates` — bundled recipe templates.
     pub async fn list_templates(&self) -> Result<Vec<RecipeTemplate>, ApiError> {
         self.get(&["api", "templates"]).await
+    }
+
+    /// `POST /api/templates/{id}/instantiate` — the template with its
+    /// variables filled in, as a recipe (not saved).
+    pub async fn instantiate_template(
+        &self,
+        id: &str,
+        req: &InstantiateTemplateRequest,
+    ) -> Result<Recipe, ApiError> {
+        self.post(&["api", "templates", id, "instantiate"], req)
+            .await
     }
 
     /// `GET /api/executions/{id}`.

@@ -18,7 +18,7 @@ pub struct Recipe {
     pub category: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecipeStep {
     pub id: String,
     pub tool: String,
@@ -47,7 +47,7 @@ pub struct ExecutionResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecipeTemplate {
     pub id: String,
     pub name: String,
@@ -57,7 +57,7 @@ pub struct RecipeTemplate {
     pub steps: Vec<RecipeStep>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TemplateVariable {
     pub name: String,
     pub description: String,
@@ -88,6 +88,17 @@ pub struct RecipeResponse {
     pub failed_step: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// `POST /api/templates/{id}/instantiate` body: values for the template's
+/// variables (missing ones take their defaults) and an optional name. The
+/// response is the filled-in [`Recipe`], not saved.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InstantiateTemplateRequest {
+    #[serde(default)]
+    pub variables: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 /// `POST /api/recipes` body.

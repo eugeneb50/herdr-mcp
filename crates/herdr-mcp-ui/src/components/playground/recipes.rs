@@ -11,8 +11,8 @@ use super::runner::{ToolInfo, schema_parts, tool_list};
 use crate::client::use_api;
 use crate::vars::substitute;
 use herdr_mcp_api::{
-    CreateRecipeRequest, Recipe, RecipeRequest, RecipeStep, RecipeTemplate, UpdateRecipeRequest,
-    Uuid,
+    CreateRecipeRequest, InstantiateTemplateRequest, Recipe, RecipeRequest, RecipeStep,
+    RecipeTemplate, UpdateRecipeRequest, Uuid,
 };
 
 #[derive(Clone, PartialEq)]
@@ -484,6 +484,8 @@ fn StepCard(
 pub fn RecipeLibrary(on_select: EventHandler<(String, Vec<Step>)>, refresh_key: u32) -> Element {
     let mut templates: Signal<Vec<RecipeTemplate>> = use_signal(Vec::new);
     let mut saved: Signal<Vec<Recipe>> = use_signal(Vec::new);
+    // Template whose variables are being filled in.
+    let mut filling: Signal<Option<RecipeTemplate>> = use_signal(|| None);
     let client = use_api();
 
     use_effect(move || {
@@ -517,15 +519,25 @@ pub fn RecipeLibrary(on_select: EventHandler<(String, Vec<Step>)>, refresh_key: 
             h3 { class: "card-title", "Recipe Library" }
             if !templates.read().is_empty() {
                 div { class: "var-group-title", "Templates" }
+                if let Some(tpl) = filling.read().clone() {
+                    TemplateForm {
+                        key: "{tpl.id}",
+                        template: tpl,
+                        on_load: move |(name, steps): (String, Vec<RecipeStep>)| {
+                            filling.set(None);
+                            pick((name, steps));
+                        },
+                        on_cancel: move |_| filling.set(None),
+                    }
+                }
                 for tpl in templates.read().iter().cloned() {
                     {
                         let label = tpl.name.clone();
                         let desc = tpl.description.clone();
-                        let picked = (tpl.name.clone(), tpl.steps.clone());
                         rsx! {
                             button {
                                 class: "lib-item",
-                                onclick: move |_| pick(picked.clone()),
+                                onclick: move |_| filling.set(Some(tpl.clone())),
                                 div { class: "lib-name", "{label}" }
                                 div { class: "lib-desc", "{desc}" }
                             }
@@ -562,4 +574,133 @@ pub fn RecipeLibrary(on_select: EventHandler<(String, Vec<Step>)>, refresh_key: 
             }
         }
     }
+}
+
+/// Variables of a template, filled in before it loads into the builder.
+/// The server does the substitution (`/api/templates/{id}/instantiate`);
+/// pane fields suggest the live pane ids.
+#[component]
+fn TemplateForm(
+    template: RecipeTemplate,
+    on_load: EventHandler<(String, Vec<RecipeStep>)>,
+    on_cancel: EventHandler<()>,
+) -> Element {
+    let client = use_api();
+    let mut values: Signal<HashMap<String, String>> = use_signal(|| {
+        template
+            .variables
+            .iter()
+            .map(|v| {
+                let default = v.default_value.as_ref().map(crate::vars::display_value);
+                (v.name.clone(), default.unwrap_or_default())
+            })
+            .collect()
+    });
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let panes = use_resource(move || {
+        let client = client();
+        async move { live_panes(&client).await }
+    });
+    let missing = template.variables.iter().any(|v| {
+        v.required
+            && values
+                .read()
+                .get(&v.name)
+                .is_none_or(|s| s.trim().is_empty())
+    });
+    let id = template.id.clone();
+    let name = template.name.clone();
+    let load = move |_| {
+        let client = client();
+        let (id, name) = (id.clone(), name.clone());
+        let variables = values
+            .read()
+            .iter()
+            .filter(|(_, v)| !v.trim().is_empty())
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        spawn(async move {
+            let req = InstantiateTemplateRequest {
+                variables,
+                name: Some(name),
+            };
+            match client.instantiate_template(&id, &req).await {
+                Ok(recipe) => on_load.call((recipe.name, recipe.steps)),
+                Err(e) => error.set(Some(format!("Could not fill in template: {e}"))),
+            }
+        });
+    };
+    rsx! {
+        div { class: "card",
+            h3 { class: "card-title", "{template.name}" }
+            p { class: "field-desc", "{template.description}" }
+            datalist { id: "live-panes",
+                for (pane, label) in panes.read().clone().unwrap_or_default() {
+                    option { value: "{pane}", "{label}" }
+                }
+            }
+            for var in template.variables.iter().cloned() {
+                div { key: "{var.name}", class: "field",
+                    label { class: "field-head",
+                        code { class: "mono accent", "{var.name}" }
+                        if var.required {
+                            span { class: "required", "required" }
+                        }
+                    }
+                    p { class: "field-desc", "{var.description}" }
+                    input {
+                        class: "input",
+                        r#type: "text",
+                        list: if var.name.contains("pane") { "live-panes" } else { "" },
+                        value: "{values.read().get(&var.name).cloned().unwrap_or_default()}",
+                        oninput: move |e| {
+                            values.write().insert(var.name.clone(), e.value());
+                        },
+                    }
+                }
+            }
+            if let Some(e) = error.read().as_deref() {
+                div { class: "alert alert-error", "{e}" }
+            }
+            div { class: "btn-row",
+                button {
+                    class: "btn btn-primary",
+                    disabled: missing,
+                    onclick: load,
+                    "Load into builder"
+                }
+                button { class: "btn", onclick: move |_| on_cancel.call(()), "Cancel" }
+            }
+        }
+    }
+}
+
+/// `(pane_id, "label · cwd")` for every pane herdr reports (empty if the
+/// call fails: suggestions are optional).
+async fn live_panes(client: &crate::client::ApiClient) -> Vec<(String, String)> {
+    let Ok(result) = client.call_tool("list_panes", &serde_json::json!({})).await else {
+        return Vec::new();
+    };
+    let text = herdr_mcp_api::tool_text(&result);
+    let Ok(json) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    json.pointer("/result/panes")
+        .and_then(Value::as_array)
+        .map(|panes| {
+            panes
+                .iter()
+                .filter_map(|p| {
+                    let id = p.get("pane_id")?.as_str()?.to_string();
+                    let label = [p.get("label"), p.get("agent"), p.get("cwd")]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    Some((id, label))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
