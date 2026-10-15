@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::variables::{ExecutionResult, Recipe, ScheduledRecipe};
 
-pub use herdr_mcp_api::{PlaygroundSnapshot, VariableStore};
+pub use herdr_mcp_api::{PlaygroundSnapshot, RunRecord, VariableStore};
 
 /// A persistent bag of variables shared across recipe runs within a session.
 /// This is what enables chaining: the output variables of one recipe run are
@@ -272,6 +272,51 @@ impl Persistence {
         let mut snapshot: PlaygroundSnapshot = serde_json::from_str(&content)?;
         snapshot.workspace_id = ws;
         Ok(snapshot)
+    }
+
+    /// Write `data/runs/{id}/run.json` atomically (temp file + rename): it is
+    /// rewritten at every step while clients may be reading it.
+    pub async fn save_run(&self, run: &RunRecord) -> anyhow::Result<()> {
+        let dir = self.data_dir.join("runs").join(run.id.to_string());
+        fs::create_dir_all(&dir).await?;
+        let tmp = dir.join("run.json.tmp");
+        fs::write(&tmp, serde_json::to_string_pretty(run)?).await?;
+        fs::rename(&tmp, dir.join("run.json")).await?;
+        Ok(())
+    }
+
+    pub async fn load_run(&self, id: &Uuid) -> anyhow::Result<Option<RunRecord>> {
+        let path = self
+            .data_dir
+            .join("runs")
+            .join(id.to_string())
+            .join("run.json");
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_str(
+            &fs::read_to_string(path).await?,
+        )?))
+    }
+
+    /// Every readable run record, newest first.
+    pub async fn list_runs(&self) -> anyhow::Result<Vec<RunRecord>> {
+        let dir = self.data_dir.join("runs");
+        let mut runs = Vec::new();
+        if !tokio::fs::try_exists(&dir).await.unwrap_or(false) {
+            return Ok(runs);
+        }
+        let mut entries = fs::read_dir(dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let Ok(content) = fs::read_to_string(entry.path().join("run.json")).await else {
+                continue;
+            };
+            if let Ok(run) = serde_json::from_str::<RunRecord>(&content) {
+                runs.push(run);
+            }
+        }
+        runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
+        Ok(runs)
     }
 
     pub async fn save_execution(&self, result: &ExecutionResult) -> anyhow::Result<()> {

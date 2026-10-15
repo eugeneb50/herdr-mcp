@@ -8,12 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{
-    AgentHandle, AgentsResponse, AutoVariablesResponse, ClipboardConfig, ConfigResponse,
-    CreateRecipeRequest, DiagnoseReport, ExecutionResult, ExportScriptResponse, PlaygroundSnapshot,
-    ProxyPolicy, Recipe, RecipeRequest, RecipeResponse, RecipeTemplate, SaveVariableRequest,
-    ToolsResponse, TrimPolicy, TrimStatusResponse, UpdateRecipeRequest, VariableStore,
-};
+use crate::*;
 
 /// Errors from [`ApiClient`].
 #[derive(Debug)]
@@ -344,6 +339,33 @@ impl ApiClient {
     /// `GET /api/executions/{id}`.
     pub async fn get_execution(&self, id: Uuid) -> Result<ExecutionResult, ApiError> {
         self.get(&["api", "executions", &id.to_string()]).await
+    }
+
+    // ── runs ───────────────────────────────────────────────────────────
+
+    /// `POST /api/runs` — start a run in the background; returns its first record.
+    pub async fn start_run(&self, req: &StartRunRequest) -> Result<RunRecord, ApiError> {
+        self.post(&["api", "runs"], req).await
+    }
+
+    /// `GET /api/runs` — every run, newest first.
+    pub async fn list_runs(&self) -> Result<Vec<RunRecord>, ApiError> {
+        self.get(&["api", "runs"]).await
+    }
+
+    /// `GET /api/runs/{id}`.
+    pub async fn get_run(&self, id: Uuid) -> Result<RunRecord, ApiError> {
+        self.get(&["api", "runs", &id.to_string()]).await
+    }
+
+    /// `POST /api/runs/{id}/{pause|resume|cancel}` (204). 409 if the run has
+    /// already finished.
+    pub async fn control_run(&self, id: Uuid, action: RunAction) -> Result<(), ApiError> {
+        self.no_content(self.request(
+            Method::POST,
+            &["api", "runs", &id.to_string(), action.as_str()],
+        ))
+        .await
     }
 
     // ── variables / playground ─────────────────────────────────────────
