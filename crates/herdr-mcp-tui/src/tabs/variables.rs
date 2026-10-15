@@ -9,10 +9,10 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::tui::theme::{
+use crate::theme::{
     accent_style, dim_style, focused_panel_block, muted_style, panel_block, selected_style,
 };
-use crate::tui::{App, EditField, truncate};
+use crate::{App, EditField, truncate};
 
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     if app.variables_state.editing {
@@ -76,15 +76,15 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
                 .cloned()
                 .unwrap_or_default();
             app.variables_state.editing = true;
-            app.variables_state.edit_key_area = crate::tui::TextArea::new(vec![k]);
-            app.variables_state.edit_value_area = crate::tui::TextArea::new(vec![v]);
+            app.variables_state.edit_key_area = crate::TextArea::new(vec![k]);
+            app.variables_state.edit_value_area = crate::TextArea::new(vec![v]);
             app.variables_state.edit_field = EditField::Key;
             Ok(true)
         }
         KeyCode::Char('n') if mods.contains(KeyModifiers::CONTROL) => {
             app.variables_state.editing = true;
-            app.variables_state.edit_key_area = crate::tui::TextArea::default();
-            app.variables_state.edit_value_area = crate::tui::TextArea::default();
+            app.variables_state.edit_key_area = crate::TextArea::default();
+            app.variables_state.edit_value_area = crate::TextArea::default();
             app.variables_state.edit_field = EditField::Key;
             Ok(true)
         }

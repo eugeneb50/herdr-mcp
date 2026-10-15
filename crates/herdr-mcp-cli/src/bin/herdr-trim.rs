@@ -10,7 +10,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use herdr_mcp_core::{CliOverrides, Config};
-use herdr_mcp_trim::{dashboard, folder_key as fk, pipeline, runner::PipelineRunner};
+use herdr_mcp_trim::{folder_key as fk, pipeline, runner::PipelineRunner};
 
 #[allow(dead_code)]
 #[path = "../common.rs"]
@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
             legacy,
         } => {
             if legacy {
-                dashboard::run(&data_dir).await
+                herdr_mcp_tui::legacy::run(&data_dir).await
             } else {
                 // Run the dashboard on top of the serve stack in-process.
                 // The HTTP bridge + herdr event subscriber come up headless
@@ -124,11 +124,11 @@ async fn main() -> Result<()> {
                     proxy_port: None,
                 }))?;
                 common::run_serve_headless(&config).await?;
-                let opts = herdr_mcp_trim::tui::DashboardOptions {
+                let opts = herdr_mcp_tui::DashboardOptions {
                     data_dir,
                     http_port,
                 };
-                herdr_mcp_trim::tui::run(opts).await
+                herdr_mcp_tui::run(opts).await
             }
         }
         Command::FolderKey { action } => run_folder_key(action).await,

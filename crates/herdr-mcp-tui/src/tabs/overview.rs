@@ -7,8 +7,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::{Cell, Paragraph, Row, Table, Wrap};
 
-use crate::tui::App;
-use crate::tui::theme::{detail_line, focused_panel_block, panel_block};
+use crate::App;
+use crate::theme::{detail_line, focused_panel_block, panel_block};
 
 pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
@@ -264,7 +264,7 @@ pub fn fmt_bytes(n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::{App, DashboardOptions, HerdrPane};
+    use crate::{App, DashboardOptions, HerdrPane};
 
     fn test_app_with_panes(count: usize) -> App {
         let mut app = App::new(DashboardOptions {

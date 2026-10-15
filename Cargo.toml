@@ -4,6 +4,7 @@ members = [
     "crates/herdr-mcp-api",
     "crates/herdr-mcp-core",
     "crates/herdr-mcp-trim",
+    "crates/herdr-mcp-tui",
     "crates/herdr-mcp-server",
     "crates/herdr-mcp-cli",
     "crates/herdr-mcp-proxy",

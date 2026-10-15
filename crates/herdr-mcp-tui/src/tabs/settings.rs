@@ -8,11 +8,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::tui::App;
-use crate::tui::theme::{
-    accent_style, dim_style, focused_panel_block, panel_block, selected_style,
-};
-use crate::tui::truncate;
+use crate::App;
+use crate::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
+use crate::truncate;
 
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     // Editing a clipboard field — feed all keys to textarea.
@@ -80,7 +78,7 @@ async fn handle_frame_clipboard(app: &mut App, code: KeyCode, _mods: KeyModifier
         // Left/Right in preset list cycles presets
         KeyCode::Left | KeyCode::Right => {
             if app.settings.clipboard.field_focus == 0 {
-                let presets = crate::tui::BackendPreset::ALL.len();
+                let presets = crate::BackendPreset::ALL.len();
                 match code {
                     KeyCode::Right => {
                         app.settings.clipboard.preset_index =
@@ -97,8 +95,8 @@ async fn handle_frame_clipboard(app: &mut App, code: KeyCode, _mods: KeyModifier
                     _ => {}
                 }
                 // When preset changes, update command fields unless Custom
-                let preset = crate::tui::BackendPreset::ALL[app.settings.clipboard.preset_index];
-                if !matches!(preset, crate::tui::BackendPreset::Custom) {
+                let preset = crate::BackendPreset::ALL[app.settings.clipboard.preset_index];
+                if !matches!(preset, crate::BackendPreset::Custom) {
                     let (copy, paste) = preset.commands();
                     app.settings.clipboard.copy_cmd = copy.to_string();
                     app.settings.clipboard.paste_cmd = paste.to_string();
@@ -121,7 +119,7 @@ async fn handle_frame_clipboard(app: &mut App, code: KeyCode, _mods: KeyModifier
                 app.settings
                     .clipboard
                     .edit_area
-                    .set_block(crate::tui::theme::panel_block(" Edit (Esc to finish) "));
+                    .set_block(crate::theme::panel_block(" Edit (Esc to finish) "));
                 Ok(true)
             } else {
                 Ok(false)
@@ -154,7 +152,7 @@ async fn handle_clipboard_edit(app: &mut App, code: KeyCode, mods: KeyModifiers)
             Ok(false)
         }
         _ => {
-            if let Some(input) = crate::tui::to_textarea_input(code, mods) {
+            if let Some(input) = crate::to_textarea_input(code, mods) {
                 app.settings.clipboard.edit_area.input(input);
                 let new_text = app.settings.clipboard.edit_area.lines().join("\n");
                 if app.settings.clipboard.edit_field == 0 {
@@ -315,7 +313,7 @@ fn render_clipboard(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     // Backend presets (radio-like)
     lines.push(Line::from(Span::styled("Backend:", accent_style())));
     let preset_start_y = inner.y + lines.len() as u16;
-    for (i, preset) in crate::tui::BackendPreset::ALL.iter().enumerate() {
+    for (i, preset) in crate::BackendPreset::ALL.iter().enumerate() {
         let selected = clip.preset_index == i && clip.field_focus == 0;
         let marker = if selected { "● " } else { "○ " };
         let label = format!("{} {}", marker, preset.label());

@@ -135,7 +135,7 @@ Key subsystems:
   socket; label resolution by pane_id → role → label.
 - **Persistence** — file-based JSON under `data/` (recipes, schedules,
   variables, trim stats, PFC1 memory).
-- **TUI dashboard** — `crates/herdr-mcp-trim/src/tui/` with VS Code-style
+- **TUI dashboard** — `crates/herdr-mcp-tui/` with VS Code-style
   tabbed interface (Overview, Playground, Trim, Variables, Settings), mouse
   + keyboard navigation, herdr sidecar context awareness.
 
@@ -147,7 +147,8 @@ Every workspace crate carries a stability tier.
 |-------|------|-------|
 | `herdr-mcp-api` | Experimental | HTTP bridge wire contract: every `/api/*` type + typed `ApiClient`. Leaf crate, must build for `wasm32-unknown-unknown`. |
 | `herdr-mcp-core` | Beta | Config system (`TOML + env + CLI`), error types. Stable schema. |
-| `herdr-mcp-trim` | Experimental | Message-trim compressors (caveman, pfc1), pipeline, policy, stats, folder keys, dashboard. |
+| `herdr-mcp-trim` | Experimental | Message-trim compressors (caveman, pfc1), pipeline, policy, stats, folder keys. |
+| `herdr-mcp-tui` | Experimental | Terminal dashboard (kitchen-sink + legacy). Bridge client only — no server deps. |
 | `herdr-mcp-server` | Experimental | MCP server, 49 tools, HTTP bridge, recipe engine, event subscriber, scheduler. |
 | `herdr-mcp-cli` | Experimental | Binary entrypoint (`serve`/`trim`/`dashboard`/`folder-key`) + integration tests. |
 
@@ -159,7 +160,8 @@ through deliberate team decision.
 
 - `crates/herdr-mcp-api/` — single definition of every `/api/*` request/response type (`agents.rs`, `recipe.rs`, `trim.rs`, `variables.rs`) + typed `ApiClient` (`client.rs`). Server/trim/proxy re-export these; web UI and TUI call the bridge through `ApiClient`. No tokio, no `herdr-mcp-*` deps.
 - `crates/herdr-mcp-core/` — `config.rs` (full config system), `error.rs` (anyhow-based error context), `lib.rs`
-- `crates/herdr-mcp-trim/` — `pfc1.rs`, `caveman.rs`, `code_regions.rs`, `pipeline.rs`, `policy.rs`, `runner.rs`, `stats.rs`, `eval.rs`, `dashboard.rs`, `folder_key.rs`, `tui/` (kitchen-sink dashboard)
+- `crates/herdr-mcp-trim/` — `pfc1.rs`, `caveman.rs`, `code_regions.rs`, `pipeline.rs`, `policy.rs`, `runner.rs`, `stats.rs`, `eval.rs`, `folder_key.rs`
+- `crates/herdr-mcp-tui/` — kitchen-sink TUI dashboard (`lib.rs` app loop, `tabs/`, `nav.rs`, `theme.rs`, `http.rs` bridge discovery) + `legacy.rs` trim-only ANSI dashboard; talks to the bridge through `herdr-mcp-api::ApiClient`
 - `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers + recipe engine), `herdr_client.rs`, `persistence.rs`, `scheduler.rs`, `templates.rs`, `variables.rs`, `lib.rs`
 - `crates/herdr-mcp-cli/` — `src/bin/herdr-mcp.rs` (serve), `src/bin/herdr-trim.rs` (trim/dashboard/folder-key), `tests/` (integration)
 - `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); served by the HTTP bridge from `http.web-dir`
