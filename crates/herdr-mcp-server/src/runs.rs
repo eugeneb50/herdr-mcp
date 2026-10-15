@@ -1,24 +1,43 @@
 //! Background recipe runs: the one executor behind `/api/runs`,
-//! `POST /api/recipe` and `POST /api/recipes/{id}/run`.
+//! `POST /api/recipe`, `POST /api/recipes/{id}/run` and the scheduler.
 //!
-//! A run's state lives only in its record (`data/runs/{id}/run.json`),
-//! rewritten at every step. [`Runs`] holds nothing but the control channel
-//! of each run executing in this process, so pause/resume/cancel can reach
-//! it; a record that claims to be running without a live channel is reported
-//! as [`RunStatus::Interrupted`].
+//! A run is stored as an immutable [`RunHeader`] (`data/runs/{id}/run.json`:
+//! what ran, with which starting variables) plus an append-only event log
+//! (`events.jsonl`). The log is the run's state: [`RunRecord`] is computed by
+//! folding it ([`fold`]), with the same [`apply`] the executor uses live.
+//! [`Runs`] holds the control channel of each run executing in this process
+//! and the broadcast that carries new events to `/api/events`; a log without
+//! a terminal event and without a live run reads as `interrupted`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use herdr_mcp_api::{RecipeStep, RunAction, RunRecord, RunStatus, StartRunRequest};
-use rmcp::model::CallToolResult;
+use chrono::{DateTime, Utc};
+use herdr_mcp_api::{
+    RecipeStep, RunAction, RunEvent, RunEventKind, RunRecord, RunStatus, StartRunRequest,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::server::{HerdrMcpServer, dispatch_tool, resolve_variables};
 use crate::variables::{ExecutionResult, ExecutionStatus};
+
+/// The immutable start of a run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunHeader {
+    pub id: Uuid,
+    pub recipe_id: Option<Uuid>,
+    pub name: Option<String>,
+    pub session_id: String,
+    /// Snapshot of the steps as they were when the run started.
+    pub steps: Vec<RecipeStep>,
+    /// Interpolation scope before the first step.
+    pub seed: HashMap<String, Value>,
+    pub started_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Control {
@@ -27,10 +46,24 @@ pub(crate) enum Control {
     Cancel,
 }
 
-/// Control channels of the runs executing in this process, by run id.
-#[derive(Clone, Default)]
+/// Events buffered per subscriber before it lags (and re-reads the log).
+const EVENT_BUFFER: usize = 1024;
+
+/// Live runs in this process: their control channels, and the broadcast of
+/// every run's new events.
+#[derive(Clone)]
 pub struct Runs {
     live: Arc<Mutex<HashMap<Uuid, watch::Sender<Control>>>>,
+    events: broadcast::Sender<RunEvent>,
+}
+
+impl Default for Runs {
+    fn default() -> Self {
+        Self {
+            live: Arc::default(),
+            events: broadcast::channel(EVENT_BUFFER).0,
+        }
+    }
 }
 
 impl Runs {
@@ -40,6 +73,11 @@ impl Runs {
 
     pub fn is_live(&self, id: Uuid) -> bool {
         self.live().contains_key(&id)
+    }
+
+    /// New events of every run, from now on.
+    pub fn subscribe(&self) -> broadcast::Receiver<RunEvent> {
+        self.events.subscribe()
     }
 
     /// Signal a live run. Returns false if no run with that id is executing.
@@ -64,12 +102,155 @@ impl Runs {
         })
     }
 
-    /// Fill in [`RunStatus::Interrupted`] for a record whose run is gone.
-    pub fn observe(&self, mut run: RunRecord) -> RunRecord {
-        if !run.status.is_finished() && !self.is_live(run.id) {
+    /// Fill in [`RunStatus::Interrupted`] for an unfinished run whose
+    /// executor is gone. `was_live` must be checked *before* the log was
+    /// read: the executor appends its last event and only then unregisters,
+    /// so checking afterwards could call a just-finished run interrupted.
+    fn observe(mut run: RunRecord, was_live: bool) -> RunRecord {
+        if !run.status.is_finished() && !was_live {
             run.status = RunStatus::Interrupted;
         }
         run
+    }
+}
+
+/// A run's record: its header with every event applied.
+pub fn fold(header: RunHeader, events: &[RunEvent]) -> RunRecord {
+    let mut run = RunRecord {
+        id: header.id,
+        recipe_id: header.recipe_id,
+        name: header.name,
+        session_id: header.session_id,
+        steps: header.steps,
+        status: RunStatus::Running,
+        current_step: None,
+        results: HashMap::new(),
+        variables: header.seed,
+        failed_step: None,
+        error: None,
+        started_at: header.started_at,
+        finished_at: None,
+    };
+    for event in events {
+        apply(&mut run, event);
+    }
+    run
+}
+
+/// Advance a record by one event.
+pub fn apply(run: &mut RunRecord, event: &RunEvent) {
+    match &event.kind {
+        RunEventKind::Status { status } => {
+            run.status = *status;
+            if status.is_finished() {
+                run.finished_at = Some(event.at);
+            }
+            if *status == RunStatus::Completed {
+                run.current_step = None;
+            }
+        }
+        RunEventKind::StepStarted { step } => run.current_step = Some(step.clone()),
+        RunEventKind::StepFinished { step, result } => record_result(run, step, result),
+        RunEventKind::StepFailed {
+            step,
+            error,
+            status_code,
+        } => {
+            run.results.insert(
+                step.clone(),
+                serde_json::json!({ "error": error, "statusCode": status_code }),
+            );
+            run.failed_step = Some(step.clone());
+            run.error = Some(error.clone());
+        }
+        RunEventKind::StepCancelled { step } => {
+            run.results
+                .insert(step.clone(), serde_json::json!({ "error": "cancelled" }));
+        }
+    }
+}
+
+/// Store a step's result and expose it to later steps: under the step id,
+/// flattened (`result.*`), and — when it is an agent handle — under its pane
+/// id and role so `{{pane_id.output}}` / `{{role.output}}` resolve.
+fn record_result(run: &mut RunRecord, step: &str, json: &Value) {
+    run.variables
+        .extend(crate::variables::extract_variables(json));
+    run.variables.insert(step.to_string(), json.clone());
+    if let Some(pane_id) = json.get("pane_id").and_then(Value::as_str) {
+        run.variables.insert(pane_id.to_string(), json.clone());
+        if let Some(role) = json.get("role").and_then(Value::as_str)
+            && !role.is_empty()
+        {
+            run.variables.insert(role.to_string(), json.clone());
+        }
+    }
+    run.results.insert(step.to_string(), json.clone());
+}
+
+/// Load a run's record (`None` if there is no such run).
+pub async fn load(server: &HerdrMcpServer, id: Uuid) -> anyhow::Result<Option<RunRecord>> {
+    let was_live = server.runs.is_live(id);
+    let Some(header) = server.persistence.load_run_header(&id).await? else {
+        return Ok(None);
+    };
+    let events = server.persistence.load_run_events(&id, 0).await?;
+    Ok(Some(Runs::observe(fold(header, &events), was_live)))
+}
+
+/// Every run's record, newest first.
+pub async fn list(server: &HerdrMcpServer) -> anyhow::Result<Vec<RunRecord>> {
+    let mut runs = Vec::new();
+    for id in server.persistence.list_run_ids().await? {
+        if let Some(run) = load(server, id).await? {
+            runs.push(run);
+        }
+    }
+    runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
+    Ok(runs)
+}
+
+/// New events as a stream. With `run`, only that run's events: first its
+/// logged events from `since` (if given), then live ones, without gaps or
+/// repeats (a subscriber that falls behind re-reads the log). Without `run`,
+/// every run's new events (a lagging subscriber skips what it missed).
+pub fn event_stream(
+    server: HerdrMcpServer,
+    run: Option<Uuid>,
+    since: Option<u64>,
+) -> impl futures_util::Stream<Item = RunEvent> + Send {
+    async_stream::stream! {
+        // Subscribe before reading the log so nothing falls in between.
+        let mut rx = server.runs.subscribe();
+        let mut next = since.unwrap_or(0);
+        if let (Some(id), Some(since)) = (run, since) {
+            for event in server.persistence.load_run_events(&id, since).await.unwrap_or_default() {
+                next = event.seq + 1;
+                yield event;
+            }
+        }
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if let Some(id) = run {
+                        if event.run_id != id || event.seq < next {
+                            continue;
+                        }
+                        next = event.seq + 1;
+                    }
+                    yield event;
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    if let Some(id) = run {
+                        for event in server.persistence.load_run_events(&id, next).await.unwrap_or_default() {
+                            next = event.seq + 1;
+                            yield event;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
     }
 }
 
@@ -93,7 +274,7 @@ pub(crate) async fn start_with(
     req: StartRunRequest,
     initial: Control,
 ) -> Result<(RunRecord, JoinHandle<RunRecord>), StartError> {
-    let (recipe_id, name, steps, mut scope) = match req.recipe_id {
+    let (recipe_id, name, steps, mut seed) = match req.recipe_id {
         Some(id) => {
             let recipe = server
                 .persistence
@@ -110,34 +291,37 @@ pub(crate) async fn start_with(
             HashMap::new(),
         ),
     };
-    let session_id = workspace_for(req.session_id, &scope);
-    seed_scope(server, &session_id, &mut scope).await;
-
-    let run = RunRecord {
+    let session_id = workspace_for(req.session_id, &seed);
+    seed_scope(server, &session_id, &mut seed).await;
+    let header = RunHeader {
         id: Uuid::new_v4(),
         recipe_id,
         name,
         session_id,
         steps,
-        status: RunStatus::Running,
-        current_step: None,
-        results: HashMap::new(),
-        variables: scope,
-        failed_step: None,
-        error: None,
-        started_at: chrono::Utc::now(),
-        finished_at: None,
+        seed,
+        started_at: Utc::now(),
     };
-    // Register before the first save so a reader never sees a "running"
-    // record without a live run (which would read as interrupted).
+    // Register before anything is written so a reader never sees the run
+    // without a live executor (which would read as interrupted).
     let (tx, rx) = watch::channel(initial);
-    server.runs.live().insert(run.id, tx);
-    if let Err(e) = server.persistence.save_run(&run).await {
-        server.runs.live().remove(&run.id);
+    server.runs.live().insert(header.id, tx);
+    if let Err(e) = server.persistence.save_run_header(&header).await {
+        server.runs.live().remove(&header.id);
         return Err(StartError::Persist(e));
     }
-    let handle = tokio::spawn(execute(server.clone(), run.clone(), rx));
-    Ok((run, handle))
+    let mut exec = Executor {
+        server: server.clone(),
+        run: fold(header, &[]),
+        next_seq: 0,
+        ctl: rx,
+    };
+    exec.emit(RunEventKind::Status {
+        status: RunStatus::Running,
+    })
+    .await;
+    let first = exec.run.clone();
+    Ok((first, tokio::spawn(exec.execute())))
 }
 
 /// The workspace a run is scoped to: the requested one, else a hint saved in
@@ -189,80 +373,106 @@ async fn seed_scope(server: &HerdrMcpServer, ws: &str, scope: &mut HashMap<Strin
     }
 }
 
-async fn execute(
+/// A run being executed: its record so far (the fold of what it emitted).
+struct Executor {
     server: HerdrMcpServer,
-    mut run: RunRecord,
-    mut ctl: watch::Receiver<Control>,
-) -> RunRecord {
-    let steps = run.steps.clone();
-    for step in &steps {
-        run.current_step = Some(step.id.clone());
-        if !wait_unpaused(&server, &mut run, &mut ctl).await {
-            run.status = RunStatus::Cancelled;
-            break;
-        }
-        let mut params = step.params.clone();
-        resolve_variables(&mut params, &run.variables);
-        let outcome = tokio::select! {
-            r = dispatch_tool(&server, &step.tool, params) => Some(r),
-            () = cancelled(&mut ctl) => None,
-        };
-        match outcome {
-            Some(Ok(result)) => record_result(&mut run, step, &result),
-            Some(Err((code, msg))) => {
-                run.results.insert(
-                    step.id.clone(),
-                    serde_json::json!({ "error": msg, "statusCode": code.as_u16() }),
-                );
-                run.failed_step = Some(step.id.clone());
-                run.error = Some(msg);
-                run.status = RunStatus::Failed;
-                break;
-            }
-            None => {
-                run.results
-                    .insert(step.id.clone(), serde_json::json!({ "error": "cancelled" }));
-                run.status = RunStatus::Cancelled;
-                break;
-            }
-        }
-        save(&server, &run).await;
-    }
-    if run.status == RunStatus::Running {
-        run.status = RunStatus::Completed;
-        run.current_step = None;
-    }
-    run.finished_at = Some(chrono::Utc::now());
-    save(&server, &run).await;
-    server.runs.live().remove(&run.id);
-    run
+    run: RunRecord,
+    next_seq: u64,
+    ctl: watch::Receiver<Control>,
 }
 
-/// Block while paused (recording the paused state). False if cancelled.
-async fn wait_unpaused(
-    server: &HerdrMcpServer,
-    run: &mut RunRecord,
-    ctl: &mut watch::Receiver<Control>,
-) -> bool {
-    loop {
-        let control = *ctl.borrow_and_update();
-        match control {
-            Control::Run => {
-                if run.status == RunStatus::Paused {
-                    run.status = RunStatus::Running;
-                    save(server, run).await;
-                }
-                return true;
+impl Executor {
+    /// Record an event: apply it, append it to the log, then broadcast it.
+    async fn emit(&mut self, kind: RunEventKind) {
+        let event = RunEvent {
+            run_id: self.run.id,
+            seq: self.next_seq,
+            at: Utc::now(),
+            kind,
+        };
+        self.next_seq += 1;
+        apply(&mut self.run, &event);
+        if let Err(e) = self.server.persistence.append_run_event(&event).await {
+            tracing::warn!("run {}: failed to append event: {e}", self.run.id);
+        }
+        // No subscribers is fine.
+        let _ = self.server.runs.events.send(event);
+    }
+
+    async fn execute(mut self) -> RunRecord {
+        let status = self.execute_steps().await;
+        self.emit(RunEventKind::Status { status }).await;
+        self.server.runs.live().remove(&self.run.id);
+        self.run
+    }
+
+    /// Run every step; returns the final status.
+    async fn execute_steps(&mut self) -> RunStatus {
+        let steps = self.run.steps.clone();
+        for step in &steps {
+            if !self.wait_unpaused().await {
+                return RunStatus::Cancelled;
             }
-            Control::Cancel => return false,
-            Control::Pause => {
-                if run.status != RunStatus::Paused {
-                    run.status = RunStatus::Paused;
-                    save(server, run).await;
+            self.emit(RunEventKind::StepStarted {
+                step: step.id.clone(),
+            })
+            .await;
+            let mut params = step.params.clone();
+            resolve_variables(&mut params, &self.run.variables);
+            let outcome = tokio::select! {
+                r = dispatch_tool(&self.server, &step.tool, params) => Some(r),
+                () = cancelled(&mut self.ctl) => None,
+            };
+            let step = step.id.clone();
+            match outcome {
+                Some(Ok(result)) => {
+                    let result = serde_json::to_value(&result).unwrap_or_default();
+                    self.emit(RunEventKind::StepFinished { step, result }).await;
                 }
-                // Sender gone means the run was dropped from `Runs`: stop.
-                if ctl.changed().await.is_err() {
-                    return false;
+                Some(Err((code, error))) => {
+                    self.emit(RunEventKind::StepFailed {
+                        step,
+                        error,
+                        status_code: code.as_u16(),
+                    })
+                    .await;
+                    return RunStatus::Failed;
+                }
+                None => {
+                    self.emit(RunEventKind::StepCancelled { step }).await;
+                    return RunStatus::Cancelled;
+                }
+            }
+        }
+        RunStatus::Completed
+    }
+
+    /// Block while paused (recording pause/resume). False if cancelled.
+    async fn wait_unpaused(&mut self) -> bool {
+        loop {
+            let control = *self.ctl.borrow_and_update();
+            match control {
+                Control::Run => {
+                    if self.run.status == RunStatus::Paused {
+                        self.emit(RunEventKind::Status {
+                            status: RunStatus::Running,
+                        })
+                        .await;
+                    }
+                    return true;
+                }
+                Control::Cancel => return false,
+                Control::Pause => {
+                    if self.run.status != RunStatus::Paused {
+                        self.emit(RunEventKind::Status {
+                            status: RunStatus::Paused,
+                        })
+                        .await;
+                    }
+                    // Sender gone means the run was dropped from `Runs`: stop.
+                    if self.ctl.changed().await.is_err() {
+                        return false;
+                    }
                 }
             }
         }
@@ -273,31 +483,6 @@ async fn wait_unpaused(
 async fn cancelled(ctl: &mut watch::Receiver<Control>) {
     if ctl.wait_for(|c| *c == Control::Cancel).await.is_err() {
         std::future::pending::<()>().await;
-    }
-}
-
-/// Store a step's result and expose it to later steps: under the step id,
-/// flattened (`result.*`), and — when it is an agent handle — under its pane
-/// id and role so `{{pane_id.output}}` / `{{role.output}}` resolve.
-fn record_result(run: &mut RunRecord, step: &RecipeStep, result: &CallToolResult) {
-    let json = serde_json::to_value(result).unwrap_or_default();
-    run.variables
-        .extend(crate::variables::extract_variables(&json));
-    run.variables.insert(step.id.clone(), json.clone());
-    if let Some(pane_id) = json.get("pane_id").and_then(Value::as_str) {
-        run.variables.insert(pane_id.to_string(), json.clone());
-        if let Some(role) = json.get("role").and_then(Value::as_str)
-            && !role.is_empty()
-        {
-            run.variables.insert(role.to_string(), json.clone());
-        }
-    }
-    run.results.insert(step.id.clone(), json);
-}
-
-async fn save(server: &HerdrMcpServer, run: &RunRecord) {
-    if let Err(e) = server.persistence.save_run(run).await {
-        tracing::warn!("run {}: failed to save record: {e}", run.id);
     }
 }
 
@@ -356,7 +541,7 @@ mod tests {
         pred: impl Fn(&RunRecord) -> bool,
     ) -> RunRecord {
         for _ in 0..200 {
-            if let Ok(Some(r)) = server.persistence.load_run(&id).await
+            if let Ok(Some(r)) = load(server, id).await
                 && pred(&r)
             {
                 return r;
@@ -388,13 +573,41 @@ mod tests {
         assert!(done.variables.contains_key("a"));
         assert!(done.finished_at.is_some());
         assert!(!server.runs.is_live(done.id));
-        let stored = server
+        // The stored log folds back to exactly the executor's live record.
+        let stored = load(&server, done.id).await.unwrap().unwrap();
+        assert_eq!(
+            serde_json::to_value(&stored).unwrap(),
+            serde_json::to_value(&done).unwrap()
+        );
+        let kinds: Vec<_> = server
             .persistence
-            .load_run(&done.id)
+            .load_run_events(&done.id, 0)
             .await
             .unwrap()
-            .unwrap();
-        assert_eq!(stored.status, RunStatus::Completed);
+            .into_iter()
+            .map(|e| (e.seq, e.kind))
+            .collect();
+        assert!(matches!(
+            kinds.as_slice(),
+            [
+                (
+                    0,
+                    RunEventKind::Status {
+                        status: RunStatus::Running
+                    }
+                ),
+                (1, RunEventKind::StepStarted { .. }),
+                (2, RunEventKind::StepFinished { .. }),
+                (3, RunEventKind::StepStarted { .. }),
+                (4, RunEventKind::StepFinished { .. }),
+                (
+                    5,
+                    RunEventKind::Status {
+                        status: RunStatus::Completed
+                    }
+                ),
+            ]
+        ));
     }
 
     #[tokio::test]
@@ -427,7 +640,7 @@ mod tests {
         let req = adhoc(vec![step("a", "list_templates")]);
         let (run, handle) = start_with(&server, req, Control::Pause).await.unwrap();
         let paused = wait_record(&server, run.id, |r| r.status == RunStatus::Paused).await;
-        assert_eq!(paused.current_step.as_deref(), Some("a"));
+        assert_eq!(paused.current_step, None, "paused before the first step");
         assert!(paused.results.is_empty());
 
         assert!(server.runs.control(run.id, RunAction::Resume));
@@ -523,7 +736,7 @@ mod tests {
         let mut found = None;
         for _ in 0..30 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let runs = server.persistence.list_runs().await.unwrap();
+            let runs = list(&server).await.unwrap();
             found = runs.into_iter().find(|r| r.recipe_id == Some(recipe.id));
             if found.is_some() {
                 break;
@@ -534,9 +747,47 @@ mod tests {
         assert_eq!(run.name.as_deref(), Some("cron"));
     }
 
+    /// Replay from `since`, then live, with no gaps or repeats; events of
+    /// other runs are filtered out.
+    #[tokio::test]
+    async fn event_stream_replays_then_follows() {
+        use futures_util::StreamExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+
+        let req = adhoc(vec![
+            step("a", "list_templates"),
+            step("b", "list_templates"),
+        ]);
+        let (run, handle) = start_with(&server, req, Control::Pause).await.unwrap();
+        // Logged so far: running(0), paused(1).
+        wait_record(&server, run.id, |r| r.status == RunStatus::Paused).await;
+        let stream = event_stream(server.clone(), Some(run.id), Some(1));
+        tokio::pin!(stream);
+        assert_eq!(stream.next().await.unwrap().seq, 1, "replayed from since");
+
+        // Noise from another run must not appear.
+        let (_, other) = start_run(&server, adhoc(vec![step("x", "list_templates")]))
+            .await
+            .unwrap();
+        other.await.unwrap();
+        server.runs.control(run.id, RunAction::Resume);
+        handle.await.unwrap();
+
+        let mut seqs = vec![1];
+        while let Some(event) = stream.next().await {
+            assert_eq!(event.run_id, run.id);
+            seqs.push(event.seq);
+            if event.kind.is_terminal() {
+                break;
+            }
+        }
+        // running(2) a-started(3) a-finished(4) b-started(5) b-finished(6) completed(7)
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6, 7]);
+    }
+
     #[test]
     fn record_without_live_run_reads_as_interrupted() {
-        let runs = Runs::default();
         let mut run = RunRecord {
             id: Uuid::new_v4(),
             recipe_id: None,
@@ -552,9 +803,13 @@ mod tests {
             started_at: chrono::Utc::now(),
             finished_at: None,
         };
-        assert_eq!(runs.observe(run.clone()).status, RunStatus::Interrupted);
+        assert_eq!(
+            Runs::observe(run.clone(), false).status,
+            RunStatus::Interrupted
+        );
+        assert_eq!(Runs::observe(run.clone(), true).status, RunStatus::Running);
         run.status = RunStatus::Completed;
-        assert_eq!(runs.observe(run).status, RunStatus::Completed);
+        assert_eq!(Runs::observe(run, false).status, RunStatus::Completed);
     }
 
     #[test]

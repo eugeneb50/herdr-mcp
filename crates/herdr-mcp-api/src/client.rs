@@ -11,8 +11,9 @@ use uuid::Uuid;
 use crate::{
     AgentHandle, AgentsResponse, AutoVariablesResponse, CreateRecipeRequest, DiagnoseReport,
     ExecutionResult, ExportScriptResponse, PlaygroundSnapshot, ProxyPolicy, Recipe, RecipeRequest,
-    RecipeResponse, RecipeTemplate, RunAction, RunRecord, SaveVariableRequest, StartRunRequest,
-    ToolsResponse, TrimPolicy, TrimStatusResponse, UpdateRecipeRequest, VariableStore,
+    RecipeResponse, RecipeTemplate, RunAction, RunEvent, RunRecord, SaveVariableRequest,
+    StartRunRequest, ToolsResponse, TrimPolicy, TrimStatusResponse, UpdateRecipeRequest,
+    VariableStore,
 };
 
 /// Errors from [`ApiClient`].
@@ -348,6 +349,16 @@ impl ApiClient {
     /// `GET /api/runs/{id}`.
     pub async fn get_run(&self, id: Uuid) -> Result<RunRecord, ApiError> {
         self.get(&["api", "runs", &id.to_string()]).await
+    }
+
+    /// `GET /api/runs/{id}/events?since=` — the run's events from `since`
+    /// (inclusive). For live updates use the SSE stream `GET /api/events`.
+    pub async fn run_events(&self, id: Uuid, since: u64) -> Result<Vec<RunEvent>, ApiError> {
+        Self::json(
+            self.request(Method::GET, &["api", "runs", &id.to_string(), "events"])
+                .query(&[("since", since)]),
+        )
+        .await
     }
 
     /// `POST /api/runs/{id}/{pause|resume|cancel}` (204). 409 if the run has

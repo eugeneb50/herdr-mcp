@@ -2870,7 +2870,9 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path) -> Router {
         .route("/api/recipes/{id}/run", post(run_recipe_by_id_handler))
         .route("/api/runs", get(list_runs_handler).post(start_run_handler))
         .route("/api/runs/{id}", get(get_run_handler))
+        .route("/api/runs/{id}/events", get(run_events_handler))
         .route("/api/runs/{id}/{action}", post(control_run_handler))
+        .route("/api/events", get(events_handler))
         .route("/api/recipes/{id}/export", get(export_recipe_handler))
         .route(
             "/api/variables",
@@ -3690,27 +3692,88 @@ async fn start_run_handler(
 async fn list_runs_handler(
     State(AppState { server, .. }): State<AppState>,
 ) -> Result<Json<Vec<herdr_mcp_api::RunRecord>>, (StatusCode, String)> {
-    let runs = server
-        .persistence
-        .list_runs()
+    crate::runs::list(&server)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(
-        runs.into_iter().map(|r| server.runs.observe(r)).collect(),
-    ))
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn load_run(
     server: &HerdrMcpServer,
     id: uuid::Uuid,
 ) -> Result<herdr_mcp_api::RunRecord, (StatusCode, String)> {
-    server
-        .persistence
-        .load_run(&id)
+    crate::runs::load(server, id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map(|r| server.runs.observe(r))
         .ok_or((StatusCode::NOT_FOUND, "Run not found".into()))
+}
+
+#[derive(Debug, Deserialize)]
+struct SinceQuery {
+    #[serde(default)]
+    since: u64,
+}
+
+/// `GET /api/runs/{id}/events?since=N` — the run's events from `since`.
+async fn run_events_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+    Query(q): Query<SinceQuery>,
+) -> Result<Json<Vec<herdr_mcp_api::RunEvent>>, (StatusCode, String)> {
+    let internal = |e: anyhow::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    if server
+        .persistence
+        .load_run_header(&id)
+        .await
+        .map_err(internal)?
+        .is_none()
+    {
+        return Err((StatusCode::NOT_FOUND, "Run not found".into()));
+    }
+    server
+        .persistence
+        .load_run_events(&id, q.since)
+        .await
+        .map(Json)
+        .map_err(internal)
+}
+
+#[derive(Debug, Deserialize)]
+struct EventsQuery {
+    run: Option<uuid::Uuid>,
+    since: Option<u64>,
+}
+
+/// `GET /api/events?run={id}&since={seq}` — Server-Sent Events. With `run`,
+/// replays that run's log from `since` (or from after the `Last-Event-ID`
+/// header, which browsers send on reconnect) and then follows it live;
+/// without `run`, every run's new events. Event ids are run `seq`s.
+async fn events_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Query(q): Query<EventsQuery>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::sse::Sse<
+    impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_util::StreamExt;
+    let resume = || {
+        headers
+            .get("last-event-id")?
+            .to_str()
+            .ok()?
+            .parse::<u64>()
+            .ok()
+            .map(|seq| seq + 1)
+    };
+    let since = q.run.and(q.since.or_else(resume));
+    let stream = crate::runs::event_stream(server, q.run, since).map(|event| {
+        Ok(Event::default()
+            .id(event.seq.to_string())
+            .json_data(&event)
+            .unwrap_or_else(|_| Event::default().comment("unencodable event")))
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
 /// `GET /api/runs/{id}`.
@@ -4831,6 +4894,32 @@ mod tests {
         }
         assert_eq!(run.status, herdr_mcp_api::RunStatus::Completed);
         assert_eq!(run.results.len(), 2);
+        let events = api.run_events(run.id, 0).await.unwrap();
+        assert_eq!(events.len(), 6);
+        assert!(events.last().unwrap().kind.is_terminal());
+        assert_eq!(api.run_events(run.id, 5).await.unwrap().len(), 1);
+        assert!(matches!(
+            api.run_events(uuid::Uuid::new_v4(), 0).await,
+            Err(ApiError::Status { status: 404, .. })
+        ));
+        // SSE: replay of a finished run arrives as `id: <seq>` + JSON data.
+        let mut sse = reqwest::get(format!("http://{addr}/api/events?run={}&since=4", run.id))
+            .await
+            .unwrap();
+        assert_eq!(
+            sse.headers()["content-type"].to_str().unwrap(),
+            "text/event-stream"
+        );
+        let mut body = String::new();
+        while !body.contains("\"completed\"") {
+            let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), sse.chunk())
+                .await
+                .expect("SSE stalled")
+                .unwrap()
+                .expect("SSE ended early");
+            body.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        assert!(body.contains("id: 4") && body.contains("id: 5") && !body.contains("id: 3"));
         assert!(
             api.list_runs()
                 .await
