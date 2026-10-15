@@ -31,8 +31,10 @@ enum Command {
         http: Option<u16>,
         #[arg(long)]
         http_only: bool,
-        #[arg(long, default_value = "./data")]
-        data_dir: std::path::PathBuf,
+        /// Data directory (default `./data`; also `HERDR_MCP_DATA_DIR` or
+        /// `data_dir` in herdmcp.toml — this flag wins over both).
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
         #[arg(long)]
         herdr_socket: Option<std::path::PathBuf>,
         /// Auto-start the HTTPS intercepting proxy on this port when set.
@@ -62,7 +64,7 @@ async fn main() -> Result<()> {
             proxy_port,
             ..
         }) => Some(CliOverrides {
-            data_dir: Some(data_dir.clone()),
+            data_dir: data_dir.clone(),
             http_port: *http,
             http_only: Some(*http_only),
             http_bind: None,
