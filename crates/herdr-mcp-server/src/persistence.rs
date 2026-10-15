@@ -295,6 +295,10 @@ impl Persistence {
             .open(self.run_dir(&event.run_id).join("events.jsonl"))
             .await?;
         f.write_all(line.as_bytes()).await?;
+        // tokio writes on a background thread: without the flush the event
+        // may not be on disk (or may land after the next one) when we return,
+        // and a reader could see a finished run without its final event.
+        f.flush().await?;
         Ok(())
     }
 
