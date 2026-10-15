@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-use super::forms::{DynamicForm, ResponseViewer, convert_param};
+use super::forms::{DynamicForm, ResponseViewer, build_params};
 use crate::client::use_api;
 use crate::vars::{display_value, substitute};
 use herdr_mcp_api::{AutoVariablesResponse, PlaygroundSnapshot, VariableStore};
@@ -37,7 +37,7 @@ pub fn tool_list(tools: &[Value]) -> Vec<ToolInfo> {
         .collect()
 }
 
-fn schema_parts(schema: &Value) -> (HashMap<String, Value>, HashSet<String>) {
+pub(super) fn schema_parts(schema: &Value) -> (HashMap<String, Value>, HashSet<String>) {
     let props = schema
         .get("properties")
         .and_then(|p| p.as_object())
@@ -158,16 +158,10 @@ pub fn ToolRunner() -> Element {
                 })
                 .unwrap_or(Value::Null);
             let (props, _) = schema_parts(&schema);
-            let mut resolved = serde_json::Map::new();
-            for (k, raw) in params.read().iter() {
-                let stype = props
-                    .get(k)
-                    .and_then(|p| p.get("type")?.as_str())
-                    .unwrap_or("string");
-                let sub = substitute(raw, &user_vars.read(), &auto_vars.read());
-                resolved.insert(k.clone(), convert_param(stype, &sub));
-            }
-            match client.call_tool(&name, &Value::Object(resolved)).await {
+            let resolved = build_params(&props, &params.read(), |raw| {
+                substitute(raw, &user_vars.read(), &auto_vars.read())
+            });
+            match client.call_tool(&name, &resolved).await {
                 Err(e) => error.set(Some(format!("Request failed: {e}"))),
                 Ok(data) => {
                     let is_err = data
@@ -278,16 +272,5 @@ fn resolved_preview(
     user: &HashMap<String, String>,
     auto: &HashMap<String, String>,
 ) -> Value {
-    let mut map = serde_json::Map::new();
-    for (k, raw) in params {
-        let stype = properties
-            .get(k)
-            .and_then(|p| p.get("type")?.as_str())
-            .unwrap_or("string");
-        map.insert(
-            k.clone(),
-            convert_param(stype, &substitute(raw, user, auto)),
-        );
-    }
-    Value::Object(map)
+    build_params(properties, params, |raw| substitute(raw, user, auto))
 }
