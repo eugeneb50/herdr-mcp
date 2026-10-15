@@ -170,15 +170,11 @@ pub fn ToolRunner() -> Element {
             match client.call_tool(&name, &Value::Object(resolved)).await {
                 Err(e) => error.set(Some(format!("Request failed: {e}"))),
                 Ok(data) => {
-                    let is_err = data
-                        .get("is_error")
-                        .and_then(|x| x.as_bool())
-                        .unwrap_or(false);
-                    if is_err {
+                    if herdr_mcp_api::tool_is_error(&data) {
                         error.set(Some(
                             data.pointer("/content/0/text")
                                 .and_then(|x| x.as_str())
-                                .unwrap_or("tool reported is_error")
+                                .unwrap_or("tool reported isError")
                                 .to_string(),
                         ));
                     } else {

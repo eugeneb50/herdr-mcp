@@ -26,7 +26,7 @@ pub enum ApiError {
     Status { status: u16, body: String },
     /// 2xx response whose body didn't match the expected type.
     Decode(serde_json::Error),
-    /// The tool ran but reported `is_error`; carries its text.
+    /// The tool ran but reported `isError`; carries its text.
     Tool(String),
 }
 
@@ -192,7 +192,7 @@ impl ApiClient {
     }
 
     /// `clipboard_set` tool — write `text` to the server's clipboard.
-    /// A tool-level failure (`is_error`) is returned as an error.
+    /// A tool-level failure (`isError`) is returned as an error.
     pub async fn clipboard_set(&self, text: &str) -> Result<(), ApiError> {
         let v = self
             .call_tool("clipboard_set", &serde_json::json!({ "text": text }))
@@ -445,12 +445,18 @@ pub fn tool_text(v: &Value) -> String {
     v.as_str().map(str::to_string).unwrap_or_default()
 }
 
-/// Map a tool result with `is_error: true` to [`ApiError::Tool`].
+/// True when an MCP `CallToolResult` JSON reports a tool-level failure
+/// (`"isError": true`; rmcp serializes the field camelCase).
+pub fn tool_is_error(v: &Value) -> bool {
+    v.get("isError").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Map a tool result with `isError: true` to [`ApiError::Tool`].
 fn tool_ok(v: &Value) -> Result<&Value, ApiError> {
-    if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+    if tool_is_error(v) {
         let text = tool_text(v);
         return Err(ApiError::Tool(if text.is_empty() {
-            "tool reported is_error".into()
+            "tool reported isError".into()
         } else {
             text
         }));
@@ -496,7 +502,7 @@ mod tests {
                 { "type": "image", "data": "x" },
                 { "type": "text", "text": "line two" }
             ],
-            "is_error": false
+            "isError": false
         });
         assert_eq!(tool_text(&v), "line one\nline two");
         assert_eq!(tool_text(&serde_json::json!("bare")), "bare");
@@ -505,9 +511,9 @@ mod tests {
 
     #[test]
     fn tool_ok_surfaces_is_error_text() {
-        let bad = serde_json::json!({ "content": [{ "type": "text", "text": "no backend" }], "is_error": true });
+        let bad = serde_json::json!({ "content": [{ "type": "text", "text": "no backend" }], "isError": true });
         assert!(matches!(tool_ok(&bad), Err(ApiError::Tool(t)) if t == "no backend"));
-        let good = serde_json::json!({ "content": [], "is_error": false });
+        let good = serde_json::json!({ "content": [], "isError": false });
         assert!(tool_ok(&good).is_ok());
     }
 
