@@ -10,9 +10,9 @@ use uuid::Uuid;
 
 use crate::{
     AgentHandle, AgentsResponse, AutoVariablesResponse, CreateRecipeRequest, DiagnoseReport,
-    ExecutionResult, ExportScriptResponse, PlaygroundSnapshot, Recipe, RecipeRequest,
-    RecipeResponse, RecipeTemplate, SaveVariableRequest, ToolsResponse, TrimStatusResponse,
-    UpdateRecipeRequest, VariableStore,
+    ExecutionResult, ExportScriptResponse, PlaygroundSnapshot, ProxyPolicy, Recipe, RecipeRequest,
+    RecipeResponse, RecipeTemplate, SaveVariableRequest, ToolsResponse, TrimPolicy,
+    TrimStatusResponse, UpdateRecipeRequest, VariableStore,
 };
 
 /// Errors from [`ApiClient`].
@@ -26,6 +26,8 @@ pub enum ApiError {
     Status { status: u16, body: String },
     /// 2xx response whose body didn't match the expected type.
     Decode(serde_json::Error),
+    /// The tool ran but reported `is_error`; carries its text.
+    Tool(String),
 }
 
 impl std::fmt::Display for ApiError {
@@ -35,6 +37,7 @@ impl std::fmt::Display for ApiError {
             Self::Transport(e) => write!(f, "bridge unreachable: {e}"),
             Self::Status { status, body } => write!(f, "HTTP {status}: {body}"),
             Self::Decode(e) => write!(f, "unexpected response: {e}"),
+            Self::Tool(e) => write!(f, "tool error: {e}"),
         }
     }
 }
@@ -58,14 +61,26 @@ impl ApiClient {
     /// Client against an absolute base, e.g. `http://127.0.0.1:7676`. In the
     /// browser pass `window.location.origin` — reqwest rejects relative URLs.
     pub fn new(base: &str) -> Result<Self, ApiError> {
+        Self::build(base, reqwest::Client::new())
+    }
+
+    /// Like [`ApiClient::new`] with a per-request timeout (native only —
+    /// reqwest has no client timeouts on wasm).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_timeout(base: &str, timeout: std::time::Duration) -> Result<Self, ApiError> {
+        let http = reqwest::Client::builder()
+            .timeout(timeout)
+            .build()
+            .map_err(ApiError::Transport)?;
+        Self::build(base, http)
+    }
+
+    fn build(base: &str, http: reqwest::Client) -> Result<Self, ApiError> {
         let base = Url::parse(base).map_err(|e| ApiError::BadBase(format!("{base}: {e}")))?;
         if base.cannot_be_a_base() {
             return Err(ApiError::BadBase(base.to_string()));
         }
-        Ok(Self {
-            base,
-            http: reqwest::Client::new(),
-        })
+        Ok(Self { base, http })
     }
 
     /// The bridge base URL.
@@ -174,6 +189,81 @@ impl ApiClient {
     /// `GET /api/workspaces` — passthrough of `herdr workspace list` (JSON or null).
     pub async fn list_workspaces(&self) -> Result<Value, ApiError> {
         self.get(&["api", "workspaces"]).await
+    }
+
+    /// `clipboard_set` tool — write `text` to the server's clipboard.
+    /// A tool-level failure (`is_error`) is returned as an error.
+    pub async fn clipboard_set(&self, text: &str) -> Result<(), ApiError> {
+        let v = self
+            .call_tool("clipboard_set", &serde_json::json!({ "text": text }))
+            .await?;
+        tool_ok(&v).map(|_| ())
+    }
+
+    /// `clipboard_get` tool — the server clipboard's text.
+    pub async fn clipboard_get(&self) -> Result<String, ApiError> {
+        let v = self
+            .call_tool("clipboard_get", &serde_json::json!({}))
+            .await?;
+        tool_ok(&v).map(tool_text)
+    }
+
+    /// `trim_policy_get` tool for a pane id / role / label.
+    pub async fn trim_policy_get(&self, target: &str) -> Result<Value, ApiError> {
+        self.call_tool("trim_policy_get", &serde_json::json!({ "target": target }))
+            .await
+    }
+
+    /// `trim_policy_set` tool; `None` clears the policy.
+    pub async fn trim_policy_set(
+        &self,
+        target: &str,
+        policy: Option<&TrimPolicy>,
+    ) -> Result<Value, ApiError> {
+        self.call_tool(
+            "trim_policy_set",
+            &serde_json::json!({ "target": target, "policy": policy }),
+        )
+        .await
+    }
+
+    /// `proxy_diagnose` tool — CA status, defaults, per-pane policies.
+    pub async fn proxy_diagnose(&self) -> Result<Value, ApiError> {
+        self.call_tool("proxy_diagnose", &serde_json::json!({}))
+            .await
+    }
+
+    /// `proxy_startup` tool; `port` overrides the configured listen port.
+    pub async fn proxy_startup(&self, port: Option<u16>) -> Result<Value, ApiError> {
+        let params = match port {
+            Some(p) => serde_json::json!({ "port": p }),
+            None => serde_json::json!({}),
+        };
+        self.call_tool("proxy_startup", &params).await
+    }
+
+    /// `proxy_policy_get` tool for a pane id / label.
+    pub async fn proxy_policy_get(&self, target: &str) -> Result<Value, ApiError> {
+        self.call_tool("proxy_policy_get", &serde_json::json!({ "target": target }))
+            .await
+    }
+
+    /// `proxy_policy_set` tool.
+    pub async fn proxy_policy_set(
+        &self,
+        target: &str,
+        policy: &ProxyPolicy,
+    ) -> Result<Value, ApiError> {
+        self.call_tool(
+            "proxy_policy_set",
+            &serde_json::json!({
+                "target": target,
+                "trim_outbound": policy.trim_outbound,
+                "trim_inbound": policy.trim_inbound,
+                "stages": policy.stages,
+            }),
+        )
+        .await
     }
 
     // ── recipes ────────────────────────────────────────────────────────
@@ -336,6 +426,38 @@ impl ApiClient {
     }
 }
 
+/// Concatenated text of an MCP `CallToolResult` JSON: every `content[].text`
+/// joined by newlines; a bare JSON string is returned as-is; else empty.
+pub fn tool_text(v: &Value) -> String {
+    let texts: Vec<&str> = v
+        .get("content")
+        .and_then(|c| c.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.get("text").and_then(|t| t.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !texts.is_empty() {
+        return texts.join("\n");
+    }
+    v.as_str().map(str::to_string).unwrap_or_default()
+}
+
+/// Map a tool result with `is_error: true` to [`ApiError::Tool`].
+fn tool_ok(v: &Value) -> Result<&Value, ApiError> {
+    if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+        let text = tool_text(v);
+        return Err(ApiError::Tool(if text.is_empty() {
+            "tool reported is_error".into()
+        } else {
+            text
+        }));
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +486,29 @@ mod tests {
             c.url(&["api", "tools"]).as_str(),
             "http://host:1/prefix/api/tools"
         );
+    }
+
+    #[test]
+    fn tool_text_joins_content_items() {
+        let v = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "line one" },
+                { "type": "image", "data": "x" },
+                { "type": "text", "text": "line two" }
+            ],
+            "is_error": false
+        });
+        assert_eq!(tool_text(&v), "line one\nline two");
+        assert_eq!(tool_text(&serde_json::json!("bare")), "bare");
+        assert_eq!(tool_text(&serde_json::json!({ "content": [] })), "");
+    }
+
+    #[test]
+    fn tool_ok_surfaces_is_error_text() {
+        let bad = serde_json::json!({ "content": [{ "type": "text", "text": "no backend" }], "is_error": true });
+        assert!(matches!(tool_ok(&bad), Err(ApiError::Tool(t)) if t == "no backend"));
+        let good = serde_json::json!({ "content": [], "is_error": false });
+        assert!(tool_ok(&good).is_ok());
     }
 
     #[test]

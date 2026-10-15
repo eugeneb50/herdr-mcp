@@ -10,23 +10,6 @@ fn str_field(v: &Value, key: &str) -> Option<String> {
     v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
 }
 
-/// Extract clipboard text from a `clipboard_get` tool result
-/// (`content[].text` concatenated). Port of `parse_clipboard_text`.
-pub fn parse_clipboard_text(v: &Value) -> String {
-    let mut out = String::new();
-    if let Some(items) = v.get("content").and_then(|c| c.as_array()) {
-        for item in items {
-            if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(t);
-            }
-        }
-    }
-    out
-}
-
 #[component]
 pub fn Settings() -> Element {
     let client = use_api();
@@ -41,26 +24,15 @@ pub fn Settings() -> Element {
         let text = clip_text.read().clone();
         let client = client();
         spawn(async move {
-            let set_res = client
-                .call_tool("clipboard_set", &serde_json::json!({ "text": text }))
-                .await;
-            match set_res {
-                Err(e) => clip_result.set(Some(format!("set failed: {e}"))),
-                Ok(_) => match client
-                    .call_tool("clipboard_get", &serde_json::json!({}))
-                    .await
-                {
-                    Err(e) => clip_result.set(Some(format!("get failed: {e}"))),
-                    Ok(v) => {
-                        let back = parse_clipboard_text(&v);
-                        if back == text {
-                            clip_result.set(Some("round-trip ok".to_string()));
-                        } else {
-                            clip_result.set(Some(format!("mismatch: got {back:?}")));
-                        }
-                    }
+            let res = match client.clipboard_set(&text).await {
+                Err(e) => format!("set failed: {e}"),
+                Ok(()) => match client.clipboard_get().await {
+                    Err(e) => format!("get failed: {e}"),
+                    Ok(back) if back == text => "round-trip ok".to_string(),
+                    Ok(back) => format!("mismatch: got {back:?}"),
                 },
-            }
+            };
+            clip_result.set(Some(res));
         });
     };
 
@@ -133,27 +105,5 @@ fn EnvRow(name: &'static str, value: Option<String>) -> Element {
                 None => rsx! { span { class: "mono muted", "[not set]" } },
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_clipboard_text_from_content_array() {
-        let v = serde_json::json!({
-            "content": [
-                { "type": "text", "text": "hello" },
-                { "type": "text", "text": "world" }
-            ]
-        });
-        assert_eq!(parse_clipboard_text(&v), "hello\nworld");
-    }
-
-    #[test]
-    fn parse_clipboard_text_empty_when_no_text() {
-        let v = serde_json::json!({ "content": [{ "type": "image" }] });
-        assert_eq!(parse_clipboard_text(&v), "");
     }
 }

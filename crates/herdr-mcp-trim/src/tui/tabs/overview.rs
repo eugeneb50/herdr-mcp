@@ -33,18 +33,9 @@ fn render_intro(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(block, area);
 
     let trim = app.trim_status.as_ref();
-    let savings = trim
-        .and_then(|t| t.get("workspace_savings_pct"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let net = trim
-        .and_then(|t| t.get("net_saved_bytes"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let msgs = trim
-        .and_then(|t| t.get("messages_trimmed"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let savings = trim.map_or(0.0, |t| t.workspace_savings_pct);
+    let net = trim.map_or(0, |t| t.net_saved_bytes);
+    let msgs = trim.map_or(0, |t| t.messages_trimmed);
     let tool_count = app.playground.tools_list.len();
 
     let lines = vec![
@@ -54,7 +45,7 @@ fn render_intro(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         )),
         Line::from(""),
         detail_line("savings", &format!("{}%", savings.round() as i64), 12),
-        detail_line("net saved", &fmt_bytes(net as usize), 12),
+        detail_line("net saved", &fmt_bytes(net), 12),
         detail_line("msgs trimmed", &msgs.to_string(), 12),
         detail_line("tools", &tool_count.to_string(), 12),
         detail_line("panes tracked", &app.herdr.pane_count.to_string(), 12),

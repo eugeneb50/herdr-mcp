@@ -286,21 +286,13 @@ async fn apply_policy(app: &mut App) {
             return;
         }
     };
-    let _policy = serde_json::json!({
-        "stages": app.proxy.stages,
-        "trim_outbound": app.proxy.trim_outbound,
-        "trim_inbound": app.proxy.trim_inbound,
-    });
+    let policy = herdr_mcp_api::ProxyPolicy {
+        trim_outbound: app.proxy.trim_outbound,
+        trim_inbound: app.proxy.trim_inbound,
+        stages: app.proxy.stages.clone(),
+    };
     app.proxy.policy_msg = "applying...".into();
-    match http
-        .proxy_policy_set(
-            &target,
-            app.proxy.trim_outbound,
-            app.proxy.trim_inbound,
-            &app.proxy.stages,
-        )
-        .await
-    {
+    match http.proxy_policy_set(&target, &policy).await {
         Ok(_) => {
             app.proxy.policy_msg = format!("applied: {} stages", app.proxy.stages.len());
         }

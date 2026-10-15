@@ -61,7 +61,7 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
     match code {
         KeyCode::Char('d') if mods.contains(KeyModifiers::CONTROL) => {
             if let Some(http) = app.http.clone() {
-                match http.trim_diagnose().await {
+                match http.trim_diagnose(None).await {
                     Ok(v) => {
                         app.trim.diagnose = Some(v);
                         app.status_msg = "diagnose ok".into();
@@ -75,7 +75,7 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
         }
         KeyCode::Char('s') if mods.contains(KeyModifiers::CONTROL) => {
             if let Some(http) = app.http.clone() {
-                match http.trim_summary().await {
+                match http.trim_summary(None).await {
                     Ok(_) => app.status_msg = "summary notification sent".into(),
                     Err(e) => app.status_msg = format!("summary failed: {e}"),
                 }
@@ -84,7 +84,7 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
         }
         KeyCode::Char('o') if mods.contains(KeyModifiers::CONTROL) => {
             if let Some(http) = app.http.clone() {
-                match http.trim_dashboard_open().await {
+                match http.trim_dashboard_open(None).await {
                     Ok(v) => {
                         let pane = v.get("pane_id").and_then(|x| x.as_str()).unwrap_or("?");
                         app.status_msg = format!("opened dashboard pane {pane}");
@@ -374,16 +374,12 @@ async fn apply_policy(app: &mut App) {
             return;
         }
     };
-    let policy = if app.trim.stages.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::json!({
-            "stages": app.trim.stages,
-            "direction": direction_label(&app.trim.direction),
-        })
-    };
+    let policy = (!app.trim.stages.is_empty()).then(|| crate::policy::TrimPolicy {
+        stages: app.trim.stages.clone(),
+        direction: app.trim.direction,
+    });
     app.trim.policy_msg = "applying...".into();
-    match http.trim_policy_set(&target, policy).await {
+    match http.trim_policy_set(&target, policy.as_ref()).await {
         Ok(_) => {
             app.trim.policy_msg = format!(
                 "applied: {} stages, {}",
@@ -423,14 +419,7 @@ fn render_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let mut lines: Vec<Line> = Vec::new();
     if let Some(t) = app.trim_status.as_ref() {
-        let savings = t
-            .get("workspace_savings_pct")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let net = t.get("net_saved_bytes").and_then(|v| v.as_u64());
-        let gross = t.get("gross_saved_bytes").and_then(|v| v.as_u64());
-        let total = t.get("total_input_bytes").and_then(|v| v.as_u64());
-        let msgs = t.get("messages_trimmed").and_then(|v| v.as_u64());
+        let savings = t.workspace_savings_pct;
 
         lines.push(Line::from(vec![
             Span::styled("savings ", dim_style()),
@@ -438,26 +427,21 @@ fn render_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled(
                 format!(
                     "   net {}  gross {}  input {}  {} msgs",
-                    net.map(|n| fmt_bytes(n as usize)).unwrap_or_default(),
-                    gross.map(|n| fmt_bytes(n as usize)).unwrap_or_default(),
-                    total.map(|n| fmt_bytes(n as usize)).unwrap_or_default(),
-                    msgs.map(|n| n.to_string()).unwrap_or_default()
+                    fmt_bytes(t.net_saved_bytes),
+                    fmt_bytes(t.gross_saved_bytes),
+                    fmt_bytes(t.total_input_bytes),
+                    t.messages_trimmed
                 ),
                 dim_style(),
             ),
         ]));
         lines.push(Line::from(""));
 
-        if let Some(panes) = t.get("per_pane").and_then(|p| p.as_object()) {
-            let mut entries: Vec<_> = panes
+        {
+            let mut entries: Vec<_> = t
+                .per_pane
                 .iter()
-                .map(|(k, v)| {
-                    let net = v
-                        .get("net_saved_bytes")
-                        .and_then(|x| x.as_u64())
-                        .unwrap_or(0) as usize;
-                    (k.clone(), net)
-                })
+                .map(|(k, v)| (k.clone(), v.net_saved_bytes))
                 .collect();
             entries.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
             let max = entries.first().map(|(_, n)| (*n).max(1)).unwrap_or(1);
@@ -545,16 +529,8 @@ fn render_trim_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 .or_else(|| {
                     app.trim_status
                         .as_ref()
-                        .and_then(|t| t.get("active_policies"))
-                        .and_then(|p| p.as_object())
-                        .and_then(|pol| pol.get(&p.pane_id))
-                        .and_then(|s| s.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|s| s.as_str())
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        })
+                        .and_then(|t| t.active_policies.get(&p.pane_id))
+                        .map(|stages| stages.join(","))
                 })
                 .unwrap_or_default();
 
@@ -690,7 +666,7 @@ fn render_trim_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             "Diagnose:",
             dim_style().add_modifier(Modifier::BOLD),
         )));
-        let pretty = serde_json::to_string_pretty(d).unwrap_or_else(|_| d.to_string());
+        let pretty = serde_json::to_string_pretty(d).unwrap_or_default();
         for line in pretty.lines().take(6) {
             lines.push(Line::from(Span::styled(line.to_string(), dim_style())));
         }
