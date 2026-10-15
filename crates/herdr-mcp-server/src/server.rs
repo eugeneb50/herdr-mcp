@@ -4275,6 +4275,8 @@ async fn save_variable_handler(
     if req.key.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "key must not be empty".into()));
     }
+    crate::persistence::file_component(&req.key)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let now = chrono::Utc::now();
     let parse_uuid = |s: Option<String>| s.as_deref().and_then(|v| uuid::Uuid::parse_str(v).ok());
     let var = crate::persistence::VariableStore {
@@ -4314,6 +4316,8 @@ async fn delete_variable_handler(
     State(AppState { server, .. }): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    crate::persistence::file_component(&key)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     server
         .persistence
         .delete_variable(&key)
@@ -4865,6 +4869,20 @@ mod tests {
         assert_eq!(api.get_variable("greeting").await.unwrap().value, "hi");
         assert_eq!(api.list_variables().await.unwrap().len(), 1);
         api.delete_variable("greeting").await.unwrap();
+        // Path traversal through the key is a client error, not a write.
+        let evil = herdr_mcp_api::SaveVariableRequest {
+            key: "../escaped".into(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            api.save_variable(&evil).await,
+            Err(ApiError::Status { status: 400, .. })
+        ));
+        assert!(!tmp.path().join("data").join("escaped.json").exists());
+        assert!(matches!(
+            api.delete_variable("../escaped").await,
+            Err(ApiError::Status { status: 400, .. })
+        ));
         assert!(matches!(
             api.get_variable("greeting").await,
             Err(ApiError::Status { status: 404, .. })
