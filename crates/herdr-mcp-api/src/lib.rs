@@ -23,7 +23,7 @@ pub use recipe::{
     RecipeRequest, RecipeResponse, RecipeStep, RecipeTemplate, TemplateVariable,
     UpdateRecipeRequest,
 };
-pub use run::{RunAction, RunRecord, RunStatus, StartRunRequest};
+pub use run::{RunAction, RunEvent, RunEventKind, RunRecord, RunStatus, StartRunRequest};
 pub use trim::{DiagnoseReport, PaneStatus, SampleRoundtrip, TrimStatusResponse};
 /// Re-exported so clients name recipe/execution ids without their own uuid dep.
 pub use uuid::Uuid;

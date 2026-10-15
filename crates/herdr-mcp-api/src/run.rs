@@ -83,3 +83,48 @@ impl RunAction {
         }
     }
 }
+
+/// One thing that happened in a run. A run's events, in `seq` order, are its
+/// state: [`RunRecord`] is their fold. Stored one JSON object per line in
+/// `data/runs/{id}/events.jsonl`; streamed by `GET /api/events`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RunEvent {
+    pub run_id: Uuid,
+    /// Position in the run's log, from 0. Also the SSE event id.
+    pub seq: u64,
+    pub at: DateTime<Utc>,
+    #[serde(flatten)]
+    pub kind: RunEventKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RunEventKind {
+    /// The run's status changed (first event: `running`).
+    Status {
+        status: RunStatus,
+    },
+    StepStarted {
+        step: String,
+    },
+    /// The step's tool result (a serialized `CallToolResult`).
+    StepFinished {
+        step: String,
+        result: serde_json::Value,
+    },
+    StepFailed {
+        step: String,
+        error: String,
+        status_code: u16,
+    },
+    StepCancelled {
+        step: String,
+    },
+}
+
+impl RunEventKind {
+    /// True for the event that ends a run.
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Status { status } if status.is_finished())
+    }
+}

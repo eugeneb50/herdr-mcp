@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::variables::{ExecutionResult, Recipe, ScheduledRecipe};
 
-pub use herdr_mcp_api::{PlaygroundSnapshot, RunRecord, VariableStore};
+pub use crate::runs::RunHeader;
+pub use herdr_mcp_api::{PlaygroundSnapshot, RunEvent, VariableStore};
 
 /// A persistent bag of variables shared across recipe runs within a session.
 /// This is what enables chaining: the output variables of one recipe run are
@@ -274,23 +275,20 @@ impl Persistence {
         Ok(snapshot)
     }
 
-    /// Write `data/runs/{id}/run.json` atomically (temp file + rename): it is
-    /// rewritten at every step while clients may be reading it.
-    pub async fn save_run(&self, run: &RunRecord) -> anyhow::Result<()> {
-        let dir = self.data_dir.join("runs").join(run.id.to_string());
+    fn run_dir(&self, id: &Uuid) -> PathBuf {
+        self.data_dir.join("runs").join(id.to_string())
+    }
+
+    /// Write a run's header (`data/runs/{id}/run.json`). Written once, at start.
+    pub async fn save_run_header(&self, header: &RunHeader) -> anyhow::Result<()> {
+        let dir = self.run_dir(&header.id);
         fs::create_dir_all(&dir).await?;
-        let tmp = dir.join("run.json.tmp");
-        fs::write(&tmp, serde_json::to_string_pretty(run)?).await?;
-        fs::rename(&tmp, dir.join("run.json")).await?;
+        fs::write(dir.join("run.json"), serde_json::to_string_pretty(header)?).await?;
         Ok(())
     }
 
-    pub async fn load_run(&self, id: &Uuid) -> anyhow::Result<Option<RunRecord>> {
-        let path = self
-            .data_dir
-            .join("runs")
-            .join(id.to_string())
-            .join("run.json");
+    pub async fn load_run_header(&self, id: &Uuid) -> anyhow::Result<Option<RunHeader>> {
+        let path = self.run_dir(id).join("run.json");
         if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
             return Ok(None);
         }
@@ -299,24 +297,60 @@ impl Persistence {
         )?))
     }
 
-    /// Every readable run record, newest first.
-    pub async fn list_runs(&self) -> anyhow::Result<Vec<RunRecord>> {
+    /// Append one event to `data/runs/{id}/events.jsonl`.
+    pub async fn append_run_event(&self, event: &RunEvent) -> anyhow::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let mut line = serde_json::to_string(event)?;
+        line.push('\n');
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.run_dir(&event.run_id).join("events.jsonl"))
+            .await?;
+        f.write_all(line.as_bytes()).await?;
+        // tokio writes on a background thread: without the flush the event
+        // may not be on disk (or may land after the next one) when we return,
+        // and a reader could see a finished run without its final event.
+        f.flush().await?;
+        Ok(())
+    }
+
+    /// A run's events with `seq >= since`, in order. A line that doesn't
+    /// parse (a write cut short by a crash) is skipped.
+    pub async fn load_run_events(&self, id: &Uuid, since: u64) -> anyhow::Result<Vec<RunEvent>> {
+        let path = self.run_dir(id).join("events.jsonl");
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(Vec::new());
+        }
+        Ok(fs::read_to_string(path)
+            .await?
+            .lines()
+            .filter_map(|l| serde_json::from_str::<RunEvent>(l).ok())
+            .filter(|e| e.seq >= since)
+            .collect())
+    }
+
+    /// Ids of every run with a header on disk.
+    pub async fn list_run_ids(&self) -> anyhow::Result<Vec<Uuid>> {
         let dir = self.data_dir.join("runs");
-        let mut runs = Vec::new();
+        let mut ids = Vec::new();
         if !tokio::fs::try_exists(&dir).await.unwrap_or(false) {
-            return Ok(runs);
+            return Ok(ids);
         }
         let mut entries = fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
-            let Ok(content) = fs::read_to_string(entry.path().join("run.json")).await else {
-                continue;
-            };
-            if let Ok(run) = serde_json::from_str::<RunRecord>(&content) {
-                runs.push(run);
+            if let Some(id) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| Uuid::parse_str(n).ok())
+                && tokio::fs::try_exists(entry.path().join("run.json"))
+                    .await
+                    .unwrap_or(false)
+            {
+                ids.push(id);
             }
         }
-        runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
-        Ok(runs)
+        Ok(ids)
     }
 
     pub async fn save_execution(&self, result: &ExecutionResult) -> anyhow::Result<()> {
