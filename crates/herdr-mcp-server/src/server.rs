@@ -13,7 +13,7 @@ use crate::templates as tmpl;
 use crate::variables::{ExecutionResult, ExecutionStatus, Recipe, RecipeStep, ScheduledRecipe};
 use herdr_mcp_trim::pfc1::CompressionKey;
 use herdr_mcp_trim::pipeline;
-use herdr_mcp_trim::policy::TrimPolicy;
+use herdr_mcp_trim::policy::{TrimPolicy, TrimPolicyExt};
 use herdr_mcp_trim::stats;
 
 // ── Parameter structs ────────────────────────────────────────────────
@@ -548,45 +548,8 @@ pub struct TrimStatusParams {
     pub workspace_id: Option<String>,
 }
 
-/// Per-pane savings breakdown returned by `trim_status`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PaneStatus {
-    pub gross_saved_bytes: usize,
-    pub net_saved_bytes: usize,
-    pub messages_trimmed: u64,
-}
-
-/// Aggregate trim savings across a workspace (or all workspaces).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct TrimStatusResponse {
-    pub workspace_net_pct: f64,
-    pub workspace_savings_pct: f64,
-    pub gross_saved_bytes: usize,
-    pub net_saved_bytes: usize,
-    pub total_input_bytes: usize,
-    pub messages_trimmed: u64,
-    pub per_pane: HashMap<String, PaneStatus>,
-    pub active_policies: HashMap<String, Vec<String>>,
-}
-
-/// A single round-trip sample used by `trim_diagnose`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SampleRoundtrip {
-    pub input: String,
-    pub compressed: String,
-    pub decompressed: String,
-    pub matches: bool,
-}
-
-/// End-to-end readiness report returned by `trim_diagnose`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DiagnoseReport {
-    pub pipeline_roundtrip_ok: bool,
-    pub pfc1_memory_valid: bool,
-    pub active_policies: usize,
-    pub badge_reachable: bool,
-    pub sample_roundtrip: Option<SampleRoundtrip>,
-}
+/// Trim wire types, defined once in `herdr-mcp-api`.
+pub use herdr_mcp_api::{DiagnoseReport, PaneStatus, SampleRoundtrip, TrimStatusResponse};
 
 /// Parameters for the `proxy_startup` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
@@ -2823,7 +2786,6 @@ async fn resolve_pane_id(
 // ── HTTP Bridge ───────────────────────────────────────────────────────
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use axum::{
     Json, Router,
@@ -2831,43 +2793,36 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use herdr_mcp_api::{
+    AgentsResponse, AutoVariablesResponse, CreateRecipeRequest, ExportScriptResponse,
+    RecipeRequest, RecipeResponse, SaveVariableRequest, ToolsResponse, UpdateRecipeRequest,
+};
 use regex::Regex;
-use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 
-/// Shared state for the Axum HTTP router: the server plus the optional cached
-/// frontend HTML (single-file build at `dist/index.html`). The bytes are read
-/// once at startup and served for every `GET /` and SPA fallback request.
+/// Shared state for the Axum HTTP router.
 #[derive(Clone)]
 struct AppState {
     server: HerdrMcpServer,
-    /// Cached bytes of `dist/index.html`, read once at router construction.
-    index_html: Option<Arc<Vec<u8>>>,
 }
 
-/// Build the Axum router for the web playground. Shared by [`start_http`] and
-/// the in-process dashboard that runs the server stack without MCP stdio.
-fn http_router(server: HerdrMcpServer) -> Router {
-    let index_html = match std::fs::read("./dist/index.html") {
-        Ok(bytes) => {
-            tracing::info!(
-                "serving frontend from ./dist/index.html ({} bytes)",
-                bytes.len()
-            );
-            Some(Arc::new(bytes))
-        }
-        Err(e) => {
-            let hint = format!(
-                "frontend not built: ./dist/index.html ({e}); \
-                 run `npm run build` in the repo root. /api/* still available."
-            );
-            tracing::warn!("{hint}");
-            None
-        }
-    };
-    let state = AppState { server, index_html };
+/// Build the Axum router: `/api/*` plus the Dioxus web UI served from
+/// `web_dir`, with unknown paths falling back to `index.html` so client-side
+/// routes resolve.
+fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path) -> Router {
+    let index = web_dir.join("index.html");
+    if index.is_file() {
+        tracing::info!("serving web UI from {}", web_dir.display());
+    } else {
+        tracing::warn!(
+            "web UI not built: {} missing; run `dx bundle --platform web --release` \
+             in crates/herdr-mcp-ui (or set http.web-dir). /api/* still available.",
+            index.display()
+        );
+    }
+    let state = AppState { server };
 
     Router::new()
-        .route("/", get(index_html_handler))
         .route("/api/health", get(health_handler))
         .route("/api/config", get(config_handler))
         .route("/api/tools", get(list_tools_handler))
@@ -2909,33 +2864,22 @@ fn http_router(server: HerdrMcpServer) -> Router {
             "/api/trim/dashboard/open",
             post(trim_dashboard_open_http_handler),
         )
-        .layer(
-            CorsLayer::new()
-                .allow_origin(axum::http::HeaderValue::from_str("http://localhost:5173").unwrap())
-                .allow_origin(axum::http::HeaderValue::from_str("http://localhost:7676").unwrap())
-                .allow_methods(vec![
-                    axum::http::Method::GET,
-                    axum::http::Method::POST,
-                    axum::http::Method::PUT,
-                    axum::http::Method::DELETE,
-                    axum::http::Method::OPTIONS,
-                ])
-                .allow_headers(vec![
-                    axum::http::header::CONTENT_TYPE,
-                    axum::http::header::AUTHORIZATION,
-                ]),
-        )
-        .fallback(index_html_handler)
+        .fallback_service(ServeDir::new(web_dir).fallback(ServeFile::new(index)))
         .with_state(state)
 }
 
 /// Start the Axum HTTP server for the web playground. Bind lives until the
 /// returned task is aborted or the process exits. The route table is built by
 /// [`http_router`]; this is the thin bind + serve wrapper.
-pub async fn start_http(server: HerdrMcpServer, port: u16) -> anyhow::Result<()> {
-    let app = http_router(server);
+pub async fn start_http(
+    server: HerdrMcpServer,
+    bind: &str,
+    port: u16,
+    web_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let app = http_router(server, web_dir);
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    let listener = tokio::net::TcpListener::bind((bind, port)).await?;
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -2958,9 +2902,13 @@ async fn config_handler(
     }))
 }
 
-async fn list_tools_handler() -> Json<serde_json::Value> {
-    let tools = HerdrMcpServer::tool_router().list_all();
-    Json(serde_json::json!({ "tools": tools }))
+async fn list_tools_handler() -> Json<ToolsResponse> {
+    let tools = HerdrMcpServer::tool_router()
+        .list_all()
+        .iter()
+        .filter_map(|t| serde_json::to_value(t).ok())
+        .collect();
+    Json(ToolsResponse { tools })
 }
 
 async fn call_tool_handler(
@@ -2982,12 +2930,12 @@ async fn call_tool_handler(
 async fn agents_handler(
     State(AppState { server, .. }): State<AppState>,
     Query(params): Query<TrimStatusParams>,
-) -> Json<serde_json::Value> {
-    let handles = match &params.workspace_id {
+) -> Json<AgentsResponse> {
+    let agents = match &params.workspace_id {
         Some(ws) if !ws.is_empty() => server.registry.list_for_ws(ws).await,
         _ => server.registry.inner_snapshot().await,
     };
-    Json(serde_json::json!({ "agents": handles }))
+    Json(AgentsResponse { agents })
 }
 
 /// `GET /api/workspaces` — passthrough to `herdr workspace list` for the
@@ -2999,25 +2947,6 @@ async fn workspaces_handler() -> Json<serde_json::Value> {
         .map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap_or(serde_json::json!(null)))
         .unwrap_or(serde_json::json!(null));
     Json(raw)
-}
-
-/// `GET /` (also SPA fallback) — serves the single-file frontend build, or a
-/// plain-text hint when `dist/index.html` is missing.
-async fn index_html_handler(
-    State(AppState { index_html, .. }): State<AppState>,
-) -> (StatusCode, [(&'static str, &'static str); 1], Vec<u8>) {
-    match &index_html {
-        Some(bytes) => (
-            StatusCode::OK,
-            [("content-type", "text/html; charset=utf-8")],
-            bytes.as_ref().clone(),
-        ),
-        None => (
-            StatusCode::NOT_FOUND,
-            [("content-type", "text/plain; charset=utf-8")],
-            b"frontend not built \xe2\x80\x94 run `npm run build` in the repo root".to_vec(),
-        ),
-    }
 }
 
 fn mcp_err_to_http(e: McpError) -> (StatusCode, String) {
@@ -3474,28 +3403,6 @@ async fn dispatch_tool(
 
 // ── Recipe Engine ──────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct RecipeRequest {
-    #[serde(default)]
-    name: Option<String>,
-    /// herdr workspace id (e.g. "w1"). Variables are scoped to this workspace so
-    /// recipes can chain across its panes/tabs.
-    #[serde(default)]
-    session_id: Option<String>,
-    steps: Vec<RecipeStep>,
-}
-
-#[derive(Debug, Serialize)]
-struct RecipeResponse {
-    results: HashMap<String, serde_json::Value>,
-    status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failed_step: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
 /// Shared recipe execution core. Seeds `accumulated` from the live agent
 /// registry for `session_id` so `{{pane_id.output}}` and `{{role.output}}`
 /// resolve to another agent's captured work product.
@@ -3687,35 +3594,6 @@ fn json_value_to_string(v: &serde_json::Value) -> String {
 
 // ── Recipe CRUD API ────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
-struct CreateRecipeRequest {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-    steps: Vec<RecipeStepInput>,
-    #[serde(default)]
-    variables: HashMap<String, serde_json::Value>,
-    #[serde(default)]
-    category: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RecipeStepInput {
-    id: String,
-    tool: String,
-    params: serde_json::Value,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct UpdateRecipeRequest {
-    name: Option<String>,
-    description: Option<String>,
-    steps: Option<Vec<RecipeStepInput>>,
-    variables: Option<HashMap<String, serde_json::Value>>,
-}
-
 async fn list_templates_handler() -> Result<Json<Vec<tmpl::RecipeTemplate>>, (StatusCode, String)> {
     Ok(Json(tmpl::list_templates()))
 }
@@ -3740,16 +3618,7 @@ async fn create_recipe_handler(
         id: uuid::Uuid::new_v4(),
         name: req.name,
         description: req.description,
-        steps: req
-            .steps
-            .into_iter()
-            .map(|s| RecipeStep {
-                id: s.id,
-                tool: s.tool,
-                params: s.params,
-                description: s.description,
-            })
-            .collect(),
+        steps: req.steps,
         variables: req.variables,
         created_at: now,
         updated_at: now,
@@ -3798,15 +3667,7 @@ async fn update_recipe_handler(
         recipe.description = Some(desc);
     }
     if let Some(steps) = req.steps {
-        recipe.steps = steps
-            .into_iter()
-            .map(|s| RecipeStep {
-                id: s.id,
-                tool: s.tool,
-                params: s.params,
-                description: s.description,
-            })
-            .collect();
+        recipe.steps = steps;
     }
     if let Some(vars) = req.variables {
         recipe.variables = vars;
@@ -3959,7 +3820,7 @@ async fn run_recipe_by_id_handler(
 async fn export_recipe_handler(
     State(AppState { server, .. }): State<AppState>,
     Path(id): Path<uuid::Uuid>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+) -> Result<Json<ExportScriptResponse>, (StatusCode, String)> {
     let recipe = server
         .persistence
         .load_recipe(&id)
@@ -3984,8 +3845,9 @@ async fn export_recipe_handler(
         lines.push(String::new());
     }
 
-    let script = lines.join("\n");
-    Ok(Json(serde_json::json!({ "script": script })))
+    Ok(Json(ExportScriptResponse {
+        script: lines.join("\n"),
+    }))
 }
 
 fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>) -> String {
@@ -4324,19 +4186,6 @@ fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>
 /// may send a full `VariableStore`. Workspace scoping for herdr (`w1`, …)
 /// lives in `SessionVars` via `var_set`; `VariableStore.session_id` stays
 /// `Option<Uuid>` and is only populated when the caller passes a real UUID.
-#[derive(Debug, Deserialize)]
-struct SaveVariableRequest {
-    key: String,
-    #[serde(default)]
-    value: serde_json::Value,
-    #[serde(default)]
-    id: Option<uuid::Uuid>,
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    execution_id: Option<String>,
-}
-
 async fn list_variables_handler(
     State(AppState { server, .. }): State<AppState>,
 ) -> Result<Json<Vec<crate::persistence::VariableStore>>, (StatusCode, String)> {
@@ -4355,7 +4204,7 @@ async fn list_variables_handler(
 async fn auto_variables_handler(
     State(AppState { server, .. }): State<AppState>,
     Query(params): Query<TrimStatusParams>,
-) -> Json<serde_json::Value> {
+) -> Json<AutoVariablesResponse> {
     let ws = params
         .workspace_id
         .filter(|s| !s.trim().is_empty())
@@ -4382,7 +4231,10 @@ async fn auto_variables_handler(
             merged.entry(handle.role.clone()).or_insert(obj);
         }
     }
-    Json(serde_json::json!({ "workspace_id": ws, "variables": merged }))
+    Json(AutoVariablesResponse {
+        workspace_id: ws,
+        variables: merged,
+    })
 }
 
 /// `GET /api/playground?workspace_id=w1` — load last-used playground values.
@@ -4969,5 +4821,115 @@ mod tests {
         // default target_hosts from Config::default()
         let hosts = json["ca"]["target_hosts"].as_array().unwrap();
         assert!(!hosts.is_empty());
+    }
+
+    /// Contract test: the shared `herdr_mcp_api::ApiClient` (used by the web
+    /// UI and TUI) round-trips against the real router, so a drift between
+    /// server handlers and client types fails here, not in the browser.
+    #[tokio::test]
+    async fn http_contract_roundtrip_with_api_client() {
+        use herdr_mcp_api::{ApiClient, ApiError, CreateRecipeRequest, PlaygroundSnapshot};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let registry = AgentRegistry::new(std::sync::Arc::new(Persistence::new(data_dir.clone())));
+        let server = HerdrMcpServer::new(Persistence::new(data_dir), registry);
+        let web_dir = tmp.path().join("web");
+        std::fs::create_dir_all(&web_dir).unwrap();
+        std::fs::write(web_dir.join("index.html"), "<html>ui</html>").unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = http_router(server, &web_dir);
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let api = ApiClient::new(&format!("http://{addr}")).unwrap();
+
+        api.health().await.unwrap();
+        assert!(!api.list_tools().await.unwrap().is_empty());
+        assert!(api.list_agents(None).await.unwrap().is_empty());
+        assert!(!api.list_templates().await.unwrap().is_empty());
+        let status = api.trim_status(Some("w1")).await.unwrap();
+        assert_eq!(status.messages_trimmed, 0);
+        assert_eq!(
+            api.auto_variables(Some("w9")).await.unwrap().workspace_id,
+            "w9"
+        );
+
+        // Variables: 201 / 204 empty bodies must decode as Ok(()).
+        let req = herdr_mcp_api::SaveVariableRequest {
+            key: "greeting".into(),
+            value: serde_json::json!("hi"),
+            ..Default::default()
+        };
+        api.save_variable(&req).await.unwrap();
+        assert_eq!(api.get_variable("greeting").await.unwrap().value, "hi");
+        assert_eq!(api.list_variables().await.unwrap().len(), 1);
+        api.delete_variable("greeting").await.unwrap();
+        assert!(matches!(
+            api.get_variable("greeting").await,
+            Err(ApiError::Status { status: 404, .. })
+        ));
+
+        // Recipes CRUD + export.
+        let created = api
+            .create_recipe(&CreateRecipeRequest {
+                name: "r1".into(),
+                description: None,
+                steps: vec![RecipeStep {
+                    id: "s1".into(),
+                    tool: "status".into(),
+                    params: serde_json::json!({}),
+                    description: None,
+                }],
+                variables: HashMap::new(),
+                category: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(api.get_recipe(created.id).await.unwrap().name, "r1");
+        let updated = api
+            .update_recipe(
+                created.id,
+                &herdr_mcp_api::UpdateRecipeRequest {
+                    name: Some("r2".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.name, "r2");
+        assert!(
+            api.export_recipe(created.id)
+                .await
+                .unwrap()
+                .contains("# Recipe: r2")
+        );
+        assert_eq!(api.list_recipes().await.unwrap().len(), 1);
+        api.delete_recipe(created.id).await.unwrap();
+        assert!(api.list_recipes().await.unwrap().is_empty());
+
+        // Playground: client sends a default updated_at; the server stamps it.
+        let snap = PlaygroundSnapshot {
+            workspace_id: "w1".into(),
+            tool_name: Some("status".into()),
+            ..Default::default()
+        };
+        api.save_playground(&snap).await.unwrap();
+        let back = api.get_playground("w1").await.unwrap();
+        assert_eq!(back.tool_name.as_deref(), Some("status"));
+        assert!(back.updated_at > chrono::DateTime::<chrono::Utc>::default());
+
+        // Unknown tool → typed 404, and the SPA fallback still serves the UI.
+        assert!(matches!(
+            api.call_tool("no_such_tool", &serde_json::json!({})).await,
+            Err(ApiError::Status { status: 404, .. })
+        ));
+        let page = reqwest::get(format!("http://{addr}/playground"))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(page, "<html>ui</html>");
     }
 }

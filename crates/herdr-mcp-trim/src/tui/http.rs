@@ -61,7 +61,7 @@ impl HttpClient {
     /// several closed ports fails fast instead of hanging for minutes. Returns
     /// the first port that answers `GET /api/health` with HTTP 200, or `None`.
     pub async fn discover_bridge(initial: u16) -> Option<u16> {
-        let mut candidates: Vec<u16> = vec![initial, 8080, 7676, 5173];
+        let mut candidates: Vec<u16> = vec![initial, 8080, 7676];
         candidates.dedup();
         let probe = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(500))

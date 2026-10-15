@@ -2,34 +2,63 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::io::Write;
 
-fn bin() -> Command {
+fn daemon() -> Command {
     Command::cargo_bin("herdr-mcp").unwrap()
 }
 
+fn tools() -> Command {
+    Command::cargo_bin("herdr-trim").unwrap()
+}
+
 #[test]
-fn cli_help_lists_subcommands() {
-    bin()
+fn cli_daemon_help_lists_serve_only() {
+    daemon()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("serve"))
+        .stdout(predicate::str::contains("trim").not())
+        .stdout(predicate::str::contains("folder-key").not())
+        .stdout(predicate::str::contains("dashboard").not());
+}
+
+#[test]
+fn cli_tools_help_lists_trim_dashboard_folder_key() {
+    tools()
         .arg("--help")
         .assert()
         .success()
         .stdout(predicate::str::contains("trim"))
         .stdout(predicate::str::contains("folder-key"))
-        .stdout(predicate::str::contains("serve"))
-        .stdout(predicate::str::contains("dashboard"));
+        .stdout(predicate::str::contains("dashboard"))
+        .stdout(predicate::str::contains("serve").not());
 }
 
 #[test]
-fn cli_version_prints_version() {
-    bin()
-        .arg("--version")
+fn cli_versions_print_version() {
+    for bin in ["herdr-mcp", "herdr-trim"] {
+        Command::cargo_bin(bin)
+            .unwrap()
+            .arg("--version")
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("0.1.0"));
+    }
+}
+
+#[test]
+fn cli_daemon_rejects_moved_subcommands() {
+    // Hard break per spec: local tools moved to herdr-trim.
+    daemon()
+        .args(["trim", "hello"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("0.1.0"));
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"));
 }
 
 #[test]
 fn cli_trim_decompress_is_identity() {
-    bin()
+    tools()
         .args(["trim", "--decompress", "hello world"])
         .assert()
         .success()
@@ -39,7 +68,7 @@ fn cli_trim_decompress_is_identity() {
 #[test]
 fn cli_trim_pfc1_emits_report() {
     let data = tempfile::tempdir().unwrap();
-    bin()
+    tools()
         .args([
             "trim",
             "--stage",
@@ -57,7 +86,7 @@ fn cli_trim_pfc1_emits_report() {
 #[test]
 fn cli_trim_caveman_emits_report() {
     let data = tempfile::tempdir().unwrap();
-    bin()
+    tools()
         .args([
             "trim",
             "--stage",
@@ -74,7 +103,7 @@ fn cli_trim_caveman_emits_report() {
 #[test]
 fn cli_trim_invalid_stage_fails() {
     let data = tempfile::tempdir().unwrap();
-    bin()
+    tools()
         .args([
             "trim",
             "--stage",
@@ -90,7 +119,7 @@ fn cli_trim_invalid_stage_fails() {
 #[test]
 fn cli_folder_key_list_empty() {
     let data = tempfile::tempdir().unwrap();
-    bin()
+    tools()
         .args([
             "folder-key",
             "list",
@@ -115,7 +144,7 @@ fn cli_folder_key_build_then_show() {
     .unwrap();
     drop(f);
 
-    bin()
+    tools()
         .args([
             "folder-key",
             "build",
@@ -127,7 +156,7 @@ fn cli_folder_key_build_then_show() {
         .success()
         .stdout(predicate::str::contains("Built key"));
 
-    bin()
+    tools()
         .args(["folder-key", "show", folder.path().to_str().unwrap()])
         .assert()
         .success()
@@ -143,7 +172,7 @@ fn cli_folder_key_decompress_runs() {
     writeln!(f, "configuration gateway profile session").unwrap();
     drop(f);
 
-    bin()
+    tools()
         .args([
             "folder-key",
             "build",
@@ -154,7 +183,7 @@ fn cli_folder_key_decompress_runs() {
         .assert()
         .success();
 
-    bin()
+    tools()
         .args([
             "folder-key",
             "decompress",
@@ -168,7 +197,7 @@ fn cli_folder_key_decompress_runs() {
 #[test]
 fn cli_trim_missing_input_fails() {
     let data = tempfile::tempdir().unwrap();
-    bin()
+    tools()
         .args([
             "trim",
             "--stage",
@@ -186,7 +215,7 @@ fn cli_trim_missing_input_fails() {
 #[test]
 fn cli_serve_proxy_port_flag_accepted() {
     let data = tempfile::tempdir().unwrap();
-    bin()
+    daemon()
         .args([
             "serve",
             "--proxy-port",
@@ -204,7 +233,7 @@ fn cli_serve_proxy_port_flag_accepted() {
 #[test]
 fn cli_serve_proxy_and_http_together() {
     let data = tempfile::tempdir().unwrap();
-    bin()
+    daemon()
         .args([
             "serve",
             "--proxy-port",

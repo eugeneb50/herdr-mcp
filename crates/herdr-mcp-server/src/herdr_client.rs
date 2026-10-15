@@ -56,37 +56,8 @@ impl AgentStatus {
     }
 }
 
-/// A registered agent: its pane address plus the last captured work product.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentHandle {
-    pub pane_id: String,
-    pub workspace_id: String,
-    #[serde(default)]
-    pub tab_id: String,
-    #[serde(default)]
-    pub agent: String,
-    /// Human-assigned role used for `{{role.output}}` interpolation (e.g. "agentA").
-    #[serde(default)]
-    pub role: String,
-    /// Human-assigned pane label (set via `herdr pane rename`), used for targeting.
-    #[serde(default)]
-    pub label: String,
-    #[serde(default)]
-    pub status: String,
-    /// Pane output captured at last idle — the agent's work product.
-    #[serde(default)]
-    pub output: String,
-    /// Optional message-trim policy (default off). Persisted as part of the
-    /// agent blob, so recipes can opt a pane into compression.
-    #[serde(default)]
-    pub trim_policy: Option<TrimPolicy>,
-    /// Optional per-pane proxy policy (default off). Controls HTTPS
-    /// interception trim for this pane's LLM traffic.
-    #[serde(default)]
-    pub proxy_policy: Option<ProxyPolicy>,
-    #[serde(default)]
-    pub updated_at: i64,
-}
+/// Wire type, defined once in `herdr-mcp-api`.
+pub use herdr_mcp_api::AgentHandle;
 
 /// Thread-safe registry of agents, keyed by herdr pane id.
 #[derive(Clone)]

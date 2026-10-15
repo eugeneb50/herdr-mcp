@@ -3,18 +3,9 @@ use std::path::PathBuf;
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::variables::{ExecutionResult, Recipe, RecipeStep, ScheduledRecipe};
+use crate::variables::{ExecutionResult, Recipe, ScheduledRecipe};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct VariableStore {
-    pub id: Uuid,
-    pub session_id: Option<Uuid>,
-    pub execution_id: Option<Uuid>,
-    pub key: String,
-    pub value: serde_json::Value,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
+pub use herdr_mcp_api::{PlaygroundSnapshot, VariableStore};
 
 /// A persistent bag of variables shared across recipe runs within a session.
 /// This is what enables chaining: the output variables of one recipe run are
@@ -26,20 +17,6 @@ pub struct VariableStore {
 pub struct SessionVars {
     pub session_id: String,
     pub variables: std::collections::HashMap<String, serde_json::Value>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-/// Playground last-used UI state (tool selection + field values + builder).
-/// Source of truth: created here — `data/sessions/{ws}.playground.json`.
-/// This is the canonical store for "last used values persist between sessions".
-/// TUI and web resolve it on demand via `GET /api/playground`; never cached.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PlaygroundSnapshot {
-    pub workspace_id: String,
-    pub tool_name: Option<String>,
-    pub field_values: std::collections::HashMap<String, String>,
-    pub builder_recipe_name: String,
-    pub builder_steps: Vec<RecipeStep>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 

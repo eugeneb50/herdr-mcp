@@ -133,6 +133,22 @@ pub struct HttpConfig {
     pub port: Option<u16>,
     pub bind_addr: Option<String>,
     pub http_only: bool,
+    /// Directory holding the built Dioxus web UI (`dx bundle` output).
+    /// Unset → [`HttpConfig::resolved_web_dir`] falls back to the workspace
+    /// bundle path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_dir: Option<PathBuf>,
+}
+
+impl HttpConfig {
+    /// Web UI directory: explicit `web_dir`, else the in-repo
+    /// `dx bundle --platform web --release` output for `herdr-mcp-ui`.
+    pub fn resolved_web_dir(&self) -> PathBuf {
+        self.web_dir.clone().unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/dx/herdr-mcp-ui/release/web/public")
+        })
+    }
 }
 
 impl Default for HttpConfig {
@@ -141,6 +157,7 @@ impl Default for HttpConfig {
             port: Some(7676),
             bind_addr: Some("127.0.0.1".into()),
             http_only: false,
+            web_dir: None,
         }
     }
 }
@@ -411,6 +428,9 @@ impl Config {
         }
         if let Ok(v) = env::var("HERDR_MCP_HTTP_BIND") {
             self.http.bind_addr = Some(v);
+        }
+        if let Ok(v) = env::var("HERDR_MCP_WEB_DIR") {
+            self.http.web_dir = Some(PathBuf::from(v));
         }
 
         // mcp

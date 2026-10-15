@@ -3,47 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Recipe {
-    pub id: Uuid,
-    pub name: String,
-    pub description: Option<String>,
-    pub steps: Vec<RecipeStep>,
-    pub variables: HashMap<String, serde_json::Value>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub is_template: bool,
-    pub category: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecipeStep {
-    pub id: String,
-    pub tool: String,
-    pub params: serde_json::Value,
-    pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ExecutionStatus {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionResult {
-    pub id: Uuid,
-    pub recipe_id: Uuid,
-    pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub status: ExecutionStatus,
-    pub results: HashMap<String, serde_json::Value>,
-    pub variables: HashMap<String, serde_json::Value>,
-    pub error: Option<String>,
-}
+pub use herdr_mcp_api::{ExecutionResult, ExecutionStatus, Recipe, RecipeStep};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledRecipe {

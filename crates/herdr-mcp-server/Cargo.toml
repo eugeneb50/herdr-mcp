@@ -7,7 +7,7 @@ edition = "2024"
 rmcp = { workspace = true, features = ["server", "transport-io", "macros"] }
 tokio = { workspace = true, features = ["full"] }
 axum = { workspace = true }
-tower-http = { workspace = true, features = ["cors"] }
+tower-http = { workspace = true, features = ["fs"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
@@ -21,6 +21,7 @@ regex = { workspace = true }
 lazy_static = { workspace = true }
 
 herdr-mcp-trim = { path = "../herdr-mcp-trim" }
+herdr-mcp-api = { path = "../herdr-mcp-api" }
 herdr-mcp-core = { path = "../herdr-mcp-core" }
 herdr-mcp-proxy = { path = "../herdr-mcp-proxy" }
 
@@ -28,3 +29,4 @@ herdr-mcp-proxy = { path = "../herdr-mcp-proxy" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
 pretty_assertions = { workspace = true }
+reqwest = { workspace = true }

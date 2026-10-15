@@ -2,8 +2,5 @@
 /target
 Cargo.lock
 
-# Node
-/node_modules
-/dist
 .DS_Store
 *.log

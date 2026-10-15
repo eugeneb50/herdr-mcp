@@ -1,29 +1,10 @@
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::variables::{Recipe, RecipeStep};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecipeTemplate {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub category: String,
-    pub variables: Vec<TemplateVariable>,
-    pub steps: Vec<RecipeStep>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TemplateVariable {
-    pub name: String,
-    pub description: String,
-    #[serde(default)]
-    pub default_value: Option<serde_json::Value>,
-    #[serde(default)]
-    pub required: bool,
-}
+pub use herdr_mcp_api::{RecipeTemplate, TemplateVariable};
 
 /// Get the bundled template library.
 pub fn bundled_templates() -> Vec<RecipeTemplate> {

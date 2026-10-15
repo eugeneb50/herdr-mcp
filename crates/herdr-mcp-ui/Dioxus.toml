@@ -1,0 +1,9 @@
+[application]
+name = "herdr-mcp-ui"
+default_platform = "web"
+
+[web.app]
+title = "herdr-mcp"
+
+[web.proxy]
+backend = "http://localhost:7676/"

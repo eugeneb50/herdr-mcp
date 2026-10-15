@@ -1,0 +1,18 @@
+[package]
+name = "herdr-mcp-api"
+version = "0.1.0"
+edition = "2024"
+description = "Wire contract for the herdr-mcp HTTP bridge: shared types + typed client (native + wasm)."
+
+# Leaf crate: must stay wasm32-compatible (consumed by the Dioxus web UI).
+# No tokio, no herdr-mcp-* deps.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
+uuid = { version = "1", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

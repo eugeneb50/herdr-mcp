@@ -1,11 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/herdr-mcp-api",
     "crates/herdr-mcp-core",
     "crates/herdr-mcp-trim",
     "crates/herdr-mcp-server",
     "crates/herdr-mcp-cli",
     "crates/herdr-mcp-proxy",
+    "crates/herdr-mcp-ui",
 ]
 
 [workspace.dependencies]
@@ -19,7 +21,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 axum = "0.8"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["fs"] }
 regex = "1"
 walkdir = "2"
 uuid = { version = "1", features = ["v4", "serde"] }

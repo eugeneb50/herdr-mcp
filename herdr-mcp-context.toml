@@ -136,3 +136,53 @@
 # to `State(AppState { server, .. }): State<AppState>`. `start_http` signature is
 # unchanged; `http_router` now accepts `HerdrMcpServer` and wraps internally.
 
+
+# 2026-10-14 — Consolidation PR 1: single web frontend (Dioxus)
+# SUPERSEDES the dist/index.html notes above.
+# - Deleted: React/Vite site (src/*.tsx, package.json, vite/tsconfig, dist/) and
+#   the legacy monolith (src/*.rs, src/trim/). crates/ are the only code.
+# - http_router(server, web_dir): ServeDir(web_dir) with fallback ServeFile
+#   (web_dir/index.html) for Dioxus router deep links. No `/` route, no
+#   index_html_handler, AppState holds only `server`.
+# - web_dir source of truth: HttpConfig.web_dir (toml `http.web-dir`, env
+#   HERDR_MCP_WEB_DIR); unset -> HttpConfig::resolved_web_dir() =
+#   <workspace>/target/dx/herdr-mcp-ui/release/web/public (dx bundle output).
+# - start_http(server, bind, port, web_dir) now honors http.bind-addr
+#   (default 127.0.0.1); previously hard-coded 0.0.0.0.
+# - CorsLayer removed (tower-http feature cors -> fs): UI is same-origin, and
+#   `dx serve` proxies /api server-side (Dioxus.toml [web.proxy]).
+# - Tests: 357 passing workspace-wide.
+# Remaining plan: PR2 herdr-mcp-api crate (typed DTOs + shared client),
+# PR3 herdr-mcp-tui crate off trim + stats/settings endpoints, PR4 replace
+# hand-written dispatch_tool match, PR5 /api/events SSE, PR6 split server.rs.
+
+# 2026-10-14 — Consolidation PR 2: herdr-mcp-api (shared wire contract)
+# - New leaf crate crates/herdr-mcp-api (serde, schemars, chrono no-default,
+#   uuid serde, reqwest json). Builds for wasm32-unknown-unknown.
+# - MOVED (not copied) into it; old paths are `pub use` re-exports:
+#   AgentHandle (herdr_client), TrimPolicy/TrimDirection (trim::policy),
+#   ProxyPolicy (proxy::interceptor), Recipe/RecipeStep/ExecutionStatus/
+#   ExecutionResult (server::variables), RecipeTemplate/TemplateVariable
+#   (templates), VariableStore/PlaygroundSnapshot (persistence),
+#   TrimStatusResponse/PaneStatus/DiagnoseReport/SampleRoundtrip (server.rs),
+#   and the HTTP request/response structs (RecipeRequest/Response,
+#   Create/UpdateRecipeRequest, SaveVariableRequest).
+# - RecipeStepInput deleted: identical to RecipeStep (missing Option -> None).
+# - TrimPolicy::parse_stages{,_with} are now trait `trim::policy::TrimPolicyExt`
+#   (needs the pipeline, which can't be in a wasm crate). Import the trait.
+# - New envelopes replacing inline json!: AgentsResponse, AutoVariablesResponse,
+#   ExportScriptResponse, ToolsResponse. Wire JSON unchanged.
+# - ApiClient: absolute base only (reqwest 0.12 rejects relative URLs even on
+#   wasm — the old Dioxus `same_origin()` client was broken at runtime);
+#   201/204 empty bodies -> Ok(()) (old client .json()'d them -> always Err);
+#   path segments percent-encoded; ApiError::{BadBase,Transport,Status,Decode}.
+# - Old UI save_playground omitted `updated_at` -> 422, silently ignored. Fixed.
+# - Dioxus: App builds the client once from window.location.origin and
+#   provides Signal<ApiClient>; components call `use_api()` then `client()`.
+# - Contract test: server::tests::http_contract_roundtrip_with_api_client.
+# - Tests: 361 passing.
+# KNOWN ISSUE (pre-existing, unfixed): persistence save/delete_variable join
+#   the user-supplied key into a path -> `../` traversal via /api/variables.
+# Next: PR3 move TUI to herdr-mcp-tui on ApiClient (also delete
+#   tui/persistence.rs VariableStore dup, tui/http.rs, parse_clipboard_text,
+#   share parse_tool_schema/convert_param), add stats + settings endpoints.

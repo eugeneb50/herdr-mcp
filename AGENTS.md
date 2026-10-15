@@ -56,7 +56,13 @@ write the field. Two valid answers:
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace
+# wire crate + web UI must stay wasm-clean:
+cargo clippy -p herdr-mcp-api -p herdr-mcp-ui --target wasm32-unknown-unknown -- -D warnings
 ```
+
+**Changing an `/api/*` shape:** edit the type in `crates/herdr-mcp-api` (never
+redefine it elsewhere), use it in the handler, and extend
+`http_contract_roundtrip_with_api_client` in `herdr-mcp-server/src/server.rs`.
 
 Full pre-PR validation (recommended):
 
@@ -66,10 +72,11 @@ cargo test --workspace
 cargo clippy --all-targets -- -D warnings
 ```
 
-Website checks (TypeScript strict mode, fails on unused locals/params):
+Web UI (Dioxus, needs `dx` — `cargo install dioxus-cli`):
 
 ```bash
-cd src && npx tsc --noEmit
+cd crates/herdr-mcp-ui && dx serve                          # dev, proxies /api to :7676
+cd crates/herdr-mcp-ui && dx bundle --platform web --release  # build served by herdr-mcp
 ```
 
 ## Run Commands
@@ -103,7 +110,7 @@ herdr-mcp is an MCP (Model Context Protocol) server written in Rust that
 exposes [herdr](https://herdr.dev) — a terminal-native agent multiplexer —
 as MCP tools. It enables AI clients (Claude Desktop, Cursor, Claude Code,
 OpenCode) to control herdr workspaces, tabs, panes, and agents. It also ships
-an HTTP bridge (Axum), a Vite+React+Tailwind web playground, a message-trim
+an HTTP bridge (Axum), a Dioxus web playground, a message-trim
 (compression) pipeline, a recipe engine for chaining tool calls, an a2a
 (agent-to-agent) primitive layer, and a **kitchen-sink TUI dashboard** with
 VS Code-style tabs, mouse + keyboard navigation.
@@ -111,8 +118,7 @@ VS Code-style tabs, mouse + keyboard navigation.
 Core architecture is **shell-out + trait-light**: the server wraps the local
 `herdr` CLI via `tokio::process::Command` with real argv (no shell
 injection). The MCP protocol is implemented with `rmcp` 1.7. The project is
-organized as a 4-crate Cargo workspace, with a parallel Vite+React website
-in `src/`.
+organized as a Cargo workspace under `crates/`.
 
 Key subsystems:
 
@@ -139,6 +145,7 @@ Every workspace crate carries a stability tier.
 
 | Crate | Tier | Notes |
 |-------|------|-------|
+| `herdr-mcp-api` | Experimental | HTTP bridge wire contract: every `/api/*` type + typed `ApiClient`. Leaf crate, must build for `wasm32-unknown-unknown`. |
 | `herdr-mcp-core` | Beta | Config system (`TOML + env + CLI`), error types. Stable schema. |
 | `herdr-mcp-trim` | Experimental | Message-trim compressors (caveman, pfc1), pipeline, policy, stats, folder keys, dashboard. |
 | `herdr-mcp-server` | Experimental | MCP server, 49 tools, HTTP bridge, recipe engine, event subscriber, scheduler. |
@@ -150,31 +157,20 @@ through deliberate team decision.
 
 ## Repository Map
 
-- `src/main.rs` — legacy monolith binary entrypoint (MCP stdio + optional HTTP bridge)
-- `src/server.rs` — legacy monolith server: 21+ tool definitions, ServerHandler impl, HTTP bridge (Axum), recipe engine, CLI helpers
-- `src/herdr_client.rs` — herdr event subscriber + `AgentRegistry`
-- `src/persistence.rs` — file-based storage (recipes, executions, variables, schedules)
-- `src/scheduler.rs` — cron-based recipe scheduling
-- `src/templates.rs` — bundled recipe templates
-- `src/variables.rs` — `Recipe`, `RecipeStep`, `ExecutionResult` types
-- `src/trim/` — legacy monolith trim subsystem (mirrored in `crates/herdr-mcp-trim`)
-- `src/main.tsx` → `src/App.tsx` → `src/components/*` — Vite+React+Tailwind website
-- `src/recipes/` — TypeScript recipe types for frontend
+- `crates/herdr-mcp-api/` — single definition of every `/api/*` request/response type (`agents.rs`, `recipe.rs`, `trim.rs`, `variables.rs`) + typed `ApiClient` (`client.rs`). Server/trim/proxy re-export these; web UI and TUI call the bridge through `ApiClient`. No tokio, no `herdr-mcp-*` deps.
 - `crates/herdr-mcp-core/` — `config.rs` (full config system), `error.rs` (anyhow-based error context), `lib.rs`
 - `crates/herdr-mcp-trim/` — `pfc1.rs`, `caveman.rs`, `code_regions.rs`, `pipeline.rs`, `policy.rs`, `runner.rs`, `stats.rs`, `eval.rs`, `dashboard.rs`, `folder_key.rs`, `tui/` (kitchen-sink dashboard)
 - `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers + recipe engine), `herdr_client.rs`, `persistence.rs`, `scheduler.rs`, `templates.rs`, `variables.rs`, `lib.rs`
-- `crates/herdr-mcp-cli/` — `src/main.rs` (CLI dispatch), `tests/` (integration)
+- `crates/herdr-mcp-cli/` — `src/bin/herdr-mcp.rs` (serve), `src/bin/herdr-trim.rs` (trim/dashboard/folder-key), `tests/` (integration)
+- `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); served by the HTTP bridge from `http.web-dir`
 - `data/` — runtime persistence (recipes, executions, variables, schedules, sessions, pfc1 memory, folder keys)
 - `docs/` — PRD and architecture reference docs
-- `dist/` — built single-file website (`index.html`)
 - `herdr-mcp-context.toml` — project's evolving memory for resuming sessions
 
-> **Note:** The monolith `src/` files coexist with the 4-crate workspace.
-> The crates are the canonical home for new code; the monolith is legacy.
 
 ## Risk Tiers
 
-- **Low risk**: docs/chore/tests-only changes, website CSS/Tailwind tweaks
+- **Low risk**: docs/chore/tests-only changes, web UI CSS tweaks
 - **Medium risk**: most `crates/*/src/**` behavior changes without boundary/security impact
 - **High risk**: `crates/herdr-mcp-server/src/server.rs` (tool definitions, HTTP bridge), `crates/herdr-mcp-trim/src/pfc1.rs` / `caveman.rs` (correctness of compression round-trip), `crates/herdr-mcp-trim/src/folder_key.rs` (non-determinism-sensitive), `.github/workflows/**`
 
@@ -211,7 +207,7 @@ When uncertain, classify as higher risk.
 
 - **Shell-out architecture** — every tool shells out via `tokio::process::Command` with real argv (no shell injection). Herdr's wire protocol isn't publicly documented; the CLI is the stable surface. Zero coupling, easy to update. Trade-off: higher latency per call vs. direct socket.
 - **Stdout = MCP, Stderr = logs** — prevents log output from corrupting the MCP protocol stream.
-- **Single-file website** — `vite-plugin-singlefile` inlines all JS/CSS into `dist/index.html`. Simplest deployment; trade-off: larger single file, no code splitting.
+- **One web UI** — the Dioxus app (`crates/herdr-mcp-ui`) is the only web frontend. The bridge serves its `dx bundle` output from `http.web-dir` (env `HERDR_MCP_WEB_DIR`) with SPA fallback to `index.html`; no CORS layer since the UI is same-origin (or proxied by `dx serve`).
 - **Non-colliding compressors** — `caveman` operates on ASCII/Latin prose (U+0000–U+007F); `pfc1` uses Cherokee syllabary (U+13A0–U+13FF). The two cannot interfere, making composition trivially safe.
 - **Adaptive gate (never expand)** — if `candidate.len() >= current.len()`, pass through unchanged. Prevents short messages from drowning in PFC1 headers.
 - **Lossy vs. lossless split** — style compression is inherently lossy; dictionary compression must be reversible for a2a comms.

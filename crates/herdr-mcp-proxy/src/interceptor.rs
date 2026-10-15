@@ -2,22 +2,8 @@ use anyhow::Result;
 use herdr_mcp_trim::pipeline;
 use herdr_mcp_trim::runner::PipelineRunner;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ProxyPolicy {
-    pub trim_outbound: bool,
-    pub trim_inbound: bool,
-    pub stages: Vec<String>,
-}
-
-impl Default for ProxyPolicy {
-    fn default() -> Self {
-        Self {
-            trim_outbound: false,
-            trim_inbound: false,
-            stages: vec!["caveman:full".into(), "pfc1".into()],
-        }
-    }
-}
+/// Policy data is defined once in the wire crate.
+pub use herdr_mcp_api::ProxyPolicy;
 
 pub fn trim_body(
     text: &str,

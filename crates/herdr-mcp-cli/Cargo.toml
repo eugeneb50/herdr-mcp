@@ -5,7 +5,11 @@ edition = "2024"
 
 [[bin]]
 name = "herdr-mcp"
-path = "src/main.rs"
+path = "src/bin/herdr-mcp.rs"
+
+[[bin]]
+name = "herdr-trim"
+path = "src/bin/herdr-trim.rs"
 
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
