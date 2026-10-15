@@ -20,6 +20,18 @@ pub struct SessionVars {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Validate a caller-supplied name (variable key, workspace id, blob name)
+/// that becomes part of a file name under `data/`. It must be one plain path
+/// component: non-empty, not `.`/`..`, no separators or NUL. Rejected rather
+/// than rewritten so two distinct names can never map to the same file.
+pub fn file_component(name: &str) -> anyhow::Result<&str> {
+    let bad = name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']);
+    if bad {
+        anyhow::bail!("invalid name {name:?}: must be a single path component");
+    }
+    Ok(name)
+}
+
 #[derive(Clone)]
 pub struct Persistence {
     data_dir: PathBuf,
@@ -110,7 +122,7 @@ impl Persistence {
         let path = self
             .data_dir
             .join("variables")
-            .join(format!("{}.json", var.key));
+            .join(format!("{}.json", file_component(&var.key)?));
         fs::create_dir_all(self.data_dir.join("variables")).await?;
         let json = serde_json::to_string_pretty(var)?;
         fs::write(path, json).await?;
@@ -121,7 +133,7 @@ impl Persistence {
         let path = self
             .data_dir
             .join("variables")
-            .join(format!("{}.json", key));
+            .join(format!("{}.json", file_component(key)?));
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
             fs::remove_file(path).await?;
             Ok(true)
@@ -165,7 +177,7 @@ impl Persistence {
         let path = self
             .data_dir
             .join("sessions")
-            .join(format!("{}.json", bag.session_id));
+            .join(format!("{}.json", file_component(&bag.session_id)?));
         fs::write(path, serde_json::to_string_pretty(bag)?).await?;
         Ok(())
     }
@@ -174,7 +186,7 @@ impl Persistence {
         let path = self
             .data_dir
             .join("sessions")
-            .join(format!("{}.json", session_id));
+            .join(format!("{}.json", file_component(session_id)?));
         if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
             return Ok(SessionVars {
                 session_id: session_id.to_string(),
@@ -196,10 +208,11 @@ impl Persistence {
         value: &serde_json::Value,
     ) -> anyhow::Result<()> {
         fs::create_dir_all(self.data_dir.join("sessions")).await?;
-        let path = self
-            .data_dir
-            .join("sessions")
-            .join(format!("{ws}.{name}.json"));
+        let path = self.data_dir.join("sessions").join(format!(
+            "{}.{}.json",
+            file_component(ws)?,
+            file_component(name)?
+        ));
         fs::write(path, serde_json::to_string_pretty(value)?).await?;
         Ok(())
     }
@@ -444,6 +457,53 @@ mod tests {
         let loaded = p.load_session_vars("missing").await.unwrap();
         assert_eq!(loaded.session_id, "missing");
         assert!(loaded.variables.is_empty());
+    }
+
+    #[test]
+    fn file_component_rejects_traversal() {
+        for bad in ["", ".", "..", "../x", "a/b", "a\\b", "x\0y"] {
+            assert!(file_component(bad).is_err(), "{bad:?} should be rejected");
+        }
+        for ok in ["greeting", "w1", "panes.snapshot", "..hidden", "a b"] {
+            assert_eq!(file_component(ok).unwrap(), ok);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_traversal_names_never_touch_outside_data_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path().join("data");
+        let p = Persistence::new(data.clone());
+        p.init().await.unwrap();
+        let now = chrono::Utc::now();
+        let var = VariableStore {
+            id: Uuid::new_v4(),
+            session_id: None,
+            execution_id: None,
+            key: "../../escaped".into(),
+            value: serde_json::json!("x"),
+            created_at: now,
+            updated_at: now,
+        };
+        assert!(p.save_variable(&var).await.is_err());
+        assert!(!tmp.path().join("escaped.json").exists());
+
+        let victim = tmp.path().join("victim.json");
+        std::fs::write(&victim, "{}").unwrap();
+        assert!(p.delete_variable("../../victim").await.is_err());
+        assert!(victim.exists());
+
+        assert!(p.load_session_vars("../../victim").await.is_err());
+        let bag = SessionVars {
+            session_id: "../escaped".into(),
+            ..Default::default()
+        };
+        assert!(p.save_session_vars(&bag).await.is_err());
+        assert!(
+            p.save_session_blob("../x", "agents", &serde_json::json!({}))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
