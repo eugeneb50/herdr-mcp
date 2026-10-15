@@ -486,6 +486,54 @@ mod tests {
         ));
     }
 
+    /// The server wires its scheduler to the run engine: a schedule firing
+    /// produces a recorded run of that recipe. Real time (~2s).
+    #[tokio::test]
+    async fn scheduled_recipe_produces_a_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let now = chrono::Utc::now();
+        let recipe = herdr_mcp_api::Recipe {
+            id: Uuid::new_v4(),
+            name: "cron".into(),
+            description: None,
+            steps: vec![step("a", "list_templates")],
+            variables: HashMap::new(),
+            created_at: now,
+            updated_at: now,
+            is_template: false,
+            category: None,
+        };
+        server.persistence.save_recipe(&recipe).await.unwrap();
+        let schedule = crate::variables::ScheduledRecipe {
+            id: Uuid::new_v4(),
+            recipe_id: recipe.id,
+            cron_schedule: "* * * * * *".into(),
+            next_run: None,
+            last_run: None,
+            enabled: true,
+            created_at: now,
+        };
+        server
+            .scheduler
+            .schedule_one(schedule.clone())
+            .await
+            .unwrap();
+
+        let mut found = None;
+        for _ in 0..30 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let runs = server.persistence.list_runs().await.unwrap();
+            found = runs.into_iter().find(|r| r.recipe_id == Some(recipe.id));
+            if found.is_some() {
+                break;
+            }
+        }
+        server.scheduler.remove(schedule.id).await.unwrap();
+        let run = found.expect("schedule never produced a run");
+        assert_eq!(run.name.as_deref(), Some("cron"));
+    }
+
     #[test]
     fn record_without_live_run_reads_as_interrupted() {
         let runs = Runs::default();
