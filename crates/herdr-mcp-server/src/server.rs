@@ -1842,8 +1842,10 @@ impl HerdrMcpServer {
                 data: None,
             });
         }
-        let data_dir = self.data_dir.display().to_string();
-        let cmd = format!("herdr-mcp dashboard --data-dir {data_dir}");
+        // The dashboard lives in the `herdr-trim` binary (`herdr-mcp` is
+        // serve-only). The pane runs a shell, so single-quote the path.
+        let data_dir = self.data_dir.display().to_string().replace('\'', r"'\''");
+        let cmd = format!("herdr-trim dashboard --data-dir '{data_dir}'");
         let _ = herdr_cli(&["pane", "send-text", &pane_id, &cmd]).await;
         let _ = herdr_cli(&["pane", "send-keys", &pane_id, "Enter"]).await;
         Ok(CallToolResult::success(vec![
