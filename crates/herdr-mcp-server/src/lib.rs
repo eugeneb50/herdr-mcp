@@ -1,5 +1,6 @@
 pub mod herdr_client;
 pub mod persistence;
+pub mod runs;
 pub mod scheduler;
 pub mod server;
 pub mod templates;

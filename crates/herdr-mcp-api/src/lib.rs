@@ -10,6 +10,7 @@
 pub mod agents;
 pub mod client;
 pub mod recipe;
+pub mod run;
 pub mod trim;
 pub mod variables;
 
@@ -20,6 +21,7 @@ pub use recipe::{
     RecipeRequest, RecipeResponse, RecipeStep, RecipeTemplate, TemplateVariable,
     UpdateRecipeRequest,
 };
+pub use run::{RunAction, RunRecord, RunStatus, StartRunRequest};
 pub use trim::{DiagnoseReport, PaneStatus, SampleRoundtrip, TrimStatusResponse};
 /// Re-exported so clients name recipe/execution ids without their own uuid dep.
 pub use uuid::Uuid;

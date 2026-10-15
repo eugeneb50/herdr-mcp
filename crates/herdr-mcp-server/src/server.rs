@@ -10,7 +10,7 @@ use crate::herdr_client::{AgentRegistry, HerdrClient, SubscriberPhase};
 use crate::persistence::Persistence;
 use crate::scheduler::Scheduler;
 use crate::templates as tmpl;
-use crate::variables::{ExecutionResult, ExecutionStatus, Recipe, RecipeStep, ScheduledRecipe};
+use crate::variables::{ExecutionResult, Recipe, ScheduledRecipe};
 use herdr_mcp_trim::pfc1::CompressionKey;
 use herdr_mcp_trim::pipeline;
 use herdr_mcp_trim::policy::{TrimPolicy, TrimPolicyExt};
@@ -619,6 +619,8 @@ pub struct HerdrMcpServer {
     pub clipboard: herdr_mcp_core::ClipboardConfig,
     /// Optional reference to the herdr event subscriber client (for status reporting).
     pub herdr_client: Option<std::sync::Arc<HerdrClient>>,
+    /// Control channels of in-flight recipe runs (state is in their records).
+    pub runs: crate::runs::Runs,
 }
 
 #[tool_router]
@@ -656,6 +658,7 @@ impl HerdrMcpServer {
             data_dir,
             clipboard: config.clipboard.clone(),
             herdr_client: None,
+            runs: crate::runs::Runs::default(),
         }
     }
 
@@ -2842,6 +2845,9 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path) -> Router {
         )
         .route("/api/templates", get(list_templates_handler))
         .route("/api/recipes/{id}/run", post(run_recipe_by_id_handler))
+        .route("/api/runs", get(list_runs_handler).post(start_run_handler))
+        .route("/api/runs/{id}", get(get_run_handler))
+        .route("/api/runs/{id}/{action}", post(control_run_handler))
         .route("/api/recipes/{id}/export", get(export_recipe_handler))
         .route(
             "/api/variables",
@@ -3014,7 +3020,7 @@ async fn trim_dashboard_open_http_handler(
 
 /// Dispatch a tool call by name, deserializing the JSON body into the appropriate
 /// `Parameters<T>` struct.
-async fn dispatch_tool(
+pub(crate) async fn dispatch_tool(
     server: &HerdrMcpServer,
     name: &str,
     body: serde_json::Value,
@@ -3406,129 +3412,63 @@ async fn dispatch_tool(
 /// Shared recipe execution core. Seeds `accumulated` from the live agent
 /// registry for `session_id` so `{{pane_id.output}}` and `{{role.output}}`
 /// resolve to another agent's captured work product.
-async fn execute_recipe(
-    server: &HerdrMcpServer,
-    steps: &[RecipeStep],
-    session_id: Option<&str>,
-) -> RecipeResponse {
-    let mut results = HashMap::new();
-    let mut accumulated = HashMap::new();
-
-    // Resolve `{{ template.session_id }}` / `{{ template.workspace_id }}` in
-    // ad-hoc runs the same way saved runs do. Without this, inline builder runs
-    // leave the literal behind and `var_set` writes
-    // `data/sessions/{{ template.session_id }}.json` (B3).
-    let effective_ws = session_id
-        .filter(|s| !s.trim().is_empty() && !s.contains("{{"))
-        .unwrap_or("w1");
-    accumulated.insert(
-        "template.session_id".to_string(),
-        serde_json::json!(effective_ws),
-    );
-    accumulated.insert(
-        "template.workspace_id".to_string(),
-        serde_json::json!(effective_ws),
-    );
-
-    // Seed agent handles (pane_id/role -> output) for the session workspace.
-    // Always seed with the effective workspace so ad-hoc runs without an
-    // explicit session still resolve pane variables.
-    for (key, value) in server.registry.seed(effective_ws).await {
-        accumulated.insert(key, value);
-    }
-
-    let execution_id = uuid::Uuid::new_v4();
-    let started_at = chrono::Utc::now();
-
-    for step in steps {
-        // Resolve {{ path }} variables in params from accumulated results
-        let mut resolved = step.params.clone();
-        resolve_variables(&mut resolved, &accumulated);
-
-        match dispatch_tool(server, &step.tool, resolved).await {
-            Ok(result) => {
-                let json_result = serde_json::to_value(&result).unwrap_or_default();
-                let extracted = crate::variables::extract_variables(&json_result);
-                accumulated.extend(extracted);
-                accumulated.insert(step.id.clone(), json_result.clone());
-                // If the step returned an agent handle (pane_id + output),
-                // expose it under both the pane id and its role so downstream
-                // steps can interpolate `{{pane_id.output}}` or `{{role.output}}`.
-                if let Some(obj) = json_result.as_object()
-                    && let Some(pane_id) = obj.get("pane_id").and_then(|v| v.as_str())
-                {
-                    accumulated.insert(pane_id.to_string(), json_result.clone());
-                    if let Some(role) = obj.get("role").and_then(|v| v.as_str())
-                        && !role.is_empty()
-                    {
-                        accumulated.insert(role.to_string(), json_result.clone());
-                    }
-                }
-                results.insert(step.id.clone(), json_result);
-            }
-            Err((code, msg)) => {
-                results.insert(
-                    step.id.clone(),
-                    serde_json::json!({
-                        "error": msg,
-                        "statusCode": code.as_u16(),
-                    }),
-                );
-
-                // Ad-hoc (unsaved) recipe run: nil recipe_id signals "no saved
-                // recipe". Saved runs via run_recipe_by_id_handler persist the
-                // real id instead.
-                let execution = ExecutionResult {
-                    id: execution_id,
-                    recipe_id: uuid::Uuid::nil(),
-                    started_at,
-                    completed_at: Some(chrono::Utc::now()),
-                    status: ExecutionStatus::Failed,
-                    results: results.clone(),
-                    variables: accumulated.clone(),
-                    error: Some(msg.clone()),
-                };
-                let _ = server.persistence.save_execution(&execution).await;
-
-                return RecipeResponse {
-                    results,
-                    status: "failed".into(),
-                    failed_step: Some(step.id.clone()),
-                    error: Some(msg),
-                };
-            }
+fn start_error_to_http(e: crate::runs::StartError) -> (StatusCode, String) {
+    match e {
+        crate::runs::StartError::RecipeNotFound => {
+            (StatusCode::NOT_FOUND, "Recipe not found".to_string())
         }
-    }
-
-    let execution = ExecutionResult {
-        id: execution_id,
-        recipe_id: uuid::Uuid::nil(),
-        started_at,
-        completed_at: Some(chrono::Utc::now()),
-        status: ExecutionStatus::Completed,
-        results: results.clone(),
-        variables: accumulated.clone(),
-        error: None,
-    };
-    let _ = server.persistence.save_execution(&execution).await;
-
-    RecipeResponse {
-        results,
-        status: "completed".into(),
-        failed_step: None,
-        error: None,
+        crate::runs::StartError::Persist(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
 
+/// Start a run and wait for it to finish (the synchronous recipe endpoints).
+async fn run_to_completion(
+    server: &HerdrMcpServer,
+    req: herdr_mcp_api::StartRunRequest,
+) -> Result<herdr_mcp_api::RunRecord, (StatusCode, String)> {
+    let (_, handle) = crate::runs::start_run(server, req)
+        .await
+        .map_err(start_error_to_http)?;
+    handle.await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("run task failed: {e}"),
+        )
+    })
+}
+
+/// `POST /api/recipe` — run ad-hoc steps and wait for the result.
 async fn run_recipe_handler(
     State(AppState { server, .. }): State<AppState>,
     Json(req): Json<RecipeRequest>,
-) -> Json<RecipeResponse> {
-    let session = req.session_id.as_deref();
-    let response = execute_recipe(&server, &req.steps, session).await;
-    Json(response)
+) -> Result<Json<RecipeResponse>, (StatusCode, String)> {
+    let run = run_to_completion(
+        &server,
+        herdr_mcp_api::StartRunRequest {
+            steps: Some(req.steps),
+            name: req.name,
+            session_id: req.session_id,
+            recipe_id: None,
+        },
+    )
+    .await?;
+    let status = match run.status {
+        herdr_mcp_api::RunStatus::Completed => "completed",
+        herdr_mcp_api::RunStatus::Cancelled => "cancelled",
+        _ => "failed",
+    };
+    Ok(Json(RecipeResponse {
+        results: run.results,
+        status: status.into(),
+        failed_step: run.failed_step,
+        error: run.error,
+    }))
 }
-fn resolve_variables(value: &mut serde_json::Value, results: &HashMap<String, serde_json::Value>) {
+
+pub(crate) fn resolve_variables(
+    value: &mut serde_json::Value,
+    results: &HashMap<String, serde_json::Value>,
+) {
     match value {
         serde_json::Value::String(s) => {
             static VARIABLE_RE: std::sync::LazyLock<Regex> =
@@ -3696,125 +3636,93 @@ async fn delete_recipe_handler(
         .ok_or((StatusCode::NOT_FOUND, "Recipe not found".into()))
 }
 
+/// `POST /api/recipes/{id}/run` — run a saved recipe and wait for the result.
 async fn run_recipe_by_id_handler(
     State(AppState { server, .. }): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<ExecutionResult>, (StatusCode, String)> {
-    let recipe = server
-        .persistence
-        .load_recipe(&id)
+    let run = run_to_completion(
+        &server,
+        herdr_mcp_api::StartRunRequest {
+            recipe_id: Some(id),
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(Json(crate::runs::to_execution(&run)))
+}
+
+/// `POST /api/runs` — start a run in the background (202 + first record).
+async fn start_run_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Json(req): Json<herdr_mcp_api::StartRunRequest>,
+) -> Result<(StatusCode, Json<herdr_mcp_api::RunRecord>), (StatusCode, String)> {
+    let (run, _) = crate::runs::start_run(&server, req)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Recipe not found".to_string()))?;
+        .map_err(start_error_to_http)?;
+    Ok((StatusCode::ACCEPTED, Json(run)))
+}
 
-    let execution_id = uuid::Uuid::new_v4();
-    let started_at = chrono::Utc::now();
-
-    let mut results = HashMap::new();
-    let mut accumulated = recipe.variables.clone();
-    // Seed `{{pane_id.output}}` / `{{role.output}}` from the live registry.
-    // Workspace hint comes from saved variables when present; otherwise fall
-    // back to the global snapshot so role-based A2A interpolation still works.
-    {
-        let mut workspaces: Vec<String> = accumulated
-            .get("session_id")
-            .or_else(|| accumulated.get("workspace_id"))
-            .and_then(|v| v.as_str())
-            .map(|s| vec![s.to_string()])
-            .unwrap_or_default();
-        // Also honor `template.*` workspace hints from instantiated templates.
-        for key in ["template.session_id", "template.workspace_id"] {
-            if let Some(ws) = accumulated.get(key).and_then(|v| v.as_str())
-                && !ws.is_empty()
-                && !workspaces.contains(&ws.to_string())
-            {
-                workspaces.push(ws.to_string());
-            }
-        }
-        for ws in &workspaces {
-            accumulated.extend(server.registry.seed(ws).await);
-        }
-        for handle in server.registry.inner_snapshot().await {
-            let obj = serde_json::json!({
-                "pane_id": handle.pane_id,
-                "workspace_id": handle.workspace_id,
-                "tab_id": handle.tab_id,
-                "agent": handle.agent,
-                "role": handle.role,
-                "status": handle.status,
-                "output": handle.output,
-            });
-            accumulated
-                .entry(handle.pane_id.clone())
-                .or_insert(obj.clone());
-            if !handle.role.is_empty() {
-                accumulated.entry(handle.role.clone()).or_insert(obj);
-            }
-        }
-    }
-    let mut status = ExecutionStatus::Running;
-    let mut error_msg: Option<String> = None;
-
-    for step in &recipe.steps {
-        let mut resolved = step.params.clone();
-        resolve_variables(&mut resolved, &accumulated);
-
-        match dispatch_tool(&server, &step.tool, resolved).await {
-            Ok(result) => {
-                let json_result = serde_json::to_value(&result).unwrap_or_default();
-                let extracted = crate::variables::extract_variables(&json_result);
-                accumulated.extend(extracted.clone());
-                accumulated.insert(step.id.clone(), json_result.clone());
-                // Expose agent handles under pane_id + role like execute_recipe.
-                if let Some(obj) = json_result.as_object()
-                    && let Some(pane_id) = obj.get("pane_id").and_then(|v| v.as_str())
-                {
-                    accumulated.insert(pane_id.to_string(), json_result.clone());
-                    if let Some(role) = obj.get("role").and_then(|v| v.as_str())
-                        && !role.is_empty()
-                    {
-                        accumulated.insert(role.to_string(), json_result.clone());
-                    }
-                }
-                results.insert(step.id.clone(), json_result);
-            }
-            Err((code, msg)) => {
-                results.insert(
-                    step.id.clone(),
-                    serde_json::json!({
-                        "error": msg,
-                        "statusCode": code.as_u16(),
-                    }),
-                );
-                status = ExecutionStatus::Failed;
-                error_msg = Some(msg);
-                break;
-            }
-        }
-    }
-
-    if status == ExecutionStatus::Running {
-        status = ExecutionStatus::Completed;
-    }
-
-    let execution = ExecutionResult {
-        id: execution_id,
-        recipe_id: id,
-        started_at,
-        completed_at: Some(chrono::Utc::now()),
-        status,
-        results: results.clone(),
-        variables: accumulated.clone(),
-        error: error_msg,
-    };
-
-    server
+/// `GET /api/runs` — every run, newest first.
+async fn list_runs_handler(
+    State(AppState { server, .. }): State<AppState>,
+) -> Result<Json<Vec<herdr_mcp_api::RunRecord>>, (StatusCode, String)> {
+    let runs = server
         .persistence
-        .save_execution(&execution)
+        .list_runs()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Json(
+        runs.into_iter().map(|r| server.runs.observe(r)).collect(),
+    ))
+}
 
-    Ok(Json(execution))
+async fn load_run(
+    server: &HerdrMcpServer,
+    id: uuid::Uuid,
+) -> Result<herdr_mcp_api::RunRecord, (StatusCode, String)> {
+    server
+        .persistence
+        .load_run(&id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map(|r| server.runs.observe(r))
+        .ok_or((StatusCode::NOT_FOUND, "Run not found".into()))
+}
+
+/// `GET /api/runs/{id}`.
+async fn get_run_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<Json<herdr_mcp_api::RunRecord>, (StatusCode, String)> {
+    load_run(&server, id).await.map(Json)
+}
+
+/// `POST /api/runs/{id}/{pause|resume|cancel}` — 204; 404 unknown run;
+/// 409 if it is no longer executing.
+async fn control_run_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Path((id, action)): Path<(uuid::Uuid, String)>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let action = match action.as_str() {
+        "pause" => herdr_mcp_api::RunAction::Pause,
+        "resume" => herdr_mcp_api::RunAction::Resume,
+        "cancel" => herdr_mcp_api::RunAction::Cancel,
+        other => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                format!("unknown run action {other:?}"),
+            ));
+        }
+    };
+    if server.runs.control(id, action) {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let run = load_run(&server, id).await?;
+    Err((
+        StatusCode::CONFLICT,
+        format!("run is {:?}, not executing", run.status),
+    ))
 }
 
 async fn export_recipe_handler(
@@ -4334,18 +4242,28 @@ async fn get_execution_handler(
     State(AppState { server, .. }): State<AppState>,
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<ExecutionResult>, (StatusCode, String)> {
-    server
+    let legacy = server
         .persistence
         .load_execution(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map(Json)
-        .ok_or((StatusCode::NOT_FOUND, "Execution not found".into()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(execution) = legacy {
+        return Ok(Json(execution));
+    }
+    // Runs are recorded once, as run records; serve them in this shape too.
+    match load_run(&server, id).await {
+        Ok(run) => Ok(Json(crate::runs::to_execution(&run))),
+        Err((StatusCode::NOT_FOUND, _)) => {
+            Err((StatusCode::NOT_FOUND, "Execution not found".into()))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::variables::{ExecutionStatus, RecipeStep};
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
 
@@ -4865,6 +4783,59 @@ mod tests {
         assert_eq!(api.get_variable("greeting").await.unwrap().value, "hi");
         assert_eq!(api.list_variables().await.unwrap().len(), 1);
         api.delete_variable("greeting").await.unwrap();
+
+        // Runs: start in the background, poll to completion, legacy views.
+        let step = |id: &str| herdr_mcp_api::RecipeStep {
+            id: id.into(),
+            tool: "list_templates".into(),
+            params: serde_json::json!({}),
+            description: None,
+        };
+        let started = api
+            .start_run(&herdr_mcp_api::StartRunRequest {
+                steps: Some(vec![step("a"), step("b")]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut run = started.clone();
+        for _ in 0..200 {
+            run = api.get_run(started.id).await.unwrap();
+            if run.status.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(run.status, herdr_mcp_api::RunStatus::Completed);
+        assert_eq!(run.results.len(), 2);
+        assert!(
+            api.list_runs()
+                .await
+                .unwrap()
+                .iter()
+                .any(|r| r.id == run.id)
+        );
+        assert_eq!(
+            api.get_execution(run.id).await.unwrap().status,
+            ExecutionStatus::Completed
+        );
+        assert!(matches!(
+            api.control_run(run.id, herdr_mcp_api::RunAction::Cancel)
+                .await,
+            Err(ApiError::Status { status: 409, .. })
+        ));
+        assert!(matches!(
+            api.get_run(uuid::Uuid::new_v4()).await,
+            Err(ApiError::Status { status: 404, .. })
+        ));
+        let adhoc = api
+            .run_recipe(&RecipeRequest {
+                steps: vec![step("only")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(adhoc.status, "completed");
         assert!(matches!(
             api.get_variable("greeting").await,
             Err(ApiError::Status { status: 404, .. })
