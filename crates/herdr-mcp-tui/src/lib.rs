@@ -59,8 +59,6 @@ fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
     }
 }
 
-use herdr_mcp_trim::stats;
-
 use herdr_mcp_api::{
     AgentHandle, ApiClient, PlaygroundSnapshot, Recipe, RecipeTemplate, TrimStatusResponse,
     VariableStore,
@@ -274,7 +272,6 @@ pub struct App {
     pub trim_status: Option<TrimStatusResponse>,
     pub recipes: Option<Vec<Recipe>>,
     pub templates: Option<Vec<RecipeTemplate>>,
-    pub trim_stats_file: Option<stats::TrimStats>,
     /// playground sub-state
     pub playground: PlaygroundState,
     /// trim sub-state
@@ -599,7 +596,6 @@ impl App {
             trim_status: None,
             recipes: None,
             templates: None,
-            trim_stats_file: None,
             playground: PlaygroundState {
                 sub_tab: PlaygroundSub::Runner,
                 tool_index: 0,
@@ -786,25 +782,6 @@ impl App {
             }
             if !ok {
                 self.bridge_connected = false;
-            }
-        }
-        // Always read the file-based trim stats as a fallback.
-        let sessions = self.opts.data_dir.join("sessions");
-        if let Ok(mut entries) = tokio::fs::read_dir(&sessions).await {
-            let mut first_ws: Option<String> = None;
-            while let Ok(Some(e)) = entries.next_entry().await {
-                let fname = e.file_name().to_string_lossy().to_string();
-                if fname.ends_with(".trim_stats.json") {
-                    let ws = fname.trim_end_matches(".trim_stats.json").to_string();
-                    if first_ws.is_none() {
-                        first_ws = Some(ws.clone());
-                    }
-                    if let Some(ref w) = first_ws {
-                        self.trim_stats_file =
-                            Some(stats::load_stats(&self.opts.data_dir, w).await);
-                    }
-                    break;
-                }
             }
         }
     }
