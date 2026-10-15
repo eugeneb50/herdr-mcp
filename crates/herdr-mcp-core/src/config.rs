@@ -74,10 +74,10 @@ impl Default for ProxyConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
-    #[serde(default)]
+    #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
     #[serde(default)]
@@ -108,6 +108,36 @@ pub struct Config {
     /// TUI dashboard keybinding overrides.
     #[serde(default)]
     pub keybindings: crate::keybindings::Keybindings,
+}
+
+/// `~/x` → `$HOME/x`; any other path unchanged.
+fn expand_home(path: &std::path::Path) -> PathBuf {
+    match (path.strip_prefix("~"), env::var_os("HOME")) {
+        (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Where state lives when nothing else says: `./data`.
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("./data")
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+            http: Default::default(),
+            mcp: Default::default(),
+            herdr: Default::default(),
+            trim: Default::default(),
+            proxy: Default::default(),
+            sandbox: Default::default(),
+            logging: Default::default(),
+            clipboard: Default::default(),
+            keybindings: Default::default(),
+        }
+    }
 }
 
 /// Explicit clipboard backend commands for the `clipboard_set` / `clipboard_get`
@@ -375,6 +405,10 @@ impl Config {
         if let Some(cli) = cli_overrides {
             config = config.apply_cli_overrides(cli);
         }
+
+        // Paths from TOML / env may start with `~/`; nothing else expands it.
+        config.data_dir = expand_home(&config.data_dir);
+        config.herdr.socket_path = config.herdr.socket_path.as_deref().map(expand_home);
 
         // 5. Validate
         config.validate()?;
@@ -895,8 +929,8 @@ mod tests {
         a.data_dir = PathBuf::from("/a");
         b.http.port = Some(1234);
         let merged = a.merge(b);
-        // merge takes `other` wholesale for every field
-        assert_eq!(merged.data_dir, PathBuf::from(""));
+        // merge takes `other` wholesale for every field (its default dir)
+        assert_eq!(merged.data_dir, PathBuf::from("./data"));
         assert_eq!(merged.http.port, Some(1234));
         // untouched field keeps its default
         assert_eq!(merged.logging.level, "info");
@@ -912,6 +946,38 @@ mod tests {
         c = c.apply_cli_overrides(cli);
         assert_eq!(c.http.port, Some(8080));
         assert_eq!(c.logging.level, "info");
+    }
+
+    #[test]
+    fn test_expand_home() {
+        let home = PathBuf::from(env::var_os("HOME").unwrap());
+        assert_eq!(
+            expand_home(std::path::Path::new("~/.config/herdr/herdr.sock")),
+            home.join(".config/herdr/herdr.sock")
+        );
+        assert_eq!(
+            expand_home(std::path::Path::new("./data")),
+            PathBuf::from("./data")
+        );
+        assert_eq!(
+            expand_home(std::path::Path::new("/abs/~x")),
+            PathBuf::from("/abs/~x")
+        );
+    }
+
+    /// `./data` is the default however the config is built, and a layer
+    /// that doesn't name a data dir leaves the one below it alone.
+    #[test]
+    fn test_data_dir_default_survives_layers() {
+        assert_eq!(Config::default().data_dir, PathBuf::from("./data"));
+        let file: Config = toml::from_str("").unwrap();
+        assert_eq!(file.data_dir, PathBuf::from("./data"));
+        let c = Config {
+            data_dir: PathBuf::from("/from/env"),
+            ..Default::default()
+        }
+        .apply_cli_overrides(CliOverrides::default());
+        assert_eq!(c.data_dir, PathBuf::from("/from/env"));
     }
 
     #[test]
