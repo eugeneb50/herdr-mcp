@@ -7,6 +7,10 @@
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
+use herdr_mcp_api::{
+    CreateRecipeRequest, Recipe, RecipeRequest, RecipeTemplate, SaveVariableRequest,
+    UpdateRecipeRequest,
+};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -110,12 +114,7 @@ fn tool_category_map() -> Vec<(&'static str, Vec<&'static str>)> {
 
 /// Parse the flat tool list from `app.tools` into curated `ToolCategory`s.
 /// Unrecognised tools go into an "Other" category.
-pub fn parse_tool_categories(tools: &Value) -> Vec<ToolCategory> {
-    let tool_list = tools.get("tools").and_then(|t| t.as_array());
-    let Some(tool_arr) = tool_list else {
-        return Vec::new();
-    };
-
+pub fn parse_tool_categories(tool_arr: &[Value]) -> Vec<ToolCategory> {
     let cat_map = tool_category_map();
     let mut categories: Vec<ToolCategory> = cat_map
         .into_iter()
@@ -647,13 +646,8 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
 
     // Up/Down navigation.
     let item_count = match app.playground.builder_library_tab {
-        crate::tui::BuilderLibraryTab::Saved => app
-            .recipes
-            .as_ref()
-            .and_then(|r| r.as_array())
-            .map(|a| a.len())
-            .unwrap_or(0),
-        crate::tui::BuilderLibraryTab::Templates => 5,
+        crate::tui::BuilderLibraryTab::Saved => app.recipes.as_ref().map_or(0, Vec::len),
+        crate::tui::BuilderLibraryTab::Templates => app.templates.as_ref().map_or(0, Vec::len),
     };
     match code {
         KeyCode::Up => {
@@ -678,13 +672,10 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
                     let id = app
                         .recipes
                         .as_ref()
-                        .and_then(|r| r.as_array())
-                        .and_then(|a| a.get(lib_focus))
-                        .and_then(|r| r.get("id"))
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
+                        .and_then(|r| r.get(lib_focus))
+                        .map(|r| r.id);
                     if let (Some(http), Some(id)) = (app.http.clone(), id) {
-                        match http.get_recipe(&id).await {
+                        match http.get_recipe(id).await {
                             Ok(recipe) => {
                                 load_recipe_into_builder(app, &recipe);
                                 app.status_msg = format!("loaded recipe {id}");
@@ -696,29 +687,14 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
                     }
                 }
                 crate::tui::BuilderLibraryTab::Templates => {
-                    if let Some(http) = app.http.clone() {
-                        match http
-                            .call_tool("list_templates", Value::Object(Map::new()))
-                            .await
-                        {
-                            Ok(v) => {
-                                if let Some(templates) = v
-                                    .get("content")
-                                    .and_then(|c| c.as_array())
-                                    .and_then(|a| a.first())
-                                    .and_then(|c| c.get("text"))
-                                    .and_then(|t| t.as_str())
-                                    && let Ok(arr) = serde_json::from_str::<Vec<Value>>(templates)
-                                    && let Some(tmpl) = arr.get(lib_focus)
-                                {
-                                    load_template_into_builder(app, tmpl);
-                                    app.status_msg = "loaded template".into();
-                                }
-                            }
-                            Err(e) => {
-                                app.playground.builder_error = Some(e.to_string());
-                            }
-                        }
+                    let tmpl = app
+                        .templates
+                        .as_ref()
+                        .and_then(|t| t.get(lib_focus))
+                        .cloned();
+                    if let Some(tmpl) = tmpl {
+                        load_template_into_builder(app, &tmpl);
+                        app.status_msg = format!("loaded template {}", tmpl.name);
                     }
                 }
             }
@@ -731,13 +707,10 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
             let id = app
                 .recipes
                 .as_ref()
-                .and_then(|r| r.as_array())
-                .and_then(|a| a.get(app.playground.builder_library_focus))
-                .and_then(|r| r.get("id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
+                .and_then(|r| r.get(app.playground.builder_library_focus))
+                .map(|r| r.id);
             if let (Some(http), Some(id)) = (app.http.clone(), id) {
-                match http.delete_recipe(&id).await {
+                match http.delete_recipe(id).await {
                     Ok(()) => {
                         app.status_msg = format!("deleted recipe {id}");
                         app.recipes = None;
@@ -757,99 +730,22 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
     Ok(true)
 }
 
-/// Load a server-side Recipe JSON into the builder state.
-fn load_recipe_into_builder(app: &mut App, recipe: &Value) {
-    let pg = &mut app.playground;
-    pg.builder_recipe_name = recipe
-        .get("name")
-        .and_then(|n| n.as_str())
-        .unwrap_or("")
-        .to_string();
-    pg.builder_editing_recipe_id = recipe
-        .get("id")
-        .and_then(|id| id.as_str())
-        .map(str::to_string);
-    pg.builder_steps = recipe
-        .get("steps")
-        .and_then(|s| s.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|s| {
-                    let params = s
-                        .get("params")
-                        .and_then(|p| p.as_object())
-                        .cloned()
-                        .unwrap_or_default();
-                    RecipeStep {
-                        id: s
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        tool: s
-                            .get("tool")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        params,
-                        description: s
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .map(str::to_string),
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    pg.builder_step_focus = 0;
-    pg.builder_param_focus = 0;
-    pg.builder_open_step = None;
-    pg.builder_editing_param = false;
-    pg.builder_error = None;
-    pg.builder_result = None;
+/// Load a server-side recipe into the builder state.
+fn load_recipe_into_builder(app: &mut App, recipe: &Recipe) {
+    load_steps_into_builder(app, &recipe.name, &recipe.steps);
+    app.playground.builder_editing_recipe_id = Some(recipe.id);
 }
 
-/// Load a template JSON (as returned by list_templates) into the builder.
-fn load_template_into_builder(app: &mut App, tmpl: &Value) {
+/// Load a bundled template into the builder (as a new, unsaved recipe).
+fn load_template_into_builder(app: &mut App, tmpl: &RecipeTemplate) {
+    load_steps_into_builder(app, &tmpl.name, &tmpl.steps);
+    app.playground.builder_editing_recipe_id = None;
+}
+
+fn load_steps_into_builder(app: &mut App, name: &str, steps: &[herdr_mcp_api::RecipeStep]) {
     let pg = &mut app.playground;
-    pg.builder_recipe_name = tmpl
-        .get("name")
-        .and_then(|n| n.as_str())
-        .unwrap_or("")
-        .to_string();
-    pg.builder_editing_recipe_id = None;
-    pg.builder_steps = tmpl
-        .get("steps")
-        .and_then(|s| s.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|s| {
-                    let params = s
-                        .get("params")
-                        .and_then(|p| p.as_object())
-                        .cloned()
-                        .unwrap_or_default();
-                    RecipeStep {
-                        id: s
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        tool: s
-                            .get("tool")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string(),
-                        params,
-                        description: s
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .map(str::to_string),
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    pg.builder_recipe_name = name.to_string();
+    pg.builder_steps = steps.iter().map(RecipeStep::from).collect();
     pg.builder_step_focus = 0;
     pg.builder_param_focus = 0;
     pg.builder_open_step = None;
@@ -1025,13 +921,13 @@ async fn handle_builder_global(app: &mut App, code: KeyCode, mods: KeyModifiers)
         KeyCode::Char('r')
             if mods.contains(KeyModifiers::CONTROL) && mods.contains(KeyModifiers::SHIFT) =>
         {
-            if let Some(id) = app.playground.builder_editing_recipe_id.clone() {
+            if let Some(id) = app.playground.builder_editing_recipe_id {
                 if let Some(http) = app.http.clone() {
                     app.playground.builder_loading = true;
                     app.status_msg = "running recipe…".into();
-                    match http.run_recipe_by_id(&id).await {
+                    match http.run_recipe_by_id(id).await {
                         Ok(v) => {
-                            app.playground.builder_result = Some(v);
+                            app.playground.builder_result = serde_json::to_value(v).ok();
                             app.playground.builder_error = None;
                             app.status_msg = "recipe run ok".into();
                         }
@@ -1130,40 +1026,39 @@ async fn builder_save(app: &mut App) {
         // Still allow saving, but surface the warnings
     }
 
-    let steps: Vec<Value> = app
+    let steps: Vec<herdr_mcp_api::RecipeStep> = app
         .playground
         .builder_steps
         .iter()
-        .map(|s| {
-            serde_json::json!({
-                "id": s.id,
-                "tool": s.tool,
-                "params": Value::Object(s.params.clone()),
-                "description": s.description,
-            })
-        })
+        .map(RecipeStep::to_api)
         .collect();
-
-    let body = serde_json::json!({
-        "name": if app.playground.builder_recipe_name.is_empty() {
-            "untitled recipe"
-        } else {
-            &app.playground.builder_recipe_name
-        },
-        "steps": steps,
-    });
-
-    let result = if let Some(id) = &app.playground.builder_editing_recipe_id {
-        http.update_recipe(id, body).await
+    let name = if app.playground.builder_recipe_name.is_empty() {
+        "untitled recipe".to_string()
     } else {
-        http.save_recipe(body).await
+        app.playground.builder_recipe_name.clone()
+    };
+
+    let result = if let Some(id) = app.playground.builder_editing_recipe_id {
+        let req = UpdateRecipeRequest {
+            name: Some(name),
+            steps: Some(steps),
+            ..Default::default()
+        };
+        http.update_recipe(id, &req).await
+    } else {
+        let req = CreateRecipeRequest {
+            name,
+            description: None,
+            steps,
+            variables: Default::default(),
+            category: None,
+        };
+        http.create_recipe(&req).await
     };
 
     match result {
-        Ok(v) => {
-            if let Some(id) = v.get("id").and_then(|id| id.as_str()) {
-                app.playground.builder_editing_recipe_id = Some(id.to_string());
-            }
+        Ok(recipe) => {
+            app.playground.builder_editing_recipe_id = Some(recipe.id);
             app.playground.builder_error = None;
             app.status_msg = "recipe saved".into();
         }
@@ -1191,46 +1086,32 @@ async fn builder_run_inline(app: &mut App) {
         return;
     }
 
-    let steps: Vec<Value> = app
-        .playground
-        .builder_steps
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "id": s.id,
-                "tool": s.tool,
-                "params": Value::Object(s.params.clone()),
-                "description": s.description,
-            })
-        })
-        .collect();
-
-    let body = serde_json::json!({
-        "name": app.playground.builder_recipe_name,
-        "steps": steps,
-    });
+    let req = RecipeRequest {
+        name: Some(app.playground.builder_recipe_name.clone()),
+        session_id: None,
+        steps: app
+            .playground
+            .builder_steps
+            .iter()
+            .map(RecipeStep::to_api)
+            .collect(),
+    };
 
     app.playground.builder_loading = true;
     app.status_msg = "running recipe…".into();
-    match http.run_recipe(body).await {
-        Ok(v) => {
-            let status = v
-                .get("status")
-                .and_then(|s| s.as_str())
-                .unwrap_or("unknown");
-            if status == "ok" {
-                app.playground.builder_result = Some(v);
-                app.playground.builder_error = None;
-                app.status_msg = "recipe run ok".into();
-            } else {
-                let err = v
-                    .get("error")
-                    .and_then(|e| e.as_str())
-                    .unwrap_or("unknown error")
-                    .to_string();
-                app.playground.builder_result = Some(v);
+    match http.run_recipe(&req).await {
+        Ok(resp) => {
+            // The server reports "completed" or "failed".
+            let failed = resp.status != "completed";
+            let err = resp.error.clone();
+            app.playground.builder_result = serde_json::to_value(&resp).ok();
+            if failed {
+                let err = err.unwrap_or_else(|| format!("status {}", resp.status));
                 app.playground.builder_error = Some(err.clone());
                 app.status_msg = format!("recipe failed: {err}");
+            } else {
+                app.playground.builder_error = None;
+                app.status_msg = "recipe run ok".into();
             }
         }
         Err(e) => {
@@ -1285,7 +1166,7 @@ async fn run_tool(app: &mut App) {
         return;
     };
     app.status_msg = format!("running {name}…");
-    match http.call_tool(&name, params).await {
+    match http.call_tool(&name, &params).await {
         Ok(v) => {
             app.playground.result = Some(v.clone());
             app.playground.error = None;
@@ -1338,96 +1219,39 @@ async fn extract_and_store_variables(app: &mut App, tool_name: &str, result: &Va
     // Generate a variable name based on the tool and timestamp
     let var_key = format!("_{tool_name}_result");
 
-    // Store the full result as a variable
-    let var_store = serde_json::json!({
-        "id": uuid::Uuid::new_v4(),
-        "session_id": None::<String>,
-        "execution_id": None::<String>,
-        "key": var_key.clone(),
-        "value": result_content.clone(),
-        "created_at": chrono::Utc::now(),
-        "updated_at": chrono::Utc::now(),
-    });
-
-    if let Err(e) = http.save_variable(var_store).await {
-        app.log_debug(format!("Failed to store variable {}: {}", var_key, e));
-    }
-
-    // For list_* tools, also store individual items as indexed variables
+    // Store the full result, each list item, and per-pane fields.
+    let mut vars: Vec<(String, Value)> = vec![(var_key.clone(), result_content.clone())];
     if let Some(arr) = result_content.as_array() {
         for (i, item) in arr.iter().enumerate() {
-            let item_key = format!("{}_[{}]", var_key, i);
-            let item_var_store = serde_json::json!({
-                "id": uuid::Uuid::new_v4(),
-                "session_id": None::<String>,
-                "execution_id": None::<String>,
-                "key": item_key.clone(),
-                "value": item.clone(),
-                "created_at": chrono::Utc::now(),
-                "updated_at": chrono::Utc::now(),
-            });
-            if let Err(e) = http.save_variable(item_var_store).await {
-                app.log_debug(format!("Failed to store variable {}: {}", item_key, e));
+            vars.push((format!("{var_key}_[{i}]"), item.clone()));
+        }
+        if tool_name == "list_panes" || tool_name == "get_pane" {
+            for (i, pane) in arr.iter().enumerate() {
+                for (field, suffix) in [
+                    ("pane_id", "id"),
+                    ("label", "label"),
+                    ("agent_status", "status"),
+                ] {
+                    if let Some(v) = pane.get(field).and_then(|v| v.as_str()) {
+                        vars.push((format!("pane_{i}_{suffix}"), Value::String(v.to_string())));
+                    }
+                }
             }
         }
     }
-
-    // For pane/agent results, extract specific fields as named variables
-    if (tool_name == "list_panes" || tool_name == "get_pane")
-        && let Some(arr) = result_content.as_array()
-    {
-        for (i, pane) in arr.iter().enumerate() {
-            if let Some(pane_id) = pane.get("pane_id").and_then(|v| v.as_str()) {
-                let pane_var_key = format!("pane_{}_id", i);
-                let pv = serde_json::json!({
-                    "id": uuid::Uuid::new_v4(),
-                    "session_id": None::<String>,
-                    "execution_id": None::<String>,
-                    "key": pane_var_key.clone(),
-                    "value": Value::String(pane_id.to_string()),
-                    "created_at": chrono::Utc::now(),
-                    "updated_at": chrono::Utc::now(),
-                });
-                if let Err(e) = http.save_variable(pv).await {
-                    app.log_debug(format!("Failed to store {}: {}", pane_var_key, e));
-                }
-            }
-            if let Some(label) = pane.get("label").and_then(|v| v.as_str()) {
-                let label_var_key = format!("pane_{}_label", i);
-                let lv = serde_json::json!({
-                    "id": uuid::Uuid::new_v4(),
-                    "session_id": None::<String>,
-                    "execution_id": None::<String>,
-                    "key": label_var_key.clone(),
-                    "value": Value::String(label.to_string()),
-                    "created_at": chrono::Utc::now(),
-                    "updated_at": chrono::Utc::now(),
-                });
-                if let Err(e) = http.save_variable(lv).await {
-                    app.log_debug(format!("Failed to store {}: {}", label_var_key, e));
-                }
-            }
-            if let Some(status) = pane.get("agent_status").and_then(|v| v.as_str()) {
-                let status_var_key = format!("pane_{}_status", i);
-                let sv = serde_json::json!({
-                    "id": uuid::Uuid::new_v4(),
-                    "session_id": None::<String>,
-                    "execution_id": None::<String>,
-                    "key": status_var_key.clone(),
-                    "value": Value::String(status.to_string()),
-                    "created_at": chrono::Utc::now(),
-                    "updated_at": chrono::Utc::now(),
-                });
-                if let Err(e) = http.save_variable(sv).await {
-                    app.log_debug(format!("Failed to store {}: {}", status_var_key, e));
-                }
-            }
+    for (key, value) in vars {
+        let req = SaveVariableRequest {
+            key: key.clone(),
+            value,
+            ..Default::default()
+        };
+        if let Err(e) = http.save_variable(&req).await {
+            app.log_debug(format!("Failed to store variable {key}: {e}"));
         }
     }
 
     // Update the variables tab to show the new variables
     if let Ok(v) = http.list_variables().await {
-        app.variables = Some(v.clone());
         app.variables_state.entries = crate::tui::parse_variables(&v);
     }
 
@@ -2104,18 +1928,17 @@ fn render_library(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     match pg.builder_library_tab {
         crate::tui::BuilderLibraryTab::Templates => {
-            // Hardcoded bundled template names.
-            let templates = [
-                ("dev-watch", "Dev Watch", "development"),
-                ("git-status", "Git Status", "git"),
-                ("restart-agent", "Restart Agent", "agents"),
-                ("build-and-test", "Build & Test", "development"),
-                ("health-check", "Health Check", "monitoring"),
-            ];
+            // Same list (and order) the loader indexes into: `/api/templates`.
+            let templates = app.templates.as_deref().unwrap_or_default();
+            if templates.is_empty() {
+                frame.render_widget(Paragraph::new("No templates (bridge offline?)."), list_area);
+                return;
+            }
             let items: Vec<ListItem> = templates
                 .iter()
                 .enumerate()
-                .map(|(i, &(_id, name, cat))| {
+                .map(|(i, t)| {
+                    let (name, cat) = (&t.name, &t.category);
                     let focused = i == pg.builder_library_focus;
                     let marker = if focused { "▸ " } else { "  " };
                     let style = if focused {
@@ -2139,7 +1962,7 @@ fn render_library(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             frame.render_stateful_widget(list, list_area, &mut state);
         }
         crate::tui::BuilderLibraryTab::Saved => {
-            let recipes = app.recipes.as_ref().and_then(|r| r.as_array());
+            let recipes = app.recipes.as_ref();
             if let Some(arr) = recipes {
                 if arr.is_empty() {
                     frame.render_widget(Paragraph::new("No saved recipes yet."), list_area);
@@ -2150,15 +1973,12 @@ fn render_library(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                         .map(|(i, r)| {
                             let focused = i == pg.builder_library_focus;
                             let marker = if focused { "▸ " } else { "  " };
-                            let name = r
-                                .get("name")
-                                .and_then(|n| n.as_str())
-                                .unwrap_or("(unnamed)");
-                            let step_count = r
-                                .get("steps")
-                                .and_then(|s| s.as_array())
-                                .map(|a| a.len())
-                                .unwrap_or(0);
+                            let name = if r.name.is_empty() {
+                                "(unnamed)"
+                            } else {
+                                &r.name
+                            };
+                            let step_count = r.steps.len();
                             let style = if focused {
                                 selected_style()
                             } else {

@@ -165,9 +165,13 @@ async fn save(app: &mut App) {
         app.status_msg = "key cannot be empty".into();
         return;
     }
-    let body = serde_json::json!({ "key": key, "value": value });
+    let req = herdr_mcp_api::SaveVariableRequest {
+        key: key.clone(),
+        value: serde_json::Value::String(value),
+        ..Default::default()
+    };
     if let Some(http) = app.http.clone() {
-        match http.save_variable(body).await {
+        match http.save_variable(&req).await {
             Ok(_) => {
                 app.status_msg = format!("saved {key}");
                 app.variables_state.editing = false;

@@ -14,7 +14,6 @@
 
 pub mod http;
 pub mod nav;
-pub mod persistence;
 pub mod tabs;
 pub mod theme;
 
@@ -61,7 +60,10 @@ fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
 
 use crate::stats;
 
-use http::HttpClient;
+use herdr_mcp_api::{
+    AgentHandle, ApiClient, PlaygroundSnapshot, Recipe, RecipeTemplate, TrimStatusResponse,
+    VariableStore,
+};
 use theme::{accent_style, dim_style, muted_style, title_style};
 
 /// Available tabs, mirroring the legacy web app routes.
@@ -158,42 +160,50 @@ pub struct HerdrContext {
 ///
 /// Source of truth: the `AgentRegistry` snapshot served at `GET /api/agents`.
 /// The `herdr pane list` CLI is a diagnostic fallback only.
-#[derive(Clone, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Debug, Default)]
 pub struct HerdrPane {
     pub pane_id: String,
     /// Human-assigned label (`herdr pane rename`). From the registry: same source as AgentHandle.label.
-    #[serde(default)]
     pub label: String,
     /// Agent binary name (e.g. "opencode"). Optional — idle panes may have none.
-    #[serde(default)]
     pub agent: Option<String>,
     /// Lifecycle status from the registry event stream (idle/working/blocked/done/unknown).
-    #[serde(default)]
     pub status: String,
     /// Human-assigned role used for `{{role.output}}` a2a interpolation (e.g. "agentA").
-    #[serde(default)]
     pub role: String,
     /// Pane output captured at last idle — the agent's work product.
-    #[serde(default)]
     pub output: String,
     /// Optional message-trim policy. The Trim tab editor mutates this through
     /// the registry, so the snapshot stays live without polling herdr.
-    #[serde(default)]
     pub trim_policy: Option<crate::policy::TrimPolicy>,
     /// Registry-side last-updated epoch seconds (registry authoritative, not the CLI).
-    #[serde(default)]
     pub updated_at: i64,
 
     // ── Diagnostic fallback fields (only populated by herdr CLI passthrough) ──
     /// Pane cwd (CLI-only — registry doesn't track this).
-    #[serde(default)]
     pub cwd: String,
     /// Whether the pane currently has focus in herdr (CLI-only).
-    #[serde(default)]
     pub focused: bool,
     /// Tab id the pane belongs to (CLI-only).
-    #[serde(default)]
     pub tab_id: Option<String>,
+}
+
+/// Registry handle → TUI pane view (CLI-only fields stay at their defaults).
+impl From<AgentHandle> for HerdrPane {
+    fn from(h: AgentHandle) -> Self {
+        Self {
+            pane_id: h.pane_id,
+            label: h.label,
+            agent: Some(h.agent).filter(|a| !a.is_empty()),
+            status: h.status,
+            role: h.role,
+            output: h.output,
+            trim_policy: h.trim_policy,
+            updated_at: h.updated_at,
+            tab_id: Some(h.tab_id).filter(|t| !t.is_empty()),
+            ..Default::default()
+        }
+    }
 }
 
 /// Right-click context-menu actions for editing fields / panes.
@@ -252,17 +262,17 @@ pub struct DashboardOptions {
 /// The top-level interactive application state.
 pub struct App {
     pub opts: DashboardOptions,
-    pub http: Option<HttpClient>,
+    pub http: Option<ApiClient>,
     pub tab: Tab,
     pub herdr: HerdrContext,
     pub quitting: bool,
     pub status_msg: String,
     pub last_refresh: Instant,
-    /// cached API payloads
-    pub tools: Option<Value>,
-    pub trim_status: Option<Value>,
-    pub variables: Option<Value>,
-    pub recipes: Option<Value>,
+    /// last-fetched bridge snapshots (refreshed on every tick)
+    pub tools: Option<Vec<Value>>,
+    pub trim_status: Option<TrimStatusResponse>,
+    pub recipes: Option<Vec<Recipe>>,
+    pub templates: Option<Vec<RecipeTemplate>>,
     pub trim_stats_file: Option<stats::TrimStats>,
     /// playground sub-state
     pub playground: PlaygroundState,
@@ -320,6 +330,30 @@ impl Default for RecipeStep {
     }
 }
 
+/// Wire step → editable builder step (non-object params become empty).
+impl From<&herdr_mcp_api::RecipeStep> for RecipeStep {
+    fn from(s: &herdr_mcp_api::RecipeStep) -> Self {
+        Self {
+            id: s.id.clone(),
+            tool: s.tool.clone(),
+            params: s.params.as_object().cloned().unwrap_or_default(),
+            description: s.description.clone(),
+        }
+    }
+}
+
+impl RecipeStep {
+    /// Builder step → wire step.
+    pub fn to_api(&self) -> herdr_mcp_api::RecipeStep {
+        herdr_mcp_api::RecipeStep {
+            id: self.id.clone(),
+            tool: self.tool.clone(),
+            params: Value::Object(self.params.clone()),
+            description: self.description.clone(),
+        }
+    }
+}
+
 /// A tool category for the builder picker.
 #[derive(Clone, Debug)]
 pub struct ToolCategory {
@@ -364,7 +398,7 @@ pub struct PlaygroundState {
     pub builder_error: Option<String>,
     pub builder_loading: bool,
     /// Track the id of the recipe loaded into the builder (None = new recipe).
-    pub builder_editing_recipe_id: Option<String>,
+    pub builder_editing_recipe_id: Option<herdr_mcp_api::Uuid>,
     /// Whether a param value is actively being edited (TextArea open).
     pub builder_editing_param: bool,
     /// Live TextArea for editing a param value.
@@ -387,7 +421,7 @@ pub enum PlaygroundSub {
 
 /// Trim tab state.
 pub struct TrimState {
-    pub diagnose: Option<Value>,
+    pub diagnose: Option<herdr_mcp_api::DiagnoseReport>,
     /// Selected pane in the trim settings pane list.
     pub pane_index: usize,
     /// Selected stage in the pipeline stage list.
@@ -549,7 +583,7 @@ impl App {
     }
 
     fn new(opts: DashboardOptions) -> Self {
-        let http = HttpClient::new(opts.http_port, opts.data_dir.clone()).ok();
+        let http = http::client_for(opts.http_port).ok();
         let http_port = opts.http_port;
         let data_dir = opts.data_dir.display().to_string();
         Self {
@@ -562,8 +596,8 @@ impl App {
             last_refresh: Instant::now(),
             tools: None,
             trim_status: None,
-            variables: None,
             recipes: None,
+            templates: None,
             trim_stats_file: None,
             playground: PlaygroundState {
                 sub_tab: PlaygroundSub::Runner,
@@ -707,11 +741,9 @@ impl App {
     async fn refresh_inner(&mut self) {
         // If we're not connected, try to discover a live bridge first.
         if !self.bridge_connected {
-            if let Some(port) = http::HttpClient::discover_bridge(self.opts.http_port).await {
+            if let Some(port) = http::discover_bridge(self.opts.http_port).await {
                 self.opts.http_port = port;
-                if let Some(http) = &mut self.http {
-                    http.set_port(port);
-                }
+                self.http = http::client_for(port).ok();
                 self.bridge_connected = true;
                 self.status_msg.clear();
             } else {
@@ -734,15 +766,17 @@ impl App {
             } else {
                 ok = false;
             }
-            if let Ok(v) = http.trim_status().await {
+            if let Ok(v) = http.trim_status(None).await {
                 self.trim_status = Some(v);
             }
             if let Ok(v) = http.list_variables().await {
-                self.variables = Some(v.clone());
                 self.variables_state.entries = parse_variables(&v);
             }
             if let Ok(v) = http.list_recipes().await {
                 self.recipes = Some(v);
+            }
+            if let Ok(v) = http.list_templates().await {
+                self.templates = Some(v);
             }
             // Restore last-used playground values once per session so tab
             // navigation and restarts keep the user's context.
@@ -787,23 +821,17 @@ impl App {
         if self.playground.fields_for_tool == current_name {
             return;
         }
-        let tool = self
-            .tools
-            .as_ref()
-            .and_then(|v| v.get("tools"))
-            .and_then(|t| {
-                // Prefer name match; fall back to positional index.
-                if let Some(ref name) = current_name {
-                    t.as_array().and_then(|arr| {
-                        arr.iter()
-                            .find(|item| item.get("name").and_then(|n| n.as_str()) == Some(name))
-                            .cloned()
-                    })
-                } else {
-                    None
-                }
-                .or_else(|| t.get(self.playground.tool_index).cloned())
-            });
+        let tool = self.tools.as_ref().and_then(|t| {
+            // Prefer name match; fall back to positional index.
+            current_name
+                .as_ref()
+                .and_then(|name| {
+                    t.iter()
+                        .find(|item| item.get("name").and_then(|n| n.as_str()) == Some(name))
+                })
+                .or_else(|| t.get(self.playground.tool_index))
+                .cloned()
+        });
         if let Some(tool) = tool {
             let fields = parse_tool_schema(&tool);
             let values = fields
@@ -835,12 +863,12 @@ impl App {
             return;
         };
         let ws = self.playground_workspace();
-        let Ok(v) = http.get_playground(&ws).await else {
+        let Ok(snap) = http.get_playground(&ws).await else {
             self.playground_restored = true;
             return;
         };
         // Tool selection by name so index drift can't mis-select.
-        if let Some(name) = v.get("tool_name").and_then(|n| n.as_str())
+        if let Some(name) = snap.tool_name.as_deref()
             && let Some(idx) = self
                 .playground
                 .tools_list
@@ -850,15 +878,14 @@ impl App {
             self.playground.tool_index = idx;
         }
         // Field values are keyed by field name on the server; map back onto
-        // the current schema order. Falls back to positional `field_values`
-        // array for older snapshots.
-        if let Some(map) = v.get("field_values").and_then(|m| m.as_object()) {
+        // the current schema order.
+        if !snap.field_values.is_empty() {
             self.sync_tool_fields();
             for (i, f) in self.playground.fields.iter().enumerate() {
-                if let Some(val) = map.get(&f.name).and_then(|x| x.as_str())
+                if let Some(val) = snap.field_values.get(&f.name)
                     && let Some(slot) = self.playground.field_values.get_mut(i)
                 {
-                    *slot = val.to_string();
+                    *slot = val.clone();
                 }
             }
             self.playground.fields_for_tool = self
@@ -867,8 +894,8 @@ impl App {
                 .get(self.playground.tool_index)
                 .map(|(n, _)| n.clone());
         }
-        if let Some(name) = v.get("builder_recipe_name").and_then(|n| n.as_str()) {
-            self.playground.builder_recipe_name = name.to_string();
+        if !snap.builder_recipe_name.is_empty() {
+            self.playground.builder_recipe_name = snap.builder_recipe_name;
         }
         self.playground_restored = true;
         self.dirty = true;
@@ -885,23 +912,24 @@ impl App {
             .tools_list
             .get(self.playground.tool_index)
             .map(|(n, _)| n.clone());
-        let mut field_map = serde_json::Map::new();
-        for (f, val) in self
+        let field_values = self
             .playground
             .fields
             .iter()
             .zip(self.playground.field_values.iter())
-        {
-            field_map.insert(f.name.clone(), serde_json::Value::String(val.clone()));
+            .map(|(f, val)| (f.name.clone(), val.clone()))
+            .collect();
+        // The server stamps `updated_at`.
+        let snapshot = PlaygroundSnapshot {
+            workspace_id: self.playground_workspace(),
+            tool_name,
+            field_values,
+            builder_recipe_name: self.playground.builder_recipe_name.clone(),
+            ..Default::default()
+        };
+        if let Err(e) = http.save_playground(&snapshot).await {
+            self.log_debug(format!("persist_playground failed: {e}"));
         }
-        let body = serde_json::json!({
-            "workspace_id": self.playground_workspace(),
-            "tool_name": tool_name,
-            "field_values": field_map,
-            "builder_recipe_name": self.playground.builder_recipe_name,
-            "builder_steps": [],
-        });
-        let _ = http.save_playground(body).await;
     }
 
     /// Resolve current herdr workspace/pane context.
@@ -935,16 +963,11 @@ impl App {
             }
             // 2. Canonical pane list from the live AgentRegistry.
             match http.list_agents(self.herdr.workspace.as_deref()).await {
-                Ok(v) => {
-                    if let Some(agents) = v.get("agents").and_then(|a| a.as_array()) {
-                        self.herdr.panes = agents
-                            .iter()
-                            .filter_map(|a| serde_json::from_value::<HerdrPane>(a.clone()).ok())
-                            .collect();
-                        self.herdr.pane_count = self.herdr.panes.len();
-                        self.herdr.pane_id = self.herdr.panes.first().map(|p| p.pane_id.clone());
-                        return;
-                    }
+                Ok(agents) => {
+                    self.herdr.panes = agents.into_iter().map(HerdrPane::from).collect();
+                    self.herdr.pane_count = self.herdr.panes.len();
+                    self.herdr.pane_id = self.herdr.panes.first().map(|p| p.pane_id.clone());
+                    return;
                 }
                 Err(e) => {
                     let msg = format!("list_agents failed: {e}");
@@ -1200,9 +1223,9 @@ impl App {
         ));
         match self.http.clone() {
             Some(http) => match http.clipboard_set(text).await {
-                Ok(v) => {
+                Ok(()) => {
                     self.status_msg = format!("copied {} chars", text.len());
-                    self.log_debug(format!("set_clipboard ok: {v}"));
+                    self.log_debug("set_clipboard ok");
                 }
                 Err(e) => {
                     self.status_msg = format!("clipboard set failed: {e}");
@@ -1971,12 +1994,9 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
 }
 
 /// Parse `/api/tools` into `(name, short_desc)` pairs.
-fn parse_tool_list(v: &Value) -> Vec<(String, String)> {
-    let arr = match v.get("tools").and_then(|t| t.as_array()) {
-        Some(a) => a,
-        None => return Vec::new(),
-    };
-    arr.iter()
+fn parse_tool_list(tools: &[Value]) -> Vec<(String, String)> {
+    tools
+        .iter()
         .filter_map(|t| {
             let name = t.get("name").and_then(|n| n.as_str())?.to_string();
             let desc = t
@@ -2053,22 +2073,14 @@ pub fn parse_tool_schema(tool: &Value) -> Vec<ToolField> {
 }
 
 /// Parse `/api/variables` into `(key, value)` pairs.
-fn parse_variables(v: &Value) -> Vec<(String, String)> {
-    let arr = match v.as_array() {
-        Some(a) => a,
-        None => return Vec::new(),
-    };
-    arr.iter()
-        .filter_map(|e| {
-            let key = e.get("key").and_then(|k| k.as_str())?.to_string();
-            let val = e
-                .get("value")
-                .map(|v| match v {
-                    Value::String(s) => s.clone(),
-                    o => o.to_string(),
-                })
-                .unwrap_or_default();
-            Some((key, val))
+fn parse_variables(vars: &[VariableStore]) -> Vec<(String, String)> {
+    vars.iter()
+        .map(|v| {
+            let val = match &v.value {
+                Value::String(s) => s.clone(),
+                o => o.to_string(),
+            };
+            (v.key.clone(), val)
         })
         .collect()
 }
@@ -2328,23 +2340,28 @@ mod tests {
     }
 
     #[test]
-    fn herdr_pane_from_json() {
-        let json = serde_json::json!({
+    fn herdr_pane_from_agent_handle() {
+        let handle: AgentHandle = serde_json::from_value(serde_json::json!({
             "pane_id": "w123:p1",
+            "workspace_id": "w123",
+            "tab_id": "w123:t1",
             "label": "test-pane",
             "agent": "hermes",
-            "status": "idle",
-            "role": "",
-            "output": "",
-            "cwd": "/tmp/test",
-            "focused": true,
-            "tab_id": "w123:t1"
-        });
-        let pane: HerdrPane = serde_json::from_value(json).unwrap();
+            "status": "idle"
+        }))
+        .unwrap();
+        let pane = HerdrPane::from(handle);
         assert_eq!(pane.pane_id, "w123:p1");
         assert_eq!(pane.label, "test-pane");
         assert_eq!(pane.agent.as_deref(), Some("hermes"));
         assert_eq!(pane.status, "idle");
-        assert!(pane.focused);
+        assert_eq!(pane.tab_id.as_deref(), Some("w123:t1"));
+        assert!(!pane.focused, "focus is CLI-only");
+
+        let idle: AgentHandle = serde_json::from_value(serde_json::json!({
+            "pane_id": "p2", "workspace_id": "w1"
+        }))
+        .unwrap();
+        assert_eq!(HerdrPane::from(idle).agent, None);
     }
 }
