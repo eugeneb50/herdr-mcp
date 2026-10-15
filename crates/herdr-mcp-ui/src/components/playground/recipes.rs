@@ -6,8 +6,8 @@ use dioxus::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-use super::forms::{DynamicForm, ResponseViewer};
-use super::runner::{ToolInfo, tool_list};
+use super::forms::{DynamicForm, ResponseViewer, build_params};
+use super::runner::{ToolInfo, schema_parts, tool_list};
 use crate::client::use_api;
 use crate::vars::substitute;
 use herdr_mcp_api::{
@@ -51,16 +51,19 @@ fn step_from_api(i: usize, s: &RecipeStep) -> Step {
     }
 }
 
-fn step_to_api(s: &Step) -> RecipeStep {
-    let params: serde_json::Map<String, Value> = s
-        .params
+/// A step as the server runs it: params typed per the tool's schema
+/// (`{{…}}` placeholders stay strings until the run resolves them).
+fn step_to_api(s: &Step, tools: &[ToolInfo]) -> RecipeStep {
+    let schema = tools
         .iter()
-        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-        .collect();
+        .find(|t| t.name == s.tool)
+        .map(|t| t.schema.clone())
+        .unwrap_or(Value::Null);
+    let (props, _) = schema_parts(&schema);
     RecipeStep {
         id: s.id.clone(),
         tool: s.tool.clone(),
-        params: Value::Object(params),
+        params: build_params(&props, &s.params, str::to_string),
         description: Some(s.description.clone()),
     }
 }
@@ -143,7 +146,11 @@ pub fn RecipeBuilder(
                     let req = RecipeRequest {
                         name: Some(name.read().clone()),
                         session_id: None,
-                        steps: steps.read().iter().map(step_to_api).collect(),
+                        steps: steps
+                            .read()
+                            .iter()
+                            .map(|s| step_to_api(s, &tools.read()))
+                            .collect(),
                     };
                     client
                         .run_recipe(&req)
@@ -172,7 +179,11 @@ pub fn RecipeBuilder(
                 return;
             }
             save_error.set(None);
-            let payload: Vec<RecipeStep> = steps.read().iter().map(step_to_api).collect();
+            let payload: Vec<RecipeStep> = steps
+                .read()
+                .iter()
+                .map(|s| step_to_api(s, &tools.read()))
+                .collect();
             let saved = *saved_id.read();
             let res = match saved {
                 Some(id) => {
@@ -311,7 +322,53 @@ pub fn RecipeBuilder(
             div { class: "alert alert-error", "{e}" }
         }
         if let Some(data) = results.read().as_ref() {
-            ResponseViewer { data: data.clone() }
+            RunResults {
+                data: data.clone(),
+                order: steps.read().iter().map(|s| s.id.clone()).collect(),
+            }
+        }
+    }
+}
+
+/// A recipe run (`RecipeResponse` or `ExecutionResult`: both carry
+/// `status`, `results` by step id and an optional `error`): its status, then
+/// each step's result in step order.
+#[component]
+fn RunResults(data: Value, order: Vec<String>) -> Element {
+    let status = data
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    let error = data
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let results = data.get("results").cloned().unwrap_or(Value::Null);
+    let ran: Vec<(usize, String, Value)> = order
+        .iter()
+        .enumerate()
+        .filter_map(|(i, id)| Some((i + 1, id.clone(), results.get(id)?.clone())))
+        .collect();
+    let ok = status == "completed";
+    rsx! {
+        div { class: "card",
+            div { class: "response-head",
+                span { class: "response-title", "Run" }
+                span { class: if ok { "pill" } else { "pill pill-error" }, "{status}" }
+            }
+            if let Some(e) = error {
+                div { class: "alert alert-error", "{e}" }
+            }
+            for (n, id, result) in ran {
+                div { key: "{id}",
+                    div { class: "form-label", "#{n} {id}" }
+                    match result.get("error").and_then(Value::as_str) {
+                        Some(e) => rsx! { div { class: "alert alert-error", "{e}" } },
+                        None => rsx! { ResponseViewer { data: result.clone() } },
+                    }
+                }
+            }
         }
     }
 }
