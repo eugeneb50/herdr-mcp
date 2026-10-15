@@ -1363,7 +1363,7 @@ fn render_tool_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
             Line::from("Not connected to herdr-mcp bridge."),
             Line::from(""),
             Line::from("Start `herdr-mcp serve` (or run"),
-            Line::from("`herdr-mcp dashboard --http-port <port>`)."),
+            Line::from("`herdr-trim dashboard --http-port <port>`)."),
             Line::from(""),
             Line::from(format!(
                 "Auto-discovering on :{} / :8080 / :7676 …",
