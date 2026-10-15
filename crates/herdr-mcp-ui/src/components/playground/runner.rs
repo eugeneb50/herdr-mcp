@@ -185,6 +185,10 @@ pub fn ToolRunner() -> Element {
                     {
                         auto_vars.set(auto_map(&v));
                     }
+                    // The bridge saves auto-variables for some tools; show them.
+                    if let Ok(v) = client.list_variables().await {
+                        user_vars.set(user_map(&v));
+                    }
                     // Persist last-used values server-side (UX-4); the server
                     // stamps `updated_at`.
                     let snapshot = PlaygroundSnapshot {
