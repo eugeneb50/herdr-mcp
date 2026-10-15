@@ -1,5 +1,7 @@
+pub mod agents;
 pub mod herdr_client;
 pub mod persistence;
+pub mod profiles;
 pub mod runs;
 pub mod scheduler;
 pub mod server;

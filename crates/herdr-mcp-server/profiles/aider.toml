@@ -1,0 +1,5 @@
+id = "aider"
+name = "Aider"
+command = "aider"
+quiet_ms = 3000
+notes = "Not a herdr-native kind: herdr-mcp watches output and reports status. Set ready_regex to aider's input prompt for sharper idle detection."

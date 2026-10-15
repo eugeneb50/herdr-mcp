@@ -298,6 +298,29 @@ pub struct AgentMessageParams {
     pub compress: Option<Vec<String>>,
 }
 
+/// Parameters for the `agent_prompt` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct AgentPromptParams {
+    /// Target agent: role, label or pane id.
+    pub target: String,
+    /// Prompt text.
+    pub text: String,
+    /// Give up waiting for the turn to finish after this long (default 300000).
+    pub timeout_ms: Option<u32>,
+}
+
+/// Parameters for the `agent_interrupt` tool.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct AgentInterruptParams {
+    /// Target agent: role, label or pane id.
+    pub target: String,
+    /// Quit the agent (profile `stop` keys) instead of stopping its turn.
+    #[serde(default)]
+    pub hard: bool,
+}
+
 /// Parameters for the `agent_read` a2a step.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
@@ -1248,7 +1271,7 @@ impl HerdrMcpServer {
     // (conductor) and as standalone MCP tools (peer-to-peer).
 
     #[tool(
-        description = "Spawn an agent in a new pane and register it under `role` in the live agent registry. Optionally waits for `needs` targets (role or pane id) to be idle first, then captures the agent's work product. Returns {pane_id, role, agent, status, output}."
+        description = "Spawn an agent in a new pane from an agent profile and register it under `role`. `agent` is a profile id (see /api/profiles: claude, codex, opencode, gemini, hermes, zeroclaw, aider, shell, or your own) or any herdr-native agent kind. Optionally waits for `needs` targets (role or pane id) to be idle first, then (wait_idle) for the new agent to be idle, capturing its output. Returns {pane_id, role, agent, status, output}."
     )]
     async fn agent_spawn(
         &self,
@@ -1265,7 +1288,7 @@ impl HerdrMcpServer {
             label,
         }): Parameters<AgentSpawnParams>,
     ) -> Result<CallToolResult, McpError> {
-        // Wait for dependencies first (reliable: driven by herdr's agent state).
+        // Wait for dependencies first (driven by herdr's agent state).
         let ws_for_resolve = workspace_id.clone().unwrap_or_default();
         for dep in &needs {
             let mut pane = self.registry.resolve(&ws_for_resolve, dep).await;
@@ -1273,61 +1296,54 @@ impl HerdrMcpServer {
                 pane = self.registry.resolve("", dep).await;
             }
             if let Some(pane) = pane {
-                let _ = self
-                    .wait_agent_status(Parameters(WaitAgentStatusParams {
-                        target: pane,
-                        status: "idle".into(),
-                        timeout_ms: Some(300_000),
-                    }))
-                    .await;
+                let _ = herdr_cli(&as_strs(&agent_wait_args(&pane, "idle", Some(300_000)))).await;
             }
         }
 
-        let mut cli = vec!["agent", "start"];
-        if let Some(ref path) = cwd {
-            cli.extend(["--cwd", path]);
-        }
-        if let Some(ref wid) = workspace_id {
-            cli.extend(["--workspace", wid]);
-        }
-        if let Some(ref tid) = tab_id {
-            cli.extend(["--tab", tid]);
-        }
-        if let Some(ref dir) = split {
-            cli.extend(["--split", dir]);
-        }
-        cli.push("--");
-        cli.push(&agent);
-        for a in &args {
-            cli.push(a);
-        }
-        let raw = herdr_cli(&cli).await?;
-        let value: serde_json::Value =
-            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({ "raw": raw }));
-        let pane_id = extract_pane_id(&value).unwrap_or_default();
+        let profile = crate::profiles::get(&self.data_dir, &agent)
+            .await
+            .unwrap_or_else(|| herdr_mcp_api::AgentProfile::native(&agent));
+        let name = label
+            .clone()
+            .or_else(|| (!role.is_empty()).then(|| role.clone()))
+            .unwrap_or_else(|| {
+                format!(
+                    "{agent}-{}",
+                    &uuid::Uuid::new_v4().simple().to_string()[..6]
+                )
+            });
+        let pane_id = crate::agents::spawn(
+            &profile,
+            &name,
+            &args,
+            crate::agents::Placement {
+                workspace: workspace_id.as_deref(),
+                tab: tab_id.as_deref(),
+                direction: split.as_deref(),
+                cwd: cwd.as_deref(),
+            },
+        )
+        .await?;
+        // Pane ids are `{workspace}:{pane}`.
         let ws = workspace_id
             .clone()
-            .or_else(|| extract_string(&value, "workspace_id"))
+            .or_else(|| pane_id.split_once(':').map(|(w, _)| w.to_string()))
             .unwrap_or_default();
-
-        if !pane_id.is_empty() {
-            self.registry.upsert(&pane_id, &ws, "", &agent, &role).await;
-            if let Some(ref lbl) = label {
-                let _ = herdr_cli(&["pane", "rename", &pane_id, lbl]).await;
-                self.registry.set_label(&pane_id, lbl).await;
-            }
-        }
+        self.registry
+            .upsert(
+                &pane_id,
+                &ws,
+                tab_id.as_deref().unwrap_or(""),
+                &profile.id,
+                &role,
+            )
+            .await;
+        self.registry.set_label(&pane_id, &name).await;
 
         let mut status = "working".to_string();
         let mut output = String::new();
-        if wait_idle && !pane_id.is_empty() {
-            let _ = self
-                .wait_agent_status(Parameters(WaitAgentStatusParams {
-                    target: pane_id.clone(),
-                    status: "idle".into(),
-                    timeout_ms: Some(300_000),
-                }))
-                .await;
+        if wait_idle {
+            let _ = herdr_cli(&as_strs(&agent_wait_args(&pane_id, "idle", Some(300_000)))).await;
             status = "idle".to_string();
             output = read_pane_text(&pane_id).await.unwrap_or_default();
             self.registry.set_output(&pane_id, output.clone()).await;
@@ -1338,7 +1354,8 @@ impl HerdrMcpServer {
                 "pane_id": pane_id,
                 "workspace_id": ws,
                 "role": role,
-                "agent": agent,
+                "agent": profile.id,
+                "name": name,
                 "status": status,
                 "output": output,
             }))
@@ -1346,8 +1363,25 @@ impl HerdrMcpServer {
         ]))
     }
 
+    /// The profile driving the agent in `pane` (registered by spawn, or the
+    /// agent kind herdr detected); a native default if none matches.
+    async fn profile_for_pane(&self, pane: &str) -> herdr_mcp_api::AgentProfile {
+        let agent = self
+            .registry
+            .get(pane)
+            .await
+            .map(|h| h.agent)
+            .unwrap_or_default();
+        if agent.is_empty() {
+            return herdr_mcp_api::AgentProfile::native("unknown");
+        }
+        crate::profiles::get(&self.data_dir, &agent)
+            .await
+            .unwrap_or_else(|| herdr_mcp_api::AgentProfile::native(&agent))
+    }
+
     #[tool(
-        description = "Send a message (text) to another agent's stream. `target` may be a role or pane id. The text may interpolate {{role.output}} / {{pane_id.output}} from the session registry. Optional `compress` lists trim stages (e.g. [\"caveman:full\",\"pfc1\"]) applied to the wire bytes; if absent, the target's per-pane trim policy is used (default off)."
+        description = "Send a message (text) to another agent and submit it. `target` may be a role, label or pane id. The text may interpolate {{role.output}} / {{pane_id.output}} from the session registry. Optional `compress` lists trim stages (e.g. [\"caveman:full\",\"pfc1\"]) applied to the wire bytes; if absent, the target's per-pane trim policy is used (default off). Works for any agent profile (native or command)."
     )]
     async fn agent_message(
         &self,
@@ -1361,8 +1395,62 @@ impl HerdrMcpServer {
         let wire = self
             .apply_outbound_trim(&pane, &text, compress.as_ref())
             .await;
-        let args = agent_submit_args(&pane, &wire);
-        run_herdr_json(&as_strs(&args)).await
+        let profile = self.profile_for_pane(&pane).await;
+        crate::agents::submit(&profile, &pane, &wire).await?;
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({ "pane_id": pane, "delivered": true }))
+                .map_err(to_mcp_err)?,
+        ]))
+    }
+
+    #[tool(
+        description = "Prompt an agent and wait for its turn to finish; returns its reply. `target` may be a role, label or pane id. Works for any agent profile: herdr-native agents via `agent prompt --wait`, others by typing the prompt and waiting for herdr-mcp's idle detection. Returns {pane_id, role, agent, reply}; the reply is also stored as the agent's output ({{role.output}})."
+    )]
+    async fn agent_prompt(
+        &self,
+        Parameters(AgentPromptParams {
+            target,
+            text,
+            timeout_ms,
+        }): Parameters<AgentPromptParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pane = resolve_target_pane(self, &target).await?;
+        let profile = self.profile_for_pane(&pane).await;
+        let reply =
+            crate::agents::prompt(&profile, &pane, &text, timeout_ms.unwrap_or(300_000)).await?;
+        self.registry.set_output(&pane, reply.clone()).await;
+        let role = self
+            .registry
+            .get(&pane)
+            .await
+            .map(|h| h.role)
+            .unwrap_or_default();
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "pane_id": pane,
+                "role": role,
+                "agent": profile.id,
+                "reply": reply,
+                "output": reply,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
+    }
+
+    #[tool(
+        description = "Interrupt an agent: stop its current turn (default, the profile's `interrupt` keys, e.g. Esc) or quit it (`hard`, the profile's `stop` keys, e.g. Ctrl-C). `target` may be a role, label or pane id."
+    )]
+    async fn agent_interrupt(
+        &self,
+        Parameters(AgentInterruptParams { target, hard }): Parameters<AgentInterruptParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pane = resolve_target_pane(self, &target).await?;
+        let profile = self.profile_for_pane(&pane).await;
+        crate::agents::interrupt(&profile, &pane, hard).await?;
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({ "pane_id": pane, "hard": hard }))
+                .map_err(to_mcp_err)?,
+        ]))
     }
 
     #[tool(
@@ -2410,7 +2498,7 @@ impl ServerHandler for HerdrMcpServer {}
 // ── Helpers ────────────────────────────────────────────────────────────
 
 /// Map any displayable error into an `McpError` for `#[tool]` methods.
-fn to_mcp_err(e: impl std::fmt::Display) -> McpError {
+pub(crate) fn to_mcp_err(e: impl std::fmt::Display) -> McpError {
     McpError {
         code: rmcp::model::ErrorCode(-32603),
         message: e.to_string().into(),
@@ -2465,25 +2553,25 @@ fn extract_string(value: &serde_json::Value, key: &str) -> Option<String> {
 }
 
 /// Find the `pane_id` field anywhere in a herdr JSON response.
-fn extract_pane_id(value: &serde_json::Value) -> Option<String> {
+pub(crate) fn extract_pane_id(value: &serde_json::Value) -> Option<String> {
     extract_string(value, "pane_id")
 }
 
 // ── herdr 0.9 argv builders ─────────────────────────────────────────────
 // Pure, so the exact command lines are pinned by tests.
 
-fn as_strs(args: &[String]) -> Vec<&str> {
+pub(crate) fn as_strs(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
 }
 
 /// Submit `text` (+ Enter) to an agent: `agent prompt` (0.9 has no `agent send`).
-fn agent_submit_args(target: &str, text: &str) -> Vec<String> {
+pub(crate) fn agent_submit_args(target: &str, text: &str) -> Vec<String> {
     ["agent", "prompt", target, text].map(String::from).to_vec()
 }
 
 /// `agent wait <target> --until <status> [--timeout ms]` (0.9: `--until`,
 /// not `--status`; also takes pane ids, replacing `wait agent-status`).
-fn agent_wait_args(target: &str, status: &str, timeout_ms: Option<u32>) -> Vec<String> {
+pub(crate) fn agent_wait_args(target: &str, status: &str, timeout_ms: Option<u32>) -> Vec<String> {
     let mut args: Vec<String> = ["agent", "wait", target, "--until", status]
         .map(String::from)
         .to_vec();
@@ -2735,7 +2823,7 @@ pub fn spawn_trim_poller(server: std::sync::Arc<HerdrMcpServer>) {
 }
 
 /// Execute the `herdr` CLI binary with the given arguments.
-async fn herdr_cli(args: &[&str]) -> Result<String, McpError> {
+pub(crate) async fn herdr_cli(args: &[&str]) -> Result<String, McpError> {
     tracing::debug!("herdr {}", args.join(" "));
 
     let binary = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
@@ -2909,6 +2997,13 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path) -> Router {
         .route("/api/runs/{id}/events", get(run_events_handler))
         .route("/api/runs/{id}/{action}", post(control_run_handler))
         .route("/api/events", get(events_handler))
+        .route("/api/profiles", get(list_profiles_handler))
+        .route(
+            "/api/profiles/{id}",
+            get(get_profile_handler)
+                .put(save_profile_handler)
+                .delete(delete_profile_handler),
+        )
         .route("/api/recipes/{id}/export", get(export_recipe_handler))
         .route(
             "/api/variables",
@@ -3229,6 +3324,20 @@ pub(crate) async fn dispatch_tool(
             let p: AgentMessageParams = serde_json::from_value(body).map_err(bad_request)?;
             server
                 .agent_message(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
+        }
+        "agent_prompt" => {
+            let p: AgentPromptParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .agent_prompt(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
+        }
+        "agent_interrupt" => {
+            let p: AgentInterruptParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .agent_interrupt(Parameters(p))
                 .await
                 .map_err(mcp_err_to_http)
         }
@@ -3772,6 +3881,59 @@ async fn run_events_handler(
         .await
         .map(Json)
         .map_err(internal)
+}
+
+/// `GET /api/profiles` — every agent profile (bundled + `data/profiles`).
+async fn list_profiles_handler(
+    State(AppState { server, .. }): State<AppState>,
+) -> Json<Vec<herdr_mcp_api::AgentProfile>> {
+    Json(crate::profiles::list(&server.data_dir).await)
+}
+
+async fn get_profile_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<herdr_mcp_api::AgentProfile>, (StatusCode, String)> {
+    crate::profiles::get(&server.data_dir, &id)
+        .await
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, format!("no profile {id:?}")))
+}
+
+/// `PUT /api/profiles/{id}` — create or override a profile (400 if invalid).
+async fn save_profile_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Path(id): Path<String>,
+    Json(profile): Json<herdr_mcp_api::AgentProfile>,
+) -> Result<Json<herdr_mcp_api::AgentProfile>, (StatusCode, String)> {
+    if profile.id != id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "body id must match the path".into(),
+        ));
+    }
+    match crate::profiles::save(&server.data_dir, &profile).await {
+        Ok(()) => Ok(Json(profile)),
+        Err(crate::profiles::SaveError::Invalid(problems)) => {
+            Err((StatusCode::BAD_REQUEST, problems.join("; ")))
+        }
+        Err(crate::profiles::SaveError::Io(e)) => {
+            Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        }
+    }
+}
+
+/// `DELETE /api/profiles/{id}` — remove a user profile (a bundled one with
+/// the same id comes back). 404 if there is no user file.
+async fn delete_profile_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    match crate::profiles::delete(&server.data_dir, &id).await {
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err((StatusCode::NOT_FOUND, format!("no user profile {id:?}"))),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -5015,6 +5177,34 @@ mod tests {
             api.get_run(uuid::Uuid::new_v4()).await,
             Err(ApiError::Status { status: 404, .. })
         ));
+        // Profiles: bundled list, user override, invalid rejected, delete.
+        let profiles = api.list_profiles().await.unwrap();
+        assert!(
+            profiles
+                .iter()
+                .any(|p| p.id == "zeroclaw" && !p.is_native())
+        );
+        assert!(profiles.iter().any(|p| p.id == "hermes" && p.is_native()));
+        let mut mine = api.get_profile("shell").await.unwrap();
+        mine.id = "python".into();
+        mine.command = Some("python3".into());
+        api.save_profile(&mine).await.unwrap();
+        assert_eq!(api.get_profile("python").await.unwrap(), mine);
+        mine.kind = Some("claude".into());
+        assert!(matches!(
+            api.save_profile(&mine).await,
+            Err(ApiError::Status { status: 400, .. })
+        ));
+        api.delete_profile("python").await.unwrap();
+        assert!(matches!(
+            api.get_profile("python").await,
+            Err(ApiError::Status { status: 404, .. })
+        ));
+        assert!(matches!(
+            api.delete_profile("claude").await,
+            Err(ApiError::Status { status: 404, .. })
+        ));
+
         let adhoc = api
             .run_recipe(&RecipeRequest {
                 steps: vec![step("only")],

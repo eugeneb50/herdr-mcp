@@ -1,0 +1,4 @@
+id = "hermes"
+name = "Hermes Agent (Nous Research)"
+kind = "hermes"
+notes = "Driven natively by herdr (agent start --kind hermes)."

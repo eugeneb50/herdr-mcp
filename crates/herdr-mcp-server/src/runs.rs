@@ -177,15 +177,27 @@ fn record_result(run: &mut RunRecord, step: &str, json: &Value) {
     run.variables
         .extend(crate::variables::extract_variables(json));
     run.variables.insert(step.to_string(), json.clone());
-    if let Some(pane_id) = json.get("pane_id").and_then(Value::as_str) {
-        run.variables.insert(pane_id.to_string(), json.clone());
-        if let Some(role) = json.get("role").and_then(Value::as_str)
+    // Agent tools return the handle as JSON text inside the result.
+    let payload = tool_payload(json);
+    if let Some(pane_id) = payload.get("pane_id").and_then(Value::as_str) {
+        run.variables.insert(pane_id.to_string(), payload.clone());
+        if let Some(role) = payload.get("role").and_then(Value::as_str)
             && !role.is_empty()
         {
-            run.variables.insert(role.to_string(), json.clone());
+            run.variables.insert(role.to_string(), payload.clone());
         }
     }
     run.results.insert(step.to_string(), json.clone());
+}
+
+/// The JSON a tool returned: its first text content parsed as JSON, else
+/// the result as-is.
+fn tool_payload(result: &Value) -> Value {
+    result
+        .pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .and_then(|t| serde_json::from_str(t).ok())
+        .unwrap_or_else(|| result.clone())
 }
 
 /// Load a run's record (`None` if there is no such run).
@@ -810,6 +822,36 @@ mod tests {
         assert_eq!(Runs::observe(run.clone(), true).status, RunStatus::Running);
         run.status = RunStatus::Completed;
         assert_eq!(Runs::observe(run, false).status, RunStatus::Completed);
+    }
+
+    /// An agent spawned/prompted earlier in a run is addressable by role
+    /// and pane id in later steps (`{{writer.output}}`).
+    #[test]
+    fn agent_handles_from_steps_resolve_by_role() {
+        let header = RunHeader {
+            id: Uuid::new_v4(),
+            recipe_id: None,
+            name: None,
+            session_id: "w1".into(),
+            steps: vec![],
+            seed: HashMap::new(),
+            started_at: Utc::now(),
+        };
+        let handle = r#"{"pane_id":"w1:p9","role":"writer","output":"draft v1"}"#;
+        let event = RunEvent {
+            run_id: header.id,
+            seq: 1,
+            at: Utc::now(),
+            kind: RunEventKind::StepFinished {
+                step: "spawn".into(),
+                result: serde_json::json!({"content": [{"type": "text", "text": handle}]}),
+            },
+        };
+        let run = fold(header, &[event]);
+        let mut params =
+            serde_json::json!({ "text": "review: {{writer.output}} ({{w1:p9.pane_id}})" });
+        resolve_variables(&mut params, &run.variables);
+        assert_eq!(params["text"], "review: draft v1 (w1:p9)");
     }
 
     #[test]

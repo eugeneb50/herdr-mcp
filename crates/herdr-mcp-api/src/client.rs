@@ -9,11 +9,11 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    AgentHandle, AgentsResponse, AutoVariablesResponse, CreateRecipeRequest, DiagnoseReport,
-    ExecutionResult, ExportScriptResponse, PlaygroundSnapshot, ProxyPolicy, Recipe, RecipeRequest,
-    RecipeResponse, RecipeTemplate, RunAction, RunEvent, RunRecord, SaveVariableRequest,
-    StartRunRequest, ToolsResponse, TrimPolicy, TrimStatusResponse, UpdateRecipeRequest,
-    VariableStore,
+    AgentHandle, AgentProfile, AgentsResponse, AutoVariablesResponse, CreateRecipeRequest,
+    DiagnoseReport, ExecutionResult, ExportScriptResponse, PlaygroundSnapshot, ProxyPolicy, Recipe,
+    RecipeRequest, RecipeResponse, RecipeTemplate, RunAction, RunEvent, RunRecord,
+    SaveVariableRequest, StartRunRequest, ToolsResponse, TrimPolicy, TrimStatusResponse,
+    UpdateRecipeRequest, VariableStore,
 };
 
 /// Errors from [`ApiClient`].
@@ -332,6 +332,33 @@ impl ApiClient {
     /// `GET /api/executions/{id}`.
     pub async fn get_execution(&self, id: Uuid) -> Result<ExecutionResult, ApiError> {
         self.get(&["api", "executions", &id.to_string()]).await
+    }
+
+    // ── agent profiles ─────────────────────────────────────────────────
+
+    /// `GET /api/profiles`.
+    pub async fn list_profiles(&self) -> Result<Vec<AgentProfile>, ApiError> {
+        self.get(&["api", "profiles"]).await
+    }
+
+    /// `GET /api/profiles/{id}`.
+    pub async fn get_profile(&self, id: &str) -> Result<AgentProfile, ApiError> {
+        self.get(&["api", "profiles", id]).await
+    }
+
+    /// `PUT /api/profiles/{id}` — create or override (400 if invalid).
+    pub async fn save_profile(&self, profile: &AgentProfile) -> Result<AgentProfile, ApiError> {
+        Self::json(
+            self.request(Method::PUT, &["api", "profiles", &profile.id])
+                .json(profile),
+        )
+        .await
+    }
+
+    /// `DELETE /api/profiles/{id}` (204) — drop a user profile.
+    pub async fn delete_profile(&self, id: &str) -> Result<(), ApiError> {
+        self.no_content(self.request(Method::DELETE, &["api", "profiles", id]))
+            .await
     }
 
     // ── runs ───────────────────────────────────────────────────────────

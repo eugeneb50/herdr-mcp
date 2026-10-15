@@ -1,0 +1,4 @@
+id = "claude"
+name = "Claude Code"
+kind = "claude"
+notes = "Driven natively by herdr (agent start --kind claude)."

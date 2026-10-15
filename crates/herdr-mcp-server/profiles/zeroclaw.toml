@@ -1,0 +1,6 @@
+id = "zeroclaw"
+name = "ZeroClaw"
+command = "zeroclaw"
+args = ["agent", "-a", "main"]
+quiet_ms = 3000
+notes = "Not a herdr-native kind: herdr-mcp watches output and reports status. Launch args from ZeroClaw's docs (CLI chat via `zeroclaw agent -a main`); unverified, override in data/profiles/zeroclaw.toml if needed."
