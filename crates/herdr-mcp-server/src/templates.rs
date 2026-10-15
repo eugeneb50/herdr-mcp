@@ -49,34 +49,18 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
         RecipeTemplate {
             id: "git-status".to_string(),
             name: "Git Status".to_string(),
-            description: "Run git status in a pane and read output".to_string(),
+            description: "Run git status in a shell pane and capture what it printed".to_string(),
             category: "git".to_string(),
-            variables: vec![TemplateVariable {
-                name: "pane_id".to_string(),
-                description: "Pane ID where git is running".to_string(),
-                default_value: None,
-                required: true,
-            }],
-            steps: vec![
-                RecipeStep {
-                    id: "run".to_string(),
-                    tool: "run_command".to_string(),
-                    params: serde_json::json!({
-                        "pane_id": "{{ template.pane_id }}",
-                        "command": "git status"
-                    }),
-                    description: Some("Run git status".to_string()),
-                },
-                RecipeStep {
-                    id: "read".to_string(),
-                    tool: "read_pane".to_string(),
-                    params: serde_json::json!({
-                        "pane_id": "{{ template.pane_id }}",
-                        "source": "recent"
-                    }),
-                    description: Some("Read git output".to_string()),
-                },
-            ],
+            variables: vec![var("pane_id", "Shell pane in the repository", None)],
+            steps: vec![step(
+                "status",
+                "pane_exec",
+                serde_json::json!({
+                    "pane_id": "{{ template.pane_id }}",
+                    "command": "git status --short --branch"
+                }),
+                "Run git status; {{status.output}} holds the result",
+            )],
         },
         RecipeTemplate {
             id: "restart-agent".to_string(),
@@ -112,252 +96,144 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
         RecipeTemplate {
             id: "build-and-test".to_string(),
             name: "Build & Test".to_string(),
-            description: "Run a build then test, waiting for output".to_string(),
+            description: "Build, then test, in a shell pane; stops at the first failure".to_string(),
             category: "development".to_string(),
-            variables: vec![TemplateVariable {
-                name: "pane_id".to_string(),
-                description: "Target pane".to_string(),
-                default_value: None,
-                required: true,
-            }],
-            steps: vec![
-                RecipeStep {
-                    id: "build".to_string(),
-                    tool: "run_command".to_string(),
-                    params: serde_json::json!({
-                        "pane_id": "{{ template.pane_id }}",
-                        "command": "make build"
-                    }),
-                    description: Some("Run build".to_string()),
-                },
-                RecipeStep {
-                    id: "wait_build".to_string(),
-                    tool: "wait_output".to_string(),
-                    params: serde_json::json!({
-                        "pane_id": "{{ template.pane_id }}",
-                        "match_text": "build complete",
-                        "timeout_ms": 300000
-                    }),
-                    description: Some("Wait for build".to_string()),
-                },
-                RecipeStep {
-                    id: "test".to_string(),
-                    tool: "run_command".to_string(),
-                    params: serde_json::json!({
-                        "pane_id": "{{ template.pane_id }}",
-                        "command": "make test"
-                    }),
-                    description: Some("Run tests".to_string()),
-                },
-            ],
-        },
-        RecipeTemplate {
-            id: "health-check".to_string(),
-            name: "Health Check".to_string(),
-            description: "Check server status, workspaces, panes".to_string(),
-            category: "monitoring".to_string(),
-            variables: vec![],
-            steps: vec![
-                RecipeStep {
-                    id: "status".to_string(),
-                    tool: "status".to_string(),
-                    params: serde_json::json!({}),
-                    description: Some("Server status".to_string()),
-                },
-                RecipeStep {
-                    id: "workspaces".to_string(),
-                    tool: "list_workspaces".to_string(),
-                    params: serde_json::json!({}),
-                    description: Some("List workspaces".to_string()),
-                },
-                RecipeStep {
-                    id: "panes".to_string(),
-                    tool: "list_panes".to_string(),
-                    params: serde_json::json!({}),
-                    description: Some("List panes".to_string()),
-                },
-                RecipeStep {
-                    id: "agents".to_string(),
-                    tool: "list_agents".to_string(),
-                    params: serde_json::json!({}),
-                    description: Some("List agents".to_string()),
-                },
-            ],
-        },
-        RecipeTemplate {
-            id: "a2a-pane-inventory".to_string(),
-            name: "A2A Pane Inventory".to_string(),
-            description: "List panes + registry agents and store labels/ids as session variables (panes.snapshot, agents.snapshot)".to_string(),
-            category: "a2a".to_string(),
             variables: vec![
-                TemplateVariable {
-                    name: "workspace_id".to_string(),
-                    description: "Workspace filter for agent_list (empty = all)".to_string(),
-                    default_value: Some(serde_json::json!("")),
-                    required: false,
-                },
-                TemplateVariable {
-                    name: "session_id".to_string(),
-                    description: "Session scope for stored snapshot variables".to_string(),
-                    default_value: Some(serde_json::json!("w1")),
-                    required: true,
-                },
+                var("pane_id", "Shell pane in the project", None),
+                var("build", "Build command", Some("make build")),
+                var("test", "Test command", Some("make test")),
             ],
             steps: vec![
-                RecipeStep {
-                    id: "panes".to_string(),
-                    tool: "list_panes".to_string(),
-                    params: serde_json::json!({}),
-                    description: Some("List panes (ids + labels)".to_string()),
-                },
-                RecipeStep {
-                    id: "agents".to_string(),
-                    tool: "agent_list".to_string(),
-                    params: serde_json::json!({
-                        "workspace_id": "{{ template.workspace_id }}"
+                step(
+                    "build",
+                    "pane_exec",
+                    serde_json::json!({
+                        "pane_id": "{{ template.pane_id }}",
+                        "command": "{{ template.build }}",
+                        "timeout_ms": 600000,
+                        "check": true
                     }),
-                    description: Some("List registry agents".to_string()),
-                },
-                RecipeStep {
-                    id: "store_panes".to_string(),
-                    tool: "var_set".to_string(),
-                    params: serde_json::json!({
-                        "session_id": "{{ template.session_id }}",
-                        "key": "panes.snapshot",
-                        "value": "{{ panes.result }}"
+                    "Build (fails the run on a non-zero exit)",
+                ),
+                step(
+                    "test",
+                    "pane_exec",
+                    serde_json::json!({
+                        "pane_id": "{{ template.pane_id }}",
+                        "command": "{{ template.test }}",
+                        "timeout_ms": 600000,
+                        "check": true
                     }),
-                    description: Some("Store pane labels/ids".to_string()),
-                },
-                RecipeStep {
-                    id: "store_agents".to_string(),
-                    tool: "var_set".to_string(),
-                    params: serde_json::json!({
-                        "session_id": "{{ template.session_id }}",
-                        "key": "agents.snapshot",
-                        "value": "{{ agents.result }}"
-                    }),
-                    description: Some("Store agent labels/ids".to_string()),
-                },
+                    "Test (fails the run on a non-zero exit)",
+                ),
             ],
         },
         RecipeTemplate {
-            id: "a2a-ping".to_string(),
-            name: "A2A Ping".to_string(),
-            description: "Send a message to one agent and read its output back".to_string(),
-            category: "a2a".to_string(),
+            id: "pane-to-agent".to_string(),
+            name: "Ask Agent About a Pane".to_string(),
+            description: "Send the recent output of any pane (server log, test run, REPL) to an agent pane with a question. The target must be an agent: multi-line text typed into a bare shell runs each line.".to_string(),
+            category: "panes".to_string(),
             variables: vec![
-                TemplateVariable {
-                    name: "target".to_string(),
-                    description: "Target agent role or pane id".to_string(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateVariable {
-                    name: "message".to_string(),
-                    description: "Text to send".to_string(),
-                    default_value: Some(serde_json::json!("ping from recipe")),
-                    required: false,
-                },
+                var("source_pane", "Pane to read from", None),
+                var("agent_pane", "Agent pane to ask", None),
+                var("question", "What to ask about it", Some("What is going on here?")),
             ],
             steps: vec![
-                RecipeStep {
-                    id: "send".to_string(),
-                    tool: "agent_message".to_string(),
-                    params: serde_json::json!({
-                        "target": "{{ template.target }}",
-                        "text": "{{ template.message }}"
+                step(
+                    "read",
+                    "read_pane",
+                    serde_json::json!({
+                        "pane_id": "{{ template.source_pane }}",
+                        "source": "recent-unwrapped",
+                        "lines": 80
                     }),
-                    description: Some("Message the agent".to_string()),
-                },
-                RecipeStep {
-                    id: "read".to_string(),
-                    tool: "agent_read".to_string(),
-                    params: serde_json::json!({
-                        "target": "{{ template.target }}"
+                    "Read the source pane's last 80 lines",
+                ),
+                step(
+                    "ask",
+                    "send_text",
+                    serde_json::json!({
+                        "pane_id": "{{ template.agent_pane }}",
+                        "text": "Output from pane {{ template.source_pane }}:\n{{read}}\n\n{{ template.question }}"
                     }),
-                    description: Some("Read its output".to_string()),
-                },
+                    "Paste it with the question into the agent",
+                ),
+                step(
+                    "submit",
+                    "send_keys",
+                    serde_json::json!({
+                        "pane_id": "{{ template.agent_pane }}",
+                        "keys": ["Enter"]
+                    }),
+                    "Submit",
+                ),
             ],
         },
         RecipeTemplate {
-            id: "a2a-fanout-collect".to_string(),
-            name: "A2A Fanout Collect".to_string(),
-            description: "Message two agents, read both outputs, store the pair as a session variable".to_string(),
-            category: "a2a".to_string(),
+            id: "run-and-ask".to_string(),
+            name: "Run & Ask Agent".to_string(),
+            description: "Run a command in a shell pane and hand its output to an agent pane with a question. The target must be an agent: multi-line text typed into a bare shell runs each line.".to_string(),
+            category: "panes".to_string(),
             variables: vec![
-                TemplateVariable {
-                    name: "session_id".to_string(),
-                    description: "Session scope for the collected variable".to_string(),
-                    default_value: Some(serde_json::json!("w1")),
-                    required: true,
-                },
-                TemplateVariable {
-                    name: "target_a".to_string(),
-                    description: "First agent role or pane id".to_string(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateVariable {
-                    name: "target_b".to_string(),
-                    description: "Second agent role or pane id".to_string(),
-                    default_value: None,
-                    required: true,
-                },
-                TemplateVariable {
-                    name: "message".to_string(),
-                    description: "Text to send to both".to_string(),
-                    default_value: Some(serde_json::json!("task from recipe")),
-                    required: false,
-                },
+                var("shell_pane", "Shell pane to run the command in", None),
+                var("agent_pane", "Agent pane to ask", None),
+                var("command", "Command to run", Some("cargo test")),
+                var(
+                    "question",
+                    "What to ask about the output",
+                    Some("Explain any failures above and propose a fix."),
+                ),
             ],
             steps: vec![
-                RecipeStep {
-                    id: "send_a".to_string(),
-                    tool: "agent_message".to_string(),
-                    params: serde_json::json!({
-                        "target": "{{ template.target_a }}",
-                        "text": "{{ template.message }}"
+                step(
+                    "run",
+                    "pane_exec",
+                    serde_json::json!({
+                        "pane_id": "{{ template.shell_pane }}",
+                        "command": "{{ template.command }}",
+                        "timeout_ms": 600000
                     }),
-                    description: Some("Message agent A".to_string()),
-                },
-                RecipeStep {
-                    id: "send_b".to_string(),
-                    tool: "agent_message".to_string(),
-                    params: serde_json::json!({
-                        "target": "{{ template.target_b }}",
-                        "text": "{{ template.message }}"
+                    "Run the command and capture its output and exit code",
+                ),
+                step(
+                    "ask",
+                    "send_text",
+                    serde_json::json!({
+                        "pane_id": "{{ template.agent_pane }}",
+                        "text": "$ {{ template.command }}  (exit {{run.exit_code}})\n{{run.output}}\n\n{{ template.question }}"
                     }),
-                    description: Some("Message agent B".to_string()),
-                },
-                RecipeStep {
-                    id: "read_a".to_string(),
-                    tool: "agent_read".to_string(),
-                    params: serde_json::json!({
-                        "target": "{{ template.target_a }}"
+                    "Paste output + question into the agent",
+                ),
+                step(
+                    "submit",
+                    "send_keys",
+                    serde_json::json!({
+                        "pane_id": "{{ template.agent_pane }}",
+                        "keys": ["Enter"]
                     }),
-                    description: Some("Read agent A output".to_string()),
-                },
-                RecipeStep {
-                    id: "read_b".to_string(),
-                    tool: "agent_read".to_string(),
-                    params: serde_json::json!({
-                        "target": "{{ template.target_b }}"
-                    }),
-                    description: Some("Read agent B output".to_string()),
-                },
-                RecipeStep {
-                    id: "collect".to_string(),
-                    tool: "var_set".to_string(),
-                    params: serde_json::json!({
-                        "session_id": "{{ template.session_id }}",
-                        "key": "a2a.collected",
-                        "value": "{{ read_a.result }}"
-                    }),
-                    description: Some("Store collected output".to_string()),
-                },
+                    "Submit",
+                ),
             ],
         },
     ]
+}
+
+fn var(name: &str, description: &str, default: Option<&str>) -> TemplateVariable {
+    TemplateVariable {
+        name: name.to_string(),
+        description: description.to_string(),
+        default_value: default.map(|d| serde_json::json!(d)),
+        required: default.is_none(),
+    }
+}
+
+fn step(id: &str, tool: &str, params: serde_json::Value, description: &str) -> RecipeStep {
+    RecipeStep {
+        id: id.to_string(),
+        tool: tool.to_string(),
+        params,
+        description: Some(description.to_string()),
+    }
 }
 
 pub fn list_templates() -> Vec<RecipeTemplate> {
@@ -461,6 +337,8 @@ mod tests {
         assert!(find_template("a2a-pane-inventory").is_some());
         assert!(find_template("a2a-ping").is_some());
         assert!(find_template("a2a-fanout-collect").is_some());
+        assert!(find_template("pane-to-agent").is_some());
+        assert!(find_template("run-and-ask").is_some());
     }
 
     #[test]
@@ -509,11 +387,7 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("pane_id".to_string(), serde_json::json!("p1"));
         let recipe = instantiate("git-status", vars, None).expect("should instantiate");
-        let run = recipe
-            .steps
-            .iter()
-            .find(|s| s.tool == "run_command")
-            .unwrap();
+        let run = recipe.steps.iter().find(|s| s.tool == "pane_exec").unwrap();
         assert!(run.params.to_string().contains("git status"));
         assert!(run.params.to_string().contains("p1"));
     }
@@ -523,8 +397,11 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("pane_id".to_string(), serde_json::json!("p9"));
         let recipe = instantiate("build-and-test", vars, None).expect("should instantiate");
-        assert_eq!(recipe.steps.len(), 3);
-        assert!(recipe.steps.iter().any(|s| s.tool == "wait_output"));
+        assert_eq!(recipe.steps.len(), 2);
+        assert!(recipe.steps.iter().all(|s| s.tool == "pane_exec"
+            && s.params["check"] == true
+            && s.params["pane_id"] == "p9"));
+        assert_eq!(recipe.steps[0].params["command"], "make build", "default");
     }
 
     #[test]
