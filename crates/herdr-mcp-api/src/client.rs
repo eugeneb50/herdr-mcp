@@ -9,10 +9,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    AgentHandle, AgentsResponse, AutoVariablesResponse, CreateRecipeRequest, DiagnoseReport,
-    ExecutionResult, ExportScriptResponse, PlaygroundSnapshot, ProxyPolicy, Recipe, RecipeRequest,
-    RecipeResponse, RecipeTemplate, SaveVariableRequest, ToolsResponse, TrimPolicy,
-    TrimStatusResponse, UpdateRecipeRequest, VariableStore,
+    AgentHandle, AgentsResponse, AutoVariablesResponse, ClipboardConfig, ConfigResponse,
+    CreateRecipeRequest, DiagnoseReport, ExecutionResult, ExportScriptResponse, PlaygroundSnapshot,
+    ProxyPolicy, Recipe, RecipeRequest, RecipeResponse, RecipeTemplate, SaveVariableRequest,
+    ToolsResponse, TrimPolicy, TrimStatusResponse, UpdateRecipeRequest, VariableStore,
 };
 
 /// Errors from [`ApiClient`].
@@ -160,9 +160,22 @@ impl ApiClient {
             .map(|_| ())
     }
 
-    /// `GET /api/config` — runtime config summary (free-form JSON).
-    pub async fn config(&self) -> Result<Value, ApiError> {
+    /// `GET /api/config` — the bridge's runtime config.
+    pub async fn config(&self) -> Result<ConfigResponse, ApiError> {
         self.get(&["api", "config"]).await
+    }
+
+    /// `PUT /api/config/clipboard` — save clipboard commands to the config
+    /// file and apply them to the running server. Both must be non-empty.
+    pub async fn set_clipboard_config(
+        &self,
+        cfg: &ClipboardConfig,
+    ) -> Result<ConfigResponse, ApiError> {
+        Self::json(
+            self.request(Method::PUT, &["api", "config", "clipboard"])
+                .json(cfg),
+        )
+        .await
     }
 
     /// `GET /api/tools` — every MCP tool definition with its JSON schema.
