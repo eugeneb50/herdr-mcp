@@ -148,10 +148,7 @@ pub fn ResponseViewer(data: Value) -> Element {
         .and_then(|c| c.as_array())
         .cloned()
         .unwrap_or_default();
-    let is_error = data
-        .get("is_error")
-        .and_then(|e| e.as_bool())
-        .unwrap_or(false);
+    let is_error = herdr_mcp_api::tool_is_error(&data);
 
     rsx! {
         div { class: "response",

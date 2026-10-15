@@ -4832,6 +4832,15 @@ mod tests {
     /// Contract test: the shared `herdr_mcp_api::ApiClient` (used by the web
     /// UI and TUI) round-trips against the real router, so a drift between
     /// server handlers and client types fails here, not in the browser.
+    #[test]
+    fn tool_is_error_matches_rmcp_wire_format() {
+        let err = serde_json::to_value(CallToolResult::error(vec![Content::text("boom")])).unwrap();
+        assert!(herdr_mcp_api::tool_is_error(&err));
+        assert_eq!(herdr_mcp_api::tool_text(&err), "boom");
+        let ok = serde_json::to_value(CallToolResult::success(vec![Content::text("x")])).unwrap();
+        assert!(!herdr_mcp_api::tool_is_error(&ok));
+    }
+
     #[tokio::test]
     async fn http_contract_roundtrip_with_api_client() {
         use herdr_mcp_api::{ApiClient, ApiError, CreateRecipeRequest, PlaygroundSnapshot};
