@@ -517,6 +517,13 @@ pub fn tool_text(v: &Value) -> String {
     v.as_str().map(str::to_string).unwrap_or_default()
 }
 
+/// The JSON a tool returned as text (its first text content parsed), if any.
+pub fn tool_payload(v: &Value) -> Option<Value> {
+    v.pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .and_then(|t| serde_json::from_str(t).ok())
+}
+
 /// True when an MCP `CallToolResult` JSON reports a tool-level failure
 /// (`"isError": true`; rmcp serializes the field camelCase).
 pub fn tool_is_error(v: &Value) -> bool {

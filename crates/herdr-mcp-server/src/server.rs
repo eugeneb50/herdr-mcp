@@ -196,6 +196,26 @@ pub struct RunCommandParams {
     pub command: String,
 }
 
+/// Parameters for running a command in a pane and capturing its result.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+#[serde(deny_unknown_fields)]
+pub struct PaneExecParams {
+    /// Pane ID to run the command in (alternative to label). The pane must
+    /// be at a POSIX shell prompt (sh, bash, zsh).
+    pub pane_id: Option<String>,
+    /// Pane label (alternative to pane_id).
+    pub label: Option<String>,
+    /// Command line to run.
+    pub command: String,
+    /// How long to wait for it to finish (default 120000).
+    pub timeout_ms: Option<u32>,
+    /// Scrollback lines searched for the output (default 500).
+    pub lines: Option<u32>,
+    /// Fail (stopping a recipe) when the command exits non-zero.
+    pub check: Option<bool>,
+}
+
 /// Parameters for sending text to an agent.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
@@ -1226,6 +1246,68 @@ impl HerdrMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
         run_herdr_json(&["pane", "run", &pid, &command]).await
+    }
+
+    #[tool(
+        description = "Run a command in a pane's shell, wait for it to finish, and return {pane_id, command, exit_code, output}. The output is what the command printed (from scrollback). The pane must be at a POSIX shell prompt. With `check: true` a non-zero exit is an error, which stops a recipe. In recipes use {{step.output}} / {{step.exit_code}}."
+    )]
+    async fn pane_exec(
+        &self,
+        Parameters(PaneExecParams {
+            pane_id,
+            label,
+            command,
+            timeout_ms,
+            lines,
+            check,
+        }): Parameters<PaneExecParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pid = resolve_pane_id(pane_id, label).await?;
+        let token = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        herdr_cli(&["pane", "run", &pid, &exec_line(&command, &token)]).await?;
+        let wait = wait_output_args(
+            &pid,
+            &exec_done_regex(&token),
+            true,
+            Some("recent-unwrapped"),
+            Some(timeout_ms.unwrap_or(120_000)),
+        );
+        herdr_cli(&as_strs(&wait)).await?;
+        let lines = lines.unwrap_or(500).to_string();
+        let screen = herdr_cli(&[
+            "pane",
+            "read",
+            &pid,
+            "--source",
+            "recent-unwrapped",
+            "--lines",
+            &lines,
+        ])
+        .await?;
+        let (output, exit_code) = exec_result(&screen, &token).ok_or_else(|| McpError {
+            code: rmcp::model::ErrorCode(-32000),
+            message: format!(
+                "pane_exec: finished, but its end marker was not in the last {lines} lines"
+            )
+            .into(),
+            data: None,
+        })?;
+        if check == Some(true) && exit_code != 0 {
+            return Err(McpError {
+                code: rmcp::model::ErrorCode(-32000),
+                message: format!("`{command}` exited {exit_code}:\n{}", tail(&output, 20)).into(),
+                data: None,
+            });
+        }
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({
+                "pane_id": pid,
+                "command": command,
+                "exit_code": exit_code,
+                "output": output,
+            }))
+            .map_err(to_mcp_err)?,
+        ]))
     }
 
     #[tool(description = "Send text directly to an agent's stream")]
@@ -2638,6 +2720,39 @@ fn wait_output_args(
     args
 }
 
+/// Marker `pane_exec` prints after the command; the echoed command line
+/// spells it differently (`%s` placeholders), so only the real output
+/// matches [`exec_done_regex`].
+fn exec_line(command: &str, token: &str) -> String {
+    format!("{command}; printf '\\n%s_%s:%s\\n' HERDR_DONE {token} $?")
+}
+
+fn exec_done_regex(token: &str) -> String {
+    format!("HERDR_DONE_{token}:[0-9]+")
+}
+
+/// The output and exit code of a `pane_exec` run in `screen`: the lines
+/// after the echoed command line (or from the top if it scrolled away) up
+/// to the end marker.
+fn exec_result(screen: &str, token: &str) -> Option<(String, i32)> {
+    let done = format!("HERDR_DONE_{token}:");
+    let lines: Vec<&str> = screen.lines().collect();
+    let end = lines.iter().rposition(|l| l.starts_with(&done))?;
+    let code = lines[end][done.len()..].trim().parse().ok()?;
+    let echo = format!("HERDR_DONE {token}");
+    let start = lines[..end]
+        .iter()
+        .rposition(|l| l.contains(&echo))
+        .map_or(0, |i| i + 1);
+    Some((lines[start..end].join("\n").trim_end().to_string(), code))
+}
+
+/// The last `n` lines of `text`.
+fn tail(text: &str, n: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(n)..].join("\n")
+}
+
 /// Resolve an a2a target (role or pane id) to a concrete pane id.
 async fn resolve_target_pane(server: &HerdrMcpServer, target: &str) -> Result<String, McpError> {
     if !target.is_empty()
@@ -3370,6 +3485,13 @@ pub(crate) async fn dispatch_tool(
                 .await
                 .map_err(mcp_err_to_http)
         }
+        "pane_exec" => {
+            let p: PaneExecParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .pane_exec(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
+        }
         "send_agent" => {
             let p: SendAgentParams = serde_json::from_value(body).map_err(bad_request)?;
             server
@@ -3753,30 +3875,54 @@ pub(crate) fn resolve_variables(
     }
 }
 
-/// Navigate a dotted path like `step1.result.content[0].text` into a nested JSON tree.
+/// Resolve a `{{ }}` path against the run scope:
+///
+/// - a scope key as-is (`template.session_id`, `result.pane_id`);
+/// - `step` alone: the text the step's tool returned;
+/// - `step.text`: the same, explicitly;
+/// - `step.a.b[0].c`: navigated in the step's result, falling back to the
+///   JSON the tool returned as text (`{{exec.output}}`, `{{spawn.pane_id}}`).
 fn resolve_json_path(
     root: &HashMap<String, serde_json::Value>,
     path: &str,
 ) -> Option<serde_json::Value> {
+    if let Some(v) = root.get(path) {
+        return Some(step_text(v));
+    }
     let (step_id, rest) = path.split_once('.')?;
-    let mut current = root.get(step_id)?.clone();
+    let step = root.get(step_id)?;
+    navigate(step, rest)
+        .or_else(|| navigate(&herdr_mcp_api::tool_payload(step)?, rest))
+        .or_else(|| (rest == "text").then(|| step_text(step)))
+}
 
-    if rest.is_empty() {
-        return Some(current);
+/// A tool result as its text content; any other value as-is.
+fn step_text(v: &serde_json::Value) -> serde_json::Value {
+    if v.get("content").is_some() {
+        serde_json::Value::String(herdr_mcp_api::tool_text(v))
+    } else {
+        v.clone()
     }
+}
 
-    for segment in rest.split('.') {
-        if let Some(idx) = segment.find('[') {
-            let key = &segment[..idx];
-            let idx_str = &segment[idx + 1..segment.len() - 1];
-            let index: usize = idx_str.parse().ok()?;
-            current = current.get(key)?.get(index)?.clone();
-        } else {
-            current = current.get(segment)?.clone();
-        }
+/// Follow `a.b[0].c` into `value`.
+fn navigate(value: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+    let mut current = value;
+    for segment in path.split('.') {
+        current = match segment.split_once('[') {
+            Some((key, idx)) => {
+                let index: usize = idx.strip_suffix(']')?.parse().ok()?;
+                let base = if key.is_empty() {
+                    current
+                } else {
+                    current.get(key)?
+                };
+                base.get(index)?
+            }
+            None => current.get(segment)?,
+        };
     }
-
-    Some(current)
+    Some(current.clone())
 }
 
 /// Convert a JSON value to a string representation suitable for template substitution.
@@ -4693,10 +4839,43 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_json_path_single_segment_returns_none() {
-        // resolve_json_path requires a dotted path (step.field); a bare key returns None.
+    fn test_resolve_json_path_bare_key_is_the_value() {
         let root = sample_results();
-        assert_eq!(resolve_json_path(&root, "step2"), None);
+        assert_eq!(
+            resolve_json_path(&root, "step2"),
+            Some(serde_json::json!({ "output": "world", "n": 42 }))
+        );
+        assert_eq!(resolve_json_path(&root, "nope"), None);
+    }
+
+    /// Tool results read naturally: `{{step}}` / `{{step.text}}` is the
+    /// text the tool returned, and fields of JSON returned as text resolve
+    /// directly (`{{exec.output}}`). Dotted scope keys resolve as-is.
+    #[test]
+    fn test_resolve_tool_results_by_text_and_payload() {
+        let mut root = HashMap::new();
+        root.insert(
+            "read".to_string(),
+            serde_json::json!({ "content": [{ "type": "text", "text": "line 1\nline 2" }] }),
+        );
+        root.insert(
+            "exec".to_string(),
+            serde_json::json!({ "content": [{ "type": "text",
+                "text": r#"{"exit_code":0,"output":"ok","pane_id":"w1:p2"}"# }] }),
+        );
+        root.insert("template.pane".to_string(), serde_json::json!("w1:p3"));
+        let get = |p: &str| resolve_json_path(&root, p);
+        assert_eq!(get("read"), Some(serde_json::json!("line 1\nline 2")));
+        assert_eq!(get("read.text"), get("read"));
+        assert_eq!(get("exec.output"), Some(serde_json::json!("ok")));
+        assert_eq!(get("exec.exit_code"), Some(serde_json::json!(0)));
+        assert_eq!(
+            get("exec.content[0].type"),
+            Some(serde_json::json!("text")),
+            "raw result paths still work"
+        );
+        assert_eq!(get("template.pane"), Some(serde_json::json!("w1:p3")));
+        assert_eq!(get("exec.nope"), None);
     }
 
     #[test]
@@ -5159,6 +5338,67 @@ mod tests {
     }
 
     /// Command lines match herdr 0.9's CLI (checked against `herdr … --help`).
+    /// Bundled templates only call tools the server has, with params those
+    /// tools declare (catches renamed tools and stray or missing fields).
+    /// Checked against the schemas: nothing is executed.
+    #[test]
+    fn bundled_templates_use_real_tools() {
+        let tools: HashMap<String, serde_json::Value> = HerdrMcpServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| {
+                let schema = serde_json::Value::Object((*t.input_schema).clone());
+                (t.name.to_string(), schema)
+            })
+            .collect();
+        for t in tmpl::list_templates() {
+            for step in &t.steps {
+                let at = format!("template {} step {}", t.id, step.id);
+                let schema = tools
+                    .get(&step.tool)
+                    .unwrap_or_else(|| panic!("{at}: no tool {}", step.tool));
+                let props = schema["properties"]
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
+                let params = step.params.as_object().cloned().unwrap_or_default();
+                for key in params.keys() {
+                    assert!(props.contains_key(key), "{at}: unknown param {key}");
+                }
+                for req in schema["required"].as_array().into_iter().flatten() {
+                    let req = req.as_str().unwrap_or_default();
+                    assert!(params.contains_key(req), "{at}: missing param {req}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pane_exec_captures_output_and_exit_code() {
+        let line = exec_line("cargo test", "abc123");
+        assert_eq!(
+            line,
+            r"cargo test; printf '\n%s_%s:%s\n' HERDR_DONE abc123 $?"
+        );
+        let done = Regex::new(&exec_done_regex("abc123")).unwrap();
+        // The echoed command line must not satisfy the wait.
+        assert!(!done.is_match(&format!("$ {line}")));
+
+        let screen = format!(
+            "$ old stuff\n$ {line}\nrunning 3 tests\ntest result: ok\n\nHERDR_DONE_abc123:101\n$ "
+        );
+        assert_eq!(
+            exec_result(&screen, "abc123"),
+            Some(("running 3 tests\ntest result: ok".into(), 101))
+        );
+        // No trailing newline from the command; echo scrolled out of view.
+        let screen = "partial\nHERDR_DONE_abc123:0\n";
+        assert_eq!(exec_result(screen, "abc123"), Some(("partial".into(), 0)));
+        // Another run's marker doesn't count.
+        assert_eq!(exec_result("HERDR_DONE_zzz:0\n", "abc123"), None);
+        assert_eq!(tail("a\nb\nc", 2), "b\nc");
+    }
+
     #[test]
     fn herdr_09_argv() {
         assert_eq!(
