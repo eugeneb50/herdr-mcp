@@ -1,0 +1,4 @@
+id = "opencode"
+name = "OpenCode"
+kind = "opencode"
+notes = "Driven natively by herdr (agent start --kind opencode)."
