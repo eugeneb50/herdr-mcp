@@ -95,13 +95,13 @@ herdr-mcp serve
 herdr-mcp serve --http 7676 --http-only
 
 # Kitchen-sink TUI dashboard (VS Code-style tabs, mouse+keyboard)
-herdr-mcp dashboard
+herdr-trim dashboard
 
 # Legacy trim-only dashboard
-herdr-mcp dashboard --legacy
+herdr-trim dashboard --legacy
 
 # Message trim CLI
-herdr-mcp trim "text to compress"
+herdr-trim trim "text to compress"
 ```
 
 ## Project Snapshot
@@ -122,7 +122,7 @@ organized as a Cargo workspace under `crates/`.
 
 Key subsystems:
 
-- **MCP tool layer** — 49 tool definitions across discovery, lifecycle,
+- **MCP tool layer** — 55 tool definitions across discovery, lifecycle,
   read, write, synchronize, a2a primitives, message-trim, recipe templates,
   scheduler, and folder-key categories.
 - **HTTP bridge** — Axum server mirroring the MCP tools as REST endpoints;
@@ -148,7 +148,7 @@ Every workspace crate carries a stability tier.
 | `herdr-mcp-api` | Experimental | HTTP bridge wire contract: every `/api/*` type + typed `ApiClient`. Leaf crate, must build for `wasm32-unknown-unknown`. |
 | `herdr-mcp-core` | Beta | Config system (`TOML + env + CLI`), error types. Stable schema. |
 | `herdr-mcp-trim` | Experimental | Message-trim compressors (caveman, pfc1), pipeline, policy, stats, folder keys, dashboard. |
-| `herdr-mcp-server` | Experimental | MCP server, 49 tools, HTTP bridge, recipe engine, event subscriber, scheduler. |
+| `herdr-mcp-server` | Experimental | MCP server, 55 tools, HTTP bridge, recipe engine, event subscriber, scheduler. |
 | `herdr-mcp-cli` | Experimental | Binary entrypoint (`serve`/`trim`/`dashboard`/`folder-key`) + integration tests. |
 
 **Tiers**: Beta = breaking changes permitted in MINOR with changelog notes.
@@ -214,7 +214,7 @@ When uncertain, classify as higher risk.
 - **File-based persistence** — simple, inspectable, no DB dependency. Adequate for single-server deployment.
 - **Workspace-scoped variables** — session variables use herdr workspace ID as scope; they chain across runs in the same workspace but don't leak between workspaces.
 - **`start_agent` appends `--`** — prevents herdr from consuming agent-specific flags.
-- **Default command is `serve`** — running `herdr-mcp` with no arguments starts MCP stdio + HTTP on port 8080, enabling both AI client integration and web playground access out of the box.
+- **Default command is `serve`** — running `herdr-mcp` with no arguments starts MCP stdio + HTTP on port 7676 (bound to `127.0.0.1`), enabling both AI client integration and web playground access out of the box.
 - **Kitchen-sink TUI** — the `dashboard` subcommand launches a VS Code-style tabbed terminal interface with mouse + keyboard navigation, consolidating the playground, trim dashboard, variables, and settings into a single herdr sidecar pane.
 
 ## Skills

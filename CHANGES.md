@@ -1,3 +1,23 @@
+# Dioxus Consolidation (one web UI, one wire contract)
+
+- **Web UI is Dioxus.** The React/Vite site and the legacy `src/` monolith are
+  gone; all code lives in `crates/`. Build the UI with
+  `cd crates/herdr-mcp-ui && dx bundle --platform web --release`; the bridge
+  serves it from `http.web-dir` / `HERDR_MCP_WEB_DIR` (default: the in-repo
+  bundle output) with SPA fallback. No Node toolchain.
+- **`herdr-mcp-api` crate.** Every `/api/*` request/response type plus a typed
+  `ApiClient` (native + wasm) is defined once and shared by the server, the
+  web UI and (next) the TUI. Covered by
+  `http_contract_roundtrip_with_api_client`.
+- **Binaries split.** `herdr-mcp` serves; `herdr-trim` runs `trim`,
+  `dashboard` and `folder-key`.
+- **Security.** The HTTP bridge now honors `http.bind-addr` (default
+  `127.0.0.1`; it previously always bound `0.0.0.0`), and the permissive CORS
+  layer is removed (the UI is same-origin).
+- **Web UI fixes.** API calls used relative URLs (rejected by reqwest), empty
+  `201`/`204` responses were reported as failures, and playground "last used"
+  values never saved — all fixed by the shared client.
+
 # Variable Auto-Storage & Recipe Hardening
 
 ## Variable Auto-Storage
