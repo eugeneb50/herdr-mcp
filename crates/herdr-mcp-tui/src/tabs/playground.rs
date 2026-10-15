@@ -8,8 +8,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 use herdr_mcp_api::{
-    CreateRecipeRequest, Recipe, RecipeRequest, RecipeTemplate, SaveVariableRequest,
-    UpdateRecipeRequest,
+    CreateRecipeRequest, Recipe, RecipeRequest, RecipeTemplate, UpdateRecipeRequest,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -1175,8 +1174,10 @@ async fn run_tool(app: &mut App) {
                 crate::TextArea::new(pretty.lines().map(str::to_string).collect());
             app.status_msg = format!("{name} ok");
 
-            // Auto-extract and store variables from the result
-            extract_and_store_variables(app, &name, &v).await;
+            // The bridge saved any auto-variables for this tool; show them.
+            if let Ok(vars) = http.list_variables().await {
+                app.variables_state.entries = crate::parse_variables(&vars);
+            }
         }
         Err(e) => {
             app.playground.error = Some(e.to_string());
@@ -1187,115 +1188,6 @@ async fn run_tool(app: &mut App) {
     }
     // Persist last-used values so tab navigation + restarts restore context.
     app.persist_playground().await;
-}
-
-/// Extract useful variables from a tool result and store them for later use.
-/// This enables recipes to reference pane IDs, agent info, etc. from previous steps.
-async fn extract_and_store_variables(app: &mut App, tool_name: &str, result: &Value) {
-    let Some(http) = app.http.clone() else {
-        return;
-    };
-
-    // List of tools whose results should be auto-stored as variables
-    let auto_store_tools: &[&str] = &[
-        "list_workspaces",
-        "list_tabs",
-        "list_panes",
-        "list_agents",
-        "get_pane",
-        "get_agent",
-        "status",
-        "agent_spawn",
-        "agent_read",
-    ];
-
-    if !auto_store_tools.contains(&tool_name) {
-        return;
-    }
-
-    // Extract the result content
-    let result_content = extract_result_content(result);
-
-    // Generate a variable name based on the tool and timestamp
-    let var_key = format!("_{tool_name}_result");
-
-    // Store the full result, each list item, and per-pane fields.
-    let mut vars: Vec<(String, Value)> = vec![(var_key.clone(), result_content.clone())];
-    if let Some(arr) = result_content.as_array() {
-        for (i, item) in arr.iter().enumerate() {
-            vars.push((format!("{var_key}_[{i}]"), item.clone()));
-        }
-        if tool_name == "list_panes" || tool_name == "get_pane" {
-            for (i, pane) in arr.iter().enumerate() {
-                for (field, suffix) in [
-                    ("pane_id", "id"),
-                    ("label", "label"),
-                    ("agent_status", "status"),
-                ] {
-                    if let Some(v) = pane.get(field).and_then(|v| v.as_str()) {
-                        vars.push((format!("pane_{i}_{suffix}"), Value::String(v.to_string())));
-                    }
-                }
-            }
-        }
-    }
-    for (key, value) in vars {
-        let req = SaveVariableRequest {
-            key: key.clone(),
-            value,
-            ..Default::default()
-        };
-        if let Err(e) = http.save_variable(&req).await {
-            app.log_debug(format!("Failed to store variable {key}: {e}"));
-        }
-    }
-
-    // Update the variables tab to show the new variables
-    if let Ok(v) = http.list_variables().await {
-        app.variables_state.entries = crate::parse_variables(&v);
-    }
-
-    app.log_debug(format!(
-        "Extracted and stored {} variables from {}",
-        if result_content.is_array() {
-            result_content.as_array().unwrap().len()
-        } else {
-            1
-        },
-        tool_name
-    ));
-}
-
-/// Extract the useful content from a tool result for variable storage.
-/// MCP results have content array; we extract JSON from text content.
-fn extract_result_content(result: &Value) -> Value {
-    // If result has a content array with JSON, extract it
-    if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
-        for item in content {
-            if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                // Try to parse as JSON
-                if let Ok(parsed) = serde_json::from_str::<Value>(text) {
-                    return parsed;
-                }
-                // Return as string if not JSON
-                return Value::String(text.to_string());
-            }
-            // Check for JSON content type
-            if item.get("type").and_then(|t| t.as_str()) == Some("json")
-                && let Some(json) = item.get("data")
-            {
-                return json.clone();
-            }
-        }
-    }
-
-    // If result has direct JSON data (not wrapped in content)
-    if result.get("result").is_some() {
-        return result.get("result").unwrap().clone();
-    }
-
-    // Return the whole result if nothing else worked
-    result.clone()
 }
 
 pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {

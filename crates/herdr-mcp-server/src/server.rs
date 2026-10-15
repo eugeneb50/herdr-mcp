@@ -2975,10 +2975,36 @@ async fn call_tool_handler(
     body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<CallToolResult>, (StatusCode, String)> {
     let body = body.map(|j| j.0).unwrap_or(serde_json::json!({}));
-    dispatch_tool(&server, &name, body)
+    let result = dispatch_tool(&server, &name, body)
         .await
-        .map(Json)
-        .map_err(|e| (e.0, e.1))
+        .map_err(|e| (e.0, e.1))?;
+    store_playground_variables(&server, &name, &result).await;
+    Ok(Json(result))
+}
+
+/// Save the auto-variables of a playground tool run (see
+/// [`crate::variables::playground_auto_variables`]) to the global variable
+/// store, for the web UI and the TUI alike. Failures are logged, not returned:
+/// the tool call itself succeeded.
+async fn store_playground_variables(server: &HerdrMcpServer, tool: &str, result: &CallToolResult) {
+    let Ok(json) = serde_json::to_value(result) else {
+        return;
+    };
+    for (key, value) in crate::variables::playground_auto_variables(tool, &json) {
+        let now = chrono::Utc::now();
+        let var = crate::persistence::VariableStore {
+            id: uuid::Uuid::new_v4(),
+            session_id: None,
+            execution_id: None,
+            key,
+            value,
+            created_at: now,
+            updated_at: now,
+        };
+        if let Err(e) = server.persistence.save_variable(&var).await {
+            tracing::debug!("auto-variable {} not saved: {e}", var.key);
+        }
+    }
 }
 
 /// `GET /api/agents?workspace_id=w1` — canonical pane list from the live

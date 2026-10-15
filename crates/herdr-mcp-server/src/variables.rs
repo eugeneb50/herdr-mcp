@@ -54,9 +54,104 @@ fn extract_recursive(
     }
 }
 
+/// Tools whose playground results (`POST /api/tools/{name}`) are saved as
+/// global variables so later recipes can reference pane ids, agent info, etc.
+const PLAYGROUND_AUTO_STORE_TOOLS: &[&str] = &[
+    "list_workspaces",
+    "list_tabs",
+    "list_panes",
+    "list_agents",
+    "get_pane",
+    "get_agent",
+    "status",
+    "agent_spawn",
+    "agent_read",
+];
+
+/// Variables to save after a playground run of `tool` that returned `result`
+/// (a serialized `CallToolResult`). Empty for other tools and error results.
+///
+/// Keys: `_{tool}_result` (the payload: JSON parsed from the first text
+/// content, else that text), `_{tool}_result_[i]` per array item, and for
+/// `list_panes` / `get_pane` arrays `pane_{i}_{id,label,status}`.
+pub fn playground_auto_variables(
+    tool: &str,
+    result: &serde_json::Value,
+) -> Vec<(String, serde_json::Value)> {
+    if !PLAYGROUND_AUTO_STORE_TOOLS.contains(&tool)
+        || result.get("isError").and_then(|v| v.as_bool()) == Some(true)
+    {
+        return Vec::new();
+    }
+    let content = result_payload(result);
+    let key = format!("_{tool}_result");
+    let mut vars = vec![(key.clone(), content.clone())];
+    if let Some(arr) = content.as_array() {
+        for (i, item) in arr.iter().enumerate() {
+            vars.push((format!("{key}_[{i}]"), item.clone()));
+        }
+        if tool == "list_panes" || tool == "get_pane" {
+            for (i, pane) in arr.iter().enumerate() {
+                for (field, suffix) in [
+                    ("pane_id", "id"),
+                    ("label", "label"),
+                    ("agent_status", "status"),
+                ] {
+                    if let Some(v) = pane.get(field).and_then(|v| v.as_str()) {
+                        vars.push((format!("pane_{i}_{suffix}"), serde_json::json!(v)));
+                    }
+                }
+            }
+        }
+    }
+    vars
+}
+
+/// The useful payload of a serialized `CallToolResult`: the first text
+/// content parsed as JSON (or the raw text), else the first `json` content.
+fn result_payload(result: &serde_json::Value) -> serde_json::Value {
+    let items = result.get("content").and_then(|c| c.as_array());
+    for item in items.into_iter().flatten() {
+        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+            return serde_json::from_str(text).unwrap_or_else(|_| serde_json::json!(text));
+        }
+        if item.get("type").and_then(|t| t.as_str()) == Some("json")
+            && let Some(json) = item.get("data")
+        {
+            return json.clone();
+        }
+    }
+    result.clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playground_auto_variables_flattens_pane_lists() {
+        let panes = r#"[{"pane_id":"p1","label":"a","agent_status":"idle"},{"pane_id":"p2"}]"#;
+        let result = serde_json::json!({"content": [{"type": "text", "text": panes}]});
+        let vars: HashMap<_, _> = playground_auto_variables("list_panes", &result)
+            .into_iter()
+            .collect();
+        assert_eq!(vars["_list_panes_result"].as_array().map(Vec::len), Some(2));
+        assert_eq!(vars["_list_panes_result_[1]"]["pane_id"], "p2");
+        assert_eq!(vars["pane_0_id"], "p1");
+        assert_eq!(vars["pane_0_status"], "idle");
+        assert_eq!(vars["pane_1_id"], "p2");
+        assert!(!vars.contains_key("pane_1_label"));
+
+        let text = serde_json::json!({"content": [{"type": "text", "text": "ok"}]});
+        assert_eq!(
+            playground_auto_variables("status", &text),
+            vec![("_status_result".to_string(), serde_json::json!("ok"))]
+        );
+        // Other tools and error results store nothing.
+        assert!(playground_auto_variables("send_text", &result).is_empty());
+        let err = serde_json::json!({"isError": true, "content": [{"type": "text", "text": "x"}]});
+        assert!(playground_auto_variables("status", &err).is_empty());
+    }
     use pretty_assertions::assert_eq;
 
     #[test]
