@@ -110,22 +110,8 @@ pub struct Config {
     pub keybindings: crate::keybindings::Keybindings,
 }
 
-/// Explicit clipboard backend commands for the `clipboard_set` / `clipboard_get`
-/// tools. When both `copy-command` and `paste-command` are set (non-empty) they
-/// override platform auto-detection (e.g. force `xsel` instead of `wl-copy` on
-/// Linux). The `HERDR_MCP_CLIPBOARD_COPY` / `HERDR_MCP_CLIPBOARD_PASTE` env vars
-/// still take precedence over this setting.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ClipboardConfig {
-    /// Command that reads clipboard contents from stdin (copy).
-    #[serde(default)]
-    pub copy_command: Option<String>,
-
-    /// Command that writes clipboard contents to stdout (paste).
-    #[serde(default)]
-    pub paste_command: Option<String>,
-}
+/// Defined in `herdr-mcp-api` (it is also the `/api/config` wire type).
+pub use herdr_mcp_api::ClipboardConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -684,11 +670,11 @@ pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str)
         String::new()
     };
 
-    // Parse into an editable document; if parsing fails (empty or malformed),
-    // start from a fresh document so Save still works on a broken file.
+    // Parse into an editable document. A file that doesn't parse is an error,
+    // never replaced: rewriting it would drop the user's other settings.
     let mut doc = content
         .parse::<toml_edit::DocumentMut>()
-        .unwrap_or_else(|_| toml_edit::DocumentMut::new());
+        .with_context(|| format!("{} is not valid TOML; fix it first", path.display()))?;
 
     // Ensure the `[clipboard]` table exists.
     if !doc.contains_table("clipboard") {
@@ -1091,6 +1077,16 @@ mod tests {
         assert_eq!(cfg.clipboard.copy_command.as_deref(), Some("wl-copy"));
         assert_eq!(cfg.clipboard.paste_command.as_deref(), Some("wl-paste"));
         assert!(!content.contains("\"old\""), "old values gone: {content}");
+    }
+
+    #[test]
+    fn test_upsert_clipboard_refuses_malformed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("herdr-mcp.toml");
+        let broken = "data-dir = \"/keep\"\n[http\nport = 1\n";
+        std::fs::write(&path, broken).unwrap();
+        assert!(upsert_clipboard_in_file(&path, "xsel -i", "xsel").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
     }
 
     #[test]

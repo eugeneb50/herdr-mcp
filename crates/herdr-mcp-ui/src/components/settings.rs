@@ -1,24 +1,52 @@
-//! Settings page: runtime config rows, env overrides, clipboard round-trip
-//! test. Port of `Settings` (+ TUI clipboard panel behavior via bridge tools).
+//! Settings page: runtime config rows, clipboard backend commands (saved to
+//! the config file and applied live) and a clipboard round-trip test. Same
+//! bridge calls as the TUI Settings tab.
 
 use dioxus::prelude::*;
-use serde_json::Value;
+use herdr_mcp_api::ClipboardConfig;
 
 use crate::client::use_api;
-
-fn str_field(v: &Value, key: &str) -> Option<String> {
-    v.get(key).and_then(|x| x.as_str()).map(|s| s.to_string())
-}
 
 #[component]
 pub fn Settings() -> Element {
     let client = use_api();
-    let config = use_resource(move || {
+    let mut config = use_resource(move || {
         let client = client();
         async move { client.config().await }
     });
+    // Unsaved edits; `None` shows the server's current command.
+    let mut copy_edit: Signal<Option<String>> = use_signal(|| None);
+    let mut paste_edit: Signal<Option<String>> = use_signal(|| None);
+    let mut save_result: Signal<Option<String>> = use_signal(|| None);
     let mut clip_text: Signal<String> = use_signal(String::new);
     let mut clip_result: Signal<Option<String>> = use_signal(|| None);
+
+    let current = move || -> ClipboardConfig {
+        match &*config.read() {
+            Some(Ok(c)) => c.clipboard.clone(),
+            _ => ClipboardConfig::default(),
+        }
+    };
+
+    let save_clipboard = move |_: ()| {
+        let live = current();
+        let cfg = ClipboardConfig {
+            copy_command: copy_edit.read().clone().or(live.copy_command),
+            paste_command: paste_edit.read().clone().or(live.paste_command),
+        };
+        let client = client();
+        spawn(async move {
+            match client.set_clipboard_config(&cfg).await {
+                Ok(c) => {
+                    save_result.set(Some(format!("saved to {} (active now)", c.config_path)));
+                    copy_edit.set(None);
+                    paste_edit.set(None);
+                    config.restart();
+                }
+                Err(e) => save_result.set(Some(format!("save failed: {e}"))),
+            }
+        });
+    };
 
     let test_clipboard = move |_: ()| {
         let text = clip_text.read().clone();
@@ -46,27 +74,44 @@ pub fn Settings() -> Element {
             match &*config.read_unchecked() {
                 None => rsx! { p { class: "muted", "Loading…" } },
                 Some(Err(e)) => rsx! { p { class: "muted", "Server unavailable: {e}" } },
-                Some(Ok(v)) => rsx! {
+                Some(Ok(c)) => rsx! {
                     div { class: "rows",
-                        SettingRow { label: "HTTP Port", value: str_field(v, "http_port").unwrap_or("...".into()) }
-                        SettingRow { label: "Data Directory", value: str_field(v, "data_dir").unwrap_or("...".into()) }
-                        SettingRow { label: "herdr Socket", value: str_field(v, "herdr_socket").unwrap_or("(not set)".into()) }
-                        SettingRow { label: "herdr Binary", value: str_field(v, "herdr_bin").unwrap_or("...".into()) }
-                    }
-                    h2 { class: "card-title", "Environment Overrides" }
-                    div { class: "rows",
-                        EnvRow { name: "HERDR_SOCKET_PATH", value: str_field(v, "herdr_socket") }
-                        EnvRow { name: "HERDR_MCP_DATA_DIR", value: str_field(v, "data_dir") }
-                        EnvRow { name: "HERDR_MCP_HTTP_PORT", value: str_field(v, "http_port") }
-                        EnvRow { name: "HERDR_BIN", value: str_field(v, "herdr_bin") }
+                        SettingRow { label: "Data Directory", value: c.data_dir.clone() }
+                        SettingRow { label: "herdr Socket", value: c.herdr_socket.clone() }
+                        SettingRow { label: "herdr Binary", value: c.herdr_bin.clone() }
+                        SettingRow { label: "Config File", value: c.config_path.clone() }
                     }
                 },
             }
         }
         section { class: "card",
-            h2 { class: "card-title", "Clipboard backend test" }
+            h2 { class: "card-title", "Clipboard backend" }
             p { class: "muted",
-                "Writes through the bridge clipboard_set tool and reads back via clipboard_get."
+                "Commands used by clipboard_set / clipboard_get. Empty on the server means platform auto-detect. Save writes the [clipboard] table of the config file and applies immediately (HERDR_MCP_CLIPBOARD_* env vars still win)."
+            }
+            div { class: "form-row",
+                input {
+                    class: "input",
+                    r#type: "text",
+                    placeholder: "copy command (e.g. wl-copy)",
+                    value: copy_edit.read().clone().or(current().copy_command).unwrap_or_default(),
+                    oninput: move |e| copy_edit.set(Some(e.value())),
+                }
+                input {
+                    class: "input",
+                    r#type: "text",
+                    placeholder: "paste command (e.g. wl-paste)",
+                    value: paste_edit.read().clone().or(current().paste_command).unwrap_or_default(),
+                    oninput: move |e| paste_edit.set(Some(e.value())),
+                }
+                button { class: "btn btn-primary", onclick: move |_| save_clipboard(()), "Save" }
+            }
+            if let Some(r) = save_result.read().as_deref() {
+                p { class: "mono", "{r}" }
+            }
+            h2 { class: "card-title", "Round-trip test" }
+            p { class: "muted",
+                "Writes through clipboard_set and reads back via clipboard_get, using the active commands."
             }
             div { class: "form-row",
                 input {
@@ -91,19 +136,6 @@ fn SettingRow(label: &'static str, value: String) -> Element {
         div { class: "row",
             span { class: "row-label", "{label}" }
             span { class: "mono", "{value}" }
-        }
-    }
-}
-
-#[component]
-fn EnvRow(name: &'static str, value: Option<String>) -> Element {
-    rsx! {
-        div { class: "row",
-            span { class: "mono row-label", "{name}" }
-            match value {
-                Some(v) => rsx! { span { class: "mono accent", "[set] {v}" } },
-                None => rsx! { span { class: "mono muted", "[not set]" } },
-            }
         }
     }
 }

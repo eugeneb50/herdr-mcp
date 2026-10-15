@@ -615,8 +615,9 @@ pub struct HerdrMcpServer {
     pub registry: AgentRegistry,
     /// Data directory, used by the trim layer for persistent PFC1 memory.
     pub data_dir: std::path::PathBuf,
-    /// Resolved clipboard backend config (source of truth: `Config`).
-    pub clipboard: herdr_mcp_core::ClipboardConfig,
+    /// Live clipboard backend config: seeded from `Config`, replaced by
+    /// `PUT /api/config/clipboard` (which also writes the config file).
+    pub clipboard: std::sync::Arc<std::sync::RwLock<herdr_mcp_core::ClipboardConfig>>,
     /// Optional reference to the herdr event subscriber client (for status reporting).
     pub herdr_client: Option<std::sync::Arc<HerdrClient>>,
 }
@@ -625,6 +626,38 @@ pub struct HerdrMcpServer {
 impl HerdrMcpServer {
     pub fn new(persistence: Persistence, registry: AgentRegistry) -> Self {
         Self::with_config(persistence, registry, &herdr_mcp_core::Config::default())
+    }
+
+    /// Snapshot of the clipboard commands in effect right now.
+    pub fn clipboard_config(&self) -> herdr_mcp_core::ClipboardConfig {
+        self.clipboard
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Save clipboard commands to the config file at `path` and apply them to
+    /// the running server. The file is written first, so a failed write
+    /// leaves the live config unchanged.
+    pub async fn save_clipboard_config(
+        &self,
+        path: std::path::PathBuf,
+        copy: String,
+        paste: String,
+    ) -> anyhow::Result<()> {
+        let (c, p) = (copy.clone(), paste.clone());
+        tokio::task::spawn_blocking(move || {
+            herdr_mcp_core::upsert_clipboard_in_file(&path, &c, &p)
+        })
+        .await??;
+        *self
+            .clipboard
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = herdr_mcp_core::ClipboardConfig {
+            copy_command: Some(copy),
+            paste_command: Some(paste),
+        };
+        Ok(())
     }
 
     /// Build the server, resolving the clipboard backend from `config`.
@@ -654,7 +687,7 @@ impl HerdrMcpServer {
             scheduler,
             registry,
             data_dir,
-            clipboard: config.clipboard.clone(),
+            clipboard: std::sync::Arc::new(std::sync::RwLock::new(config.clipboard.clone())),
             herdr_client: None,
         }
     }
@@ -2124,7 +2157,7 @@ impl HerdrMcpServer {
         &self,
         Parameters(ClipboardSetParams { text }): Parameters<ClipboardSetParams>,
     ) -> Result<CallToolResult, McpError> {
-        let (copy_cmd, _paste_cmd) = detect_clipboard(&self.clipboard)?;
+        let (copy_cmd, _paste_cmd) = detect_clipboard(&self.clipboard_config())?;
         eprintln!(
             "[clipboard] set: running `{copy_cmd}` ({} chars)",
             text.len()
@@ -2154,7 +2187,7 @@ impl HerdrMcpServer {
         &self,
         Parameters(_): Parameters<ClipboardGetParams>,
     ) -> Result<CallToolResult, McpError> {
-        let (_copy_cmd, paste_cmd) = detect_clipboard(&self.clipboard)?;
+        let (_copy_cmd, paste_cmd) = detect_clipboard(&self.clipboard_config())?;
         eprintln!("[clipboard] get: running `{paste_cmd}`");
         match shell_output(paste_cmd).await {
             Ok(text) => {
@@ -2793,11 +2826,12 @@ use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use herdr_mcp_api::{
-    AgentsResponse, AutoVariablesResponse, CreateRecipeRequest, ExportScriptResponse,
-    RecipeRequest, RecipeResponse, SaveVariableRequest, ToolsResponse, UpdateRecipeRequest,
+    AgentsResponse, AutoVariablesResponse, ConfigResponse, CreateRecipeRequest,
+    ExportScriptResponse, RecipeRequest, RecipeResponse, SaveVariableRequest, ToolsResponse,
+    UpdateRecipeRequest,
 };
 use regex::Regex;
 use tower_http::services::{ServeDir, ServeFile};
@@ -2827,6 +2861,7 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path) -> Router {
     Router::new()
         .route("/api/health", get(health_handler))
         .route("/api/config", get(config_handler))
+        .route("/api/config/clipboard", put(set_clipboard_config_handler))
         .route("/api/tools", get(list_tools_handler))
         .route("/api/tools/{name}", post(call_tool_handler))
         .route("/api/agents", get(agents_handler))
@@ -2890,18 +2925,41 @@ async fn health_handler() -> &'static str {
     "ok"
 }
 
-async fn config_handler(
-    State(AppState { server, .. }): State<AppState>,
-) -> Json<serde_json::Value> {
-    // Return the runtime configuration available to the server
-    Json(serde_json::json!({
-        "data_dir": server.data_dir.display().to_string(),
-        "herdr_socket": std::env::var("HERDR_SOCKET_PATH")
+fn config_response(server: &HerdrMcpServer) -> ConfigResponse {
+    ConfigResponse {
+        data_dir: server.data_dir.display().to_string(),
+        herdr_socket: std::env::var("HERDR_SOCKET_PATH")
             .unwrap_or_else(|_| "~/.config/herdr/herdr.sock".into()),
-        "herdr_bin": std::env::var("HERDR_BIN")
-            .unwrap_or_else(|_| "herdr".into()),
-        "clipboard": server.clipboard,
-    }))
+        herdr_bin: std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".into()),
+        clipboard: server.clipboard_config(),
+        config_path: herdr_mcp_core::config_file_or_default()
+            .display()
+            .to_string(),
+    }
+}
+
+async fn config_handler(State(AppState { server, .. }): State<AppState>) -> Json<ConfigResponse> {
+    Json(config_response(&server))
+}
+
+/// `PUT /api/config/clipboard` — persist clipboard commands and apply them live.
+async fn set_clipboard_config_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Json(cfg): Json<herdr_mcp_core::ClipboardConfig>,
+) -> Result<Json<ConfigResponse>, (StatusCode, String)> {
+    let non_empty = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let (Some(copy), Some(paste)) = (non_empty(cfg.copy_command), non_empty(cfg.paste_command))
+    else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "copy-command and paste-command must both be non-empty".into(),
+        ));
+    };
+    server
+        .save_clipboard_config(herdr_mcp_core::config_file_or_default(), copy, paste)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    Ok(Json(config_response(&server)))
 }
 
 async fn list_tools_handler() -> Json<ToolsResponse> {
@@ -4525,6 +4583,36 @@ mod tests {
         HerdrMcpServer::new(Persistence::new(tmp.path().join("data2")), reg)
     }
 
+    #[tokio::test]
+    async fn save_clipboard_config_writes_file_and_applies_live() {
+        let server = clipboard_test_server();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("herdr-mcp.toml");
+        std::fs::write(&path, "# keep me\n[http]\nport = 1\n").unwrap();
+
+        server
+            .save_clipboard_config(path.clone(), "wl-copy".into(), "wl-paste".into())
+            .await
+            .unwrap();
+
+        let live = server.clipboard_config();
+        assert_eq!(live.copy_command.as_deref(), Some("wl-copy"));
+        assert_eq!(live.paste_command.as_deref(), Some("wl-paste"));
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(file.contains("# keep me") && file.contains("copy-command = \"wl-copy\""));
+
+        // A file that doesn't parse is left alone and the live config is kept.
+        std::fs::write(&path, "[http\n").unwrap();
+        assert!(
+            server
+                .save_clipboard_config(path.clone(), "a".into(), "b".into())
+                .await
+                .is_err()
+        );
+        assert_eq!(server.clipboard_config(), live);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "[http\n");
+    }
+
     // Single test touching process-global env vars so the assertions don't
     // race with each other when tests run in parallel.
     #[tokio::test]
@@ -4535,7 +4623,8 @@ mod tests {
             std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", "mycopy");
             std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", "mypaste");
         }
-        let (copy, paste) = detect_clipboard(&server.clipboard).expect("override should be used");
+        let (copy, paste) =
+            detect_clipboard(&server.clipboard_config()).expect("override should be used");
         assert_eq!(copy, "mycopy");
         assert_eq!(paste, "mypaste");
 
@@ -4544,7 +4633,7 @@ mod tests {
             std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", "forced-copy");
             std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", "forced-paste");
         }
-        let (copy, _) = detect_clipboard(&server.clipboard).unwrap();
+        let (copy, _) = detect_clipboard(&server.clipboard_config()).unwrap();
         assert_eq!(copy, "forced-copy");
 
         // --- roundtrip via a fake backend driven by the override ---
@@ -4615,7 +4704,7 @@ mod tests {
             cc_reg,
             &cfg,
         );
-        let (copy, paste) = detect_clipboard(&cfg_server.clipboard).unwrap();
+        let (copy, paste) = detect_clipboard(&cfg_server.clipboard_config()).unwrap();
         assert_eq!(copy, "cfg-copy");
         assert_eq!(paste, "cfg-paste");
     }
@@ -4860,6 +4949,18 @@ mod tests {
         let api = ApiClient::new(&format!("http://{addr}")).unwrap();
 
         api.health().await.unwrap();
+        let cfg = api.config().await.unwrap();
+        assert!(cfg.data_dir.ends_with("data"));
+        assert!(!cfg.config_path.is_empty());
+        // Validation runs before any file write, so this never touches disk.
+        let empty = herdr_mcp_api::ClipboardConfig {
+            copy_command: Some("  ".into()),
+            paste_command: Some("xsel -o".into()),
+        };
+        assert!(matches!(
+            api.set_clipboard_config(&empty).await,
+            Err(ApiError::Status { status: 400, .. })
+        ));
         assert!(!api.list_tools().await.unwrap().is_empty());
         assert!(api.list_agents(None).await.unwrap().is_empty());
         assert!(!api.list_templates().await.unwrap().is_empty());

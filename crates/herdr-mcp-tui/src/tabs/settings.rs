@@ -166,13 +166,9 @@ async fn handle_clipboard_edit(app: &mut App, code: KeyCode, mods: KeyModifiers)
     }
 }
 
+/// Round-trips a nonce through the server's clipboard tools, so it tests the
+/// commands the server is using now: unsaved edits need a Save (`s`) first.
 async fn run_clipboard_test(app: &mut App) {
-    let copy = &app.settings.clipboard.copy_cmd;
-    let paste = &app.settings.clipboard.paste_cmd;
-    if copy.is_empty() || paste.is_empty() {
-        app.settings.clipboard.test_msg = "copy/paste commands empty".into();
-        return;
-    }
     // Generate a nonce for this test run
     let nonce = format!("herdr-mcp-clip-test-{}", uuid::Uuid::new_v4().simple());
     let http = match &app.http {
@@ -196,8 +192,19 @@ async fn run_clipboard_test(app: &mut App) {
     match http.clipboard_get().await {
         Ok(got) => {
             if got == nonce {
+                let unsaved = app.config.as_ref().is_some_and(|c| {
+                    c.clipboard.copy_command.as_deref()
+                        != Some(app.settings.clipboard.copy_cmd.as_str())
+                        || c.clipboard.paste_command.as_deref()
+                            != Some(app.settings.clipboard.paste_cmd.as_str())
+                });
+                let note = if unsaved {
+                    " (active commands; press s to apply edits)"
+                } else {
+                    ""
+                };
                 app.settings.clipboard.test_msg =
-                    format!("✓ OK — round-trip {} chars", nonce.len());
+                    format!("✓ OK — round-trip {} chars{note}", nonce.len());
             } else {
                 app.settings.clipboard.test_msg =
                     format!("✗ mismatch: wrote {}, got {}", nonce, got);
@@ -210,20 +217,19 @@ async fn run_clipboard_test(app: &mut App) {
 }
 
 async fn save_clipboard_config(app: &mut App) {
-    let copy = &app.settings.clipboard.copy_cmd;
-    let paste = &app.settings.clipboard.paste_cmd;
-    let path = if app.settings.clipboard.config_path.is_empty() {
-        herdr_mcp_core::config_file_or_default()
-    } else {
-        std::path::PathBuf::from(&app.settings.clipboard.config_path)
+    let Some(http) = app.http.clone() else {
+        app.settings.clipboard.save_msg = "HTTP bridge not connected".into();
+        return;
     };
-    match herdr_mcp_core::upsert_clipboard_in_file(&path, copy, paste) {
-        Ok(_) => {
-            app.settings.clipboard.save_msg = format!(
-                "Saved -> {} ({} bytes)",
-                path.display(),
-                copy.len() + paste.len()
-            );
+    let cfg = herdr_mcp_api::ClipboardConfig {
+        copy_command: Some(app.settings.clipboard.copy_cmd.clone()),
+        paste_command: Some(app.settings.clipboard.paste_cmd.clone()),
+    };
+    match http.set_clipboard_config(&cfg).await {
+        Ok(config) => {
+            app.settings.clipboard.save_msg =
+                format!("Saved -> {} (active now)", config.config_path);
+            app.set_config(config);
         }
         Err(e) => {
             app.settings.clipboard.save_msg = format!("Save failed: {e}");
@@ -304,7 +310,12 @@ fn render_clipboard(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
     // Config file path
     lines.push(Line::from(Span::styled(
-        format!("Config file: {}", clip.config_path),
+        format!(
+            "Config file: {}",
+            app.config
+                .as_ref()
+                .map_or("(bridge not connected)", |c| c.config_path.as_str())
+        ),
         dim_style(),
     )));
 

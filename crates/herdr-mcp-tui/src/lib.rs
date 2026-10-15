@@ -60,8 +60,8 @@ fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
 }
 
 use herdr_mcp_api::{
-    AgentHandle, ApiClient, PlaygroundSnapshot, Recipe, RecipeTemplate, TrimStatusResponse,
-    VariableStore,
+    AgentHandle, ApiClient, ConfigResponse, PlaygroundSnapshot, Recipe, RecipeTemplate,
+    TrimStatusResponse, VariableStore,
 };
 use theme::{accent_style, dim_style, muted_style, title_style};
 
@@ -272,6 +272,9 @@ pub struct App {
     pub trim_status: Option<TrimStatusResponse>,
     pub recipes: Option<Vec<Recipe>>,
     pub templates: Option<Vec<RecipeTemplate>>,
+    /// Bridge runtime config (`GET /api/config`); fetched once per connection
+    /// and replaced by the response of a clipboard Save.
+    pub config: Option<ConfigResponse>,
     /// playground sub-state
     pub playground: PlaygroundState,
     /// trim sub-state
@@ -493,8 +496,6 @@ pub struct ClipboardSettingsState {
     pub edit_field: usize,
     /// The TextArea buffer for inline editing of command fields.
     pub edit_area: tui_textarea::TextArea<'static>,
-    /// Resolved config-file path (where Save writes). Empty if unresolvable.
-    pub config_path: String,
     /// Last test outcome message (empty = no test run yet).
     pub test_msg: String,
     /// Last save outcome message (empty = no save yet).
@@ -562,7 +563,7 @@ impl BackendPreset {
     /// Default (copy, paste) commands for this preset. `Custom` returns empty.
     pub fn commands(self) -> (&'static str, &'static str) {
         match self {
-            Self::Xsel => ("xsel -i", "xsel"),
+            Self::Xsel => ("xsel --clipboard --input", "xsel --clipboard --output"),
             Self::Xclip => (
                 "xclip -selection clipboard",
                 "xclip -selection clipboard -o",
@@ -575,6 +576,26 @@ impl BackendPreset {
 }
 
 impl App {
+    /// Store the bridge config and load its clipboard commands into the
+    /// Settings editor (selecting the matching preset, else Custom). When the
+    /// server has no explicit commands (auto-detect) the editor keeps its
+    /// preset defaults.
+    pub fn set_config(&mut self, config: ConfigResponse) {
+        if let (Some(copy), Some(paste)) = (
+            config.clipboard.copy_command.as_deref(),
+            config.clipboard.paste_command.as_deref(),
+        ) {
+            let clip = &mut self.settings.clipboard;
+            clip.preset_index = BackendPreset::ALL
+                .iter()
+                .position(|p| p.commands() == (copy, paste))
+                .unwrap_or(BackendPreset::ALL.len() - 1);
+            clip.copy_cmd = copy.to_string();
+            clip.paste_cmd = paste.to_string();
+        }
+        self.config = Some(config);
+    }
+
     /// Trace a debug line (see `log_debug`) tagged with this app's data dir.
     fn log_debug(&self, msg: impl AsRef<str>) {
         log_debug(&self.opts.data_dir, msg);
@@ -596,6 +617,7 @@ impl App {
             trim_status: None,
             recipes: None,
             templates: None,
+            config: None,
             playground: PlaygroundState {
                 sub_tab: PlaygroundSub::Runner,
                 tool_index: 0,
@@ -671,9 +693,6 @@ impl App {
                     editing: false,
                     edit_field: 0,
                     edit_area: tui_textarea::TextArea::default(),
-                    config_path: herdr_mcp_core::config_file_or_default()
-                        .display()
-                        .to_string(),
                     test_msg: String::new(),
                     save_msg: String::new(),
                 },
@@ -774,6 +793,11 @@ impl App {
             }
             if let Ok(v) = http.list_templates().await {
                 self.templates = Some(v);
+            }
+            if self.config.is_none()
+                && let Ok(c) = http.config().await
+            {
+                self.set_config(c);
             }
             // Restore last-used playground values once per session so tab
             // navigation and restarts keep the user's context.
@@ -2160,6 +2184,39 @@ mod tests {
             enum_variants: None,
             description: None,
         }
+    }
+
+    #[test]
+    fn set_config_loads_clipboard_commands_into_editor() {
+        let cfg = |copy: Option<&str>, paste: Option<&str>| ConfigResponse {
+            data_dir: "d".into(),
+            herdr_socket: "s".into(),
+            herdr_bin: "herdr".into(),
+            clipboard: herdr_mcp_api::ClipboardConfig {
+                copy_command: copy.map(Into::into),
+                paste_command: paste.map(Into::into),
+            },
+            config_path: "herdr-mcp.toml".into(),
+        };
+        let mut app = test_app();
+
+        app.set_config(cfg(Some("wl-copy"), Some("wl-paste")));
+        let clip = &app.settings.clipboard;
+        assert_eq!(BackendPreset::ALL[clip.preset_index], BackendPreset::WlCopy);
+        assert_eq!(
+            (clip.copy_cmd.as_str(), clip.paste_cmd.as_str()),
+            ("wl-copy", "wl-paste")
+        );
+
+        app.set_config(cfg(Some("my-copy"), Some("my-paste")));
+        let clip = &app.settings.clipboard;
+        assert_eq!(BackendPreset::ALL[clip.preset_index], BackendPreset::Custom);
+        assert_eq!(clip.copy_cmd, "my-copy");
+
+        // Auto-detect (no explicit commands) leaves the editor as it was.
+        app.set_config(cfg(None, None));
+        assert_eq!(app.settings.clipboard.copy_cmd, "my-copy");
+        assert!(app.config.is_some());
     }
 
     fn test_app() -> App {
