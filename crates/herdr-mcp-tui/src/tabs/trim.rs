@@ -447,26 +447,9 @@ fn render_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 lines.push(pane_bar(pane, *net, max));
             }
         }
-    } else if let Some(s) = &app.trim_stats_file {
-        lines.push(Line::from(format!(
-            "file stats: savings {}%  net {}  gross {}  {} msgs",
-            s.savings_pct().round() as i64,
-            fmt_bytes(s.net_saved_bytes),
-            fmt_bytes(s.gross_saved_bytes),
-            s.messages_trimmed
-        )));
-        let mut panes: Vec<_> = s.per_pane.iter().collect();
-        panes.sort_by_key(|(_, p)| std::cmp::Reverse(p.net_saved_bytes));
-        let max = panes
-            .first()
-            .map(|(_, p)| p.net_saved_bytes.max(1))
-            .unwrap_or(1);
-        for (pane, p) in panes.iter().take(12) {
-            lines.push(pane_bar(pane, p.net_saved_bytes, max));
-        }
     } else {
         lines.push(Line::from(
-            "No trim stats yet. Run `herdr-mcp trim` or send a trimmed message.",
+            "No trim stats yet. Run `herdr-trim trim` or send a trimmed message.",
         ));
     }
 
