@@ -21,9 +21,9 @@ pub use client::{ApiClient, ApiError, tool_is_error, tool_payload, tool_text};
 pub use config::{ClipboardConfig, ConfigResponse};
 pub use profile::AgentProfile;
 pub use recipe::{
-    CreateRecipeRequest, ExecutionResult, ExecutionStatus, ExportScriptResponse, Recipe,
-    RecipeRequest, RecipeResponse, RecipeStep, RecipeTemplate, TemplateVariable,
-    UpdateRecipeRequest,
+    CreateRecipeRequest, ExecutionResult, ExecutionStatus, ExportScriptResponse,
+    InstantiateTemplateRequest, Recipe, RecipeRequest, RecipeResponse, RecipeStep, RecipeTemplate,
+    TemplateVariable, UpdateRecipeRequest,
 };
 pub use run::{RunAction, RunEvent, RunEventKind, RunRecord, RunStatus, StartRunRequest};
 pub use trim::{DiagnoseReport, PaneStatus, SampleRoundtrip, TrimStatusResponse};

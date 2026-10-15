@@ -3143,6 +3143,10 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path) -> Router {
                 .delete(delete_recipe_handler),
         )
         .route("/api/templates", get(list_templates_handler))
+        .route(
+            "/api/templates/{id}/instantiate",
+            post(instantiate_template_handler),
+        )
         .route("/api/recipes/{id}/run", post(run_recipe_by_id_handler))
         .route("/api/runs", get(list_runs_handler).post(start_run_handler))
         .route("/api/runs/{id}", get(get_run_handler))
@@ -3938,6 +3942,16 @@ fn json_value_to_string(v: &serde_json::Value) -> String {
 
 async fn list_templates_handler() -> Result<Json<Vec<tmpl::RecipeTemplate>>, (StatusCode, String)> {
     Ok(Json(tmpl::list_templates()))
+}
+
+/// `POST /api/templates/{id}/instantiate` — fill in a template (not saved).
+async fn instantiate_template_handler(
+    Path(id): Path<String>,
+    Json(req): Json<herdr_mcp_api::InstantiateTemplateRequest>,
+) -> Result<Json<Recipe>, (StatusCode, String)> {
+    tmpl::instantiate(&id, req.variables, req.name)
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, format!("template not found: {id}")))
 }
 
 async fn list_recipes_handler(
@@ -5471,6 +5485,24 @@ mod tests {
         assert!(!api.list_tools().await.unwrap().is_empty());
         assert!(api.list_agents(None).await.unwrap().is_empty());
         assert!(!api.list_templates().await.unwrap().is_empty());
+        let req = herdr_mcp_api::InstantiateTemplateRequest {
+            variables: HashMap::from([("pane_id".into(), serde_json::json!("w1:p3"))]),
+            name: None,
+        };
+        let filled = api.instantiate_template("git-status", &req).await.unwrap();
+        assert!(filled.steps[0].params.to_string().contains("w1:p3"));
+        assert!(
+            api.list_recipes()
+                .await
+                .unwrap()
+                .iter()
+                .all(|r| r.id != filled.id),
+            "instantiate does not save"
+        );
+        assert!(matches!(
+            api.instantiate_template("nope", &req).await,
+            Err(ApiError::Status { status: 404, .. })
+        ));
         let status = api.trim_status(Some("w1")).await.unwrap();
         assert_eq!(status.messages_trimmed, 0);
         assert_eq!(

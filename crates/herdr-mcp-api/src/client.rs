@@ -336,6 +336,17 @@ impl ApiClient {
         self.get(&["api", "templates"]).await
     }
 
+    /// `POST /api/templates/{id}/instantiate` — the template with its
+    /// variables filled in, as a recipe (not saved).
+    pub async fn instantiate_template(
+        &self,
+        id: &str,
+        req: &InstantiateTemplateRequest,
+    ) -> Result<Recipe, ApiError> {
+        self.post(&["api", "templates", id, "instantiate"], req)
+            .await
+    }
+
     /// `GET /api/executions/{id}`.
     pub async fn get_execution(&self, id: Uuid) -> Result<ExecutionResult, ApiError> {
         self.get(&["api", "executions", &id.to_string()]).await
