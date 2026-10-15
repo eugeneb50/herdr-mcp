@@ -8,12 +8,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::overview::fmt_bytes;
-use crate::policy::TrimDirection;
-use crate::tui::App;
-use crate::tui::theme::{
-    accent_style, dim_style, focused_panel_block, panel_block, selected_style,
-};
-use crate::tui::truncate;
+use crate::App;
+use crate::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
+use crate::truncate;
+use herdr_mcp_api::TrimDirection;
 
 pub(crate) const AVAILABLE_STAGES: &[(&str, &str)] = &[
     ("caveman:lite", "Lite style compression"),
@@ -374,7 +372,7 @@ async fn apply_policy(app: &mut App) {
             return;
         }
     };
-    let policy = (!app.trim.stages.is_empty()).then(|| crate::policy::TrimPolicy {
+    let policy = (!app.trim.stages.is_empty()).then(|| herdr_mcp_api::TrimPolicy {
         stages: app.trim.stages.clone(),
         direction: app.trim.direction,
     });

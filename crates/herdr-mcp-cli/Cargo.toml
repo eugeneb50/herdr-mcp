@@ -23,6 +23,7 @@ serde_json = { workspace = true }
 herdr-mcp-core = { path = "../herdr-mcp-core" }
 herdr-mcp-server = { path = "../herdr-mcp-server" }
 herdr-mcp-trim = { path = "../herdr-mcp-trim" }
+herdr-mcp-tui = { path = "../herdr-mcp-tui" }
 herdr-mcp-proxy = { path = "../herdr-mcp-proxy" }
 
 [dev-dependencies]

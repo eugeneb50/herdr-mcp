@@ -6,13 +6,14 @@
 //!
 //! Rendered with `ratatui` (Frame/Block/Layout widgets) over a crossterm
 //! backend, following the patterns used by the sibling `herdr` and `zerocode`
-//! dashboards. The dashboard talks to the herdr-mcp HTTP bridge over `reqwest`
-//! (see `http`). It also reads herdr workspace/pane context via the `herdr`
+//! dashboards. The dashboard talks to the herdr-mcp HTTP bridge through the
+//! shared `herdr_mcp_api::ApiClient` (see `http`). It also reads herdr workspace/pane context via the `herdr`
 //! CLI for the sidecar header.
 //!
-//! Entry point: [`run`].
+//! Entry point: [`run`]. The older trim-only ANSI dashboard is [`legacy::run`].
 
 pub mod http;
+pub mod legacy;
 pub mod nav;
 pub mod tabs;
 pub mod theme;
@@ -58,7 +59,7 @@ fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
     }
 }
 
-use crate::stats;
+use herdr_mcp_trim::stats;
 
 use herdr_mcp_api::{
     AgentHandle, ApiClient, PlaygroundSnapshot, Recipe, RecipeTemplate, TrimStatusResponse,
@@ -175,7 +176,7 @@ pub struct HerdrPane {
     pub output: String,
     /// Optional message-trim policy. The Trim tab editor mutates this through
     /// the registry, so the snapshot stays live without polling herdr.
-    pub trim_policy: Option<crate::policy::TrimPolicy>,
+    pub trim_policy: Option<herdr_mcp_api::TrimPolicy>,
     /// Registry-side last-updated epoch seconds (registry authoritative, not the CLI).
     pub updated_at: i64,
 
@@ -429,7 +430,7 @@ pub struct TrimState {
     /// Current editing stages (local copy before Apply).
     pub stages: Vec<String>,
     /// Current editing direction (local copy before Apply).
-    pub direction: crate::policy::TrimDirection,
+    pub direction: herdr_mcp_api::TrimDirection,
     /// Whether the stage picker overlay is open.
     pub stage_picker_open: bool,
     /// Selected item in the stage picker overlay.
@@ -639,7 +640,7 @@ impl App {
                 pane_index: 0,
                 stage_index: 0,
                 stages: Vec::new(),
-                direction: crate::policy::TrimDirection::None,
+                direction: herdr_mcp_api::TrimDirection::None,
                 stage_picker_open: false,
                 stage_picker_index: 0,
                 policy_msg: String::new(),
@@ -1877,7 +1878,7 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 for (i, r) in app.clipboard_preset_rects.iter().enumerate() {
                     if m.row == r.y && m.column >= r.x && m.column < r.x + r.width {
                         app.settings.clipboard.preset_index = i;
-                        let p = crate::tui::BackendPreset::ALL[i];
+                        let p = crate::BackendPreset::ALL[i];
                         app.settings.clipboard.copy_cmd = p.commands().0.to_string();
                         app.settings.clipboard.paste_cmd = p.commands().1.to_string();
                         app.settings.clipboard.field_focus = 0;
@@ -2335,7 +2336,7 @@ mod tests {
         assert!(app.trim.policy_msg.is_empty());
         assert!(matches!(
             app.trim.direction,
-            crate::policy::TrimDirection::None
+            herdr_mcp_api::TrimDirection::None
         ));
     }
 

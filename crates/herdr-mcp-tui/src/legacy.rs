@@ -1,6 +1,6 @@
 //! Live ANSI dashboard of trim savings across all workspaces.
 //!
-//! `herdr-mcp trim dashboard` opens a full-screen TUI that scans
+//! `herdr-trim dashboard --legacy` opens a full-screen TUI that scans
 //! `data_dir/sessions/*.trim_stats.json` every 2s and renders net savings %,
 //! per-pane bars, and the active-policy table. Quit with `q` or `Ctrl-C`.
 
@@ -16,7 +16,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 
-use crate::stats;
+use herdr_mcp_trim::stats;
 
 /// Bar widths and palette (24-bit ANSI).
 const BAR_WIDTH: usize = 32;

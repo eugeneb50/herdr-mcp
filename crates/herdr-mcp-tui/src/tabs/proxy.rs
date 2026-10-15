@@ -8,11 +8,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
 use super::trim::AVAILABLE_STAGES;
-use crate::tui::App;
-use crate::tui::theme::{
-    accent_style, dim_style, focused_panel_block, panel_block, selected_style,
-};
-use crate::tui::truncate;
+use crate::App;
+use crate::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
+use crate::truncate;
 
 /// Returns `true` if the key was consumed.
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {

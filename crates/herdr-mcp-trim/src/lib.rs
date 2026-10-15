@@ -1,6 +1,5 @@
 pub mod caveman;
 pub mod code_regions;
-pub mod dashboard;
 pub mod eval;
 pub mod folder_key;
 pub mod pfc1;
@@ -8,7 +7,6 @@ pub mod pipeline;
 pub mod policy;
 pub mod runner;
 pub mod stats;
-pub mod tui;
 
 // Selective re-exports of the key public types (no glob `use X::*`)
 pub use caveman::{CavemanLevel, CavemanResult, compress as caveman_compress};

@@ -18,11 +18,11 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use serde_json::{Map, Value};
 
 use super::variables::is_auto_stored_key;
-use crate::tui::theme::{
+use crate::theme::{
     accent_style, dim_style, focused_panel_block, muted_style, panel_block, selected_style,
     warn_style,
 };
-use crate::tui::{App, FieldKind, PlaygroundSub, RecipeStep, ToolCategory, ToolField};
+use crate::{App, FieldKind, PlaygroundSub, RecipeStep, ToolCategory, ToolField};
 
 /// Hardcoded category definitions for the tool picker.
 /// Each entry: (category label, tool name prefixes).
@@ -441,7 +441,7 @@ async fn handle_runner_fields(app: &mut App, code: KeyCode, mods: KeyModifiers) 
                     .iter()
                     .map(|f| f.default.clone().unwrap_or_default())
                     .collect();
-                pg.edit_area = crate::tui::TextArea::default();
+                pg.edit_area = crate::TextArea::default();
                 pg.editing_field = false;
                 pg.error = None;
                 Ok(true)
@@ -489,9 +489,9 @@ async fn handle_runner_fields(app: &mut App, code: KeyCode, mods: KeyModifiers) 
                 {
                     pg.editing_field = true;
                     let cur = pg.field_values.get(i).cloned().unwrap_or_default();
-                    pg.edit_area = crate::tui::TextArea::new(vec![cur]);
+                    pg.edit_area = crate::TextArea::new(vec![cur]);
                     pg.edit_area
-                        .input(crate::tui::to_textarea_input(code, mods).unwrap());
+                        .input(crate::to_textarea_input(code, mods).unwrap());
                 }
                 Ok(true)
             }
@@ -637,8 +637,8 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
     // Shift+Tab / Tab cycles between Templates and Saved tabs.
     if matches!(code, KeyCode::BackTab | KeyCode::Tab) {
         app.playground.builder_library_tab = match app.playground.builder_library_tab {
-            crate::tui::BuilderLibraryTab::Templates => crate::tui::BuilderLibraryTab::Saved,
-            crate::tui::BuilderLibraryTab::Saved => crate::tui::BuilderLibraryTab::Templates,
+            crate::BuilderLibraryTab::Templates => crate::BuilderLibraryTab::Saved,
+            crate::BuilderLibraryTab::Saved => crate::BuilderLibraryTab::Templates,
         };
         app.playground.builder_library_focus = 0;
         return Ok(true);
@@ -646,8 +646,8 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
 
     // Up/Down navigation.
     let item_count = match app.playground.builder_library_tab {
-        crate::tui::BuilderLibraryTab::Saved => app.recipes.as_ref().map_or(0, Vec::len),
-        crate::tui::BuilderLibraryTab::Templates => app.templates.as_ref().map_or(0, Vec::len),
+        crate::BuilderLibraryTab::Saved => app.recipes.as_ref().map_or(0, Vec::len),
+        crate::BuilderLibraryTab::Templates => app.templates.as_ref().map_or(0, Vec::len),
     };
     match code {
         KeyCode::Up => {
@@ -668,7 +668,7 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
             let lib_tab = app.playground.builder_library_tab;
             let lib_focus = app.playground.builder_library_focus;
             match lib_tab {
-                crate::tui::BuilderLibraryTab::Saved => {
+                crate::BuilderLibraryTab::Saved => {
                     let id = app
                         .recipes
                         .as_ref()
@@ -686,7 +686,7 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
                         }
                     }
                 }
-                crate::tui::BuilderLibraryTab::Templates => {
+                crate::BuilderLibraryTab::Templates => {
                     let tmpl = app
                         .templates
                         .as_ref()
@@ -702,7 +702,7 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
             return Ok(true);
         }
         KeyCode::Char('x')
-            if app.playground.builder_library_tab == crate::tui::BuilderLibraryTab::Saved =>
+            if app.playground.builder_library_tab == crate::BuilderLibraryTab::Saved =>
         {
             let id = app
                 .recipes
@@ -789,7 +789,7 @@ async fn handle_builder_param_edit(
             return Ok(true);
         }
         _ => {
-            if let Some(input) = crate::tui::to_textarea_input(code, mods) {
+            if let Some(input) = crate::to_textarea_input(code, mods) {
                 pg.builder_param_edit_area.input(input);
             }
         }
@@ -842,7 +842,7 @@ async fn handle_builder_step_detail(
                             other => other.to_string(),
                         })
                         .unwrap_or_default();
-                    pg.builder_param_edit_area = crate::tui::TextArea::new(vec![val]);
+                    pg.builder_param_edit_area = crate::TextArea::new(vec![val]);
                     pg.builder_editing_param = true;
                 }
             }
@@ -891,7 +891,7 @@ async fn handle_builder_global(app: &mut App, code: KeyCode, mods: KeyModifiers)
         }
         KeyCode::Char('n') if mods.contains(KeyModifiers::CONTROL) => {
             let cur = app.playground.builder_recipe_name.clone();
-            app.playground.builder_param_edit_area = crate::tui::TextArea::new(vec![cur]);
+            app.playground.builder_param_edit_area = crate::TextArea::new(vec![cur]);
             app.playground.builder_open_step = None;
             app.playground.builder_editing_param = true;
             app.playground.builder_param_focus = usize::MAX;
@@ -1172,7 +1172,7 @@ async fn run_tool(app: &mut App) {
             app.playground.error = None;
             let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
             app.playground.result_area =
-                crate::tui::TextArea::new(pretty.lines().map(str::to_string).collect());
+                crate::TextArea::new(pretty.lines().map(str::to_string).collect());
             app.status_msg = format!("{name} ok");
 
             // Auto-extract and store variables from the result
@@ -1181,7 +1181,7 @@ async fn run_tool(app: &mut App) {
         Err(e) => {
             app.playground.error = Some(e.to_string());
             app.playground.result = None;
-            app.playground.result_area = crate::tui::TextArea::new(vec![format!("error: {e}")]);
+            app.playground.result_area = crate::TextArea::new(vec![format!("error: {e}")]);
             app.status_msg = format!("{name} failed");
         }
     }
@@ -1252,7 +1252,7 @@ async fn extract_and_store_variables(app: &mut App, tool_name: &str, result: &Va
 
     // Update the variables tab to show the new variables
     if let Ok(v) = http.list_variables().await {
-        app.variables_state.entries = crate::tui::parse_variables(&v);
+        app.variables_state.entries = crate::parse_variables(&v);
     }
 
     app.log_debug(format!(
@@ -1897,8 +1897,8 @@ fn render_builder_result(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 fn render_library(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let pg = &app.playground;
     let tab_label = match pg.builder_library_tab {
-        crate::tui::BuilderLibraryTab::Templates => "Templates",
-        crate::tui::BuilderLibraryTab::Saved => "Saved",
+        crate::BuilderLibraryTab::Templates => "Templates",
+        crate::BuilderLibraryTab::Saved => "Saved",
     };
     let block = panel_block(&format!(" Library [{tab_label}] "));
     let inner = block.inner(area);
@@ -1927,7 +1927,7 @@ fn render_library(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     );
 
     match pg.builder_library_tab {
-        crate::tui::BuilderLibraryTab::Templates => {
+        crate::BuilderLibraryTab::Templates => {
             // Same list (and order) the loader indexes into: `/api/templates`.
             let templates = app.templates.as_deref().unwrap_or_default();
             if templates.is_empty() {
@@ -1961,7 +1961,7 @@ fn render_library(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let list = List::new(items).highlight_symbol("");
             frame.render_stateful_widget(list, list_area, &mut state);
         }
-        crate::tui::BuilderLibraryTab::Saved => {
+        crate::BuilderLibraryTab::Saved => {
             let recipes = app.recipes.as_ref();
             if let Some(arr) = recipes {
                 if arr.is_empty() {
