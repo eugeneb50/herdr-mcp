@@ -617,8 +617,9 @@ pub struct HerdrMcpServer {
     pub data_dir: std::path::PathBuf,
     /// Resolved clipboard backend config (source of truth: `Config`).
     pub clipboard: herdr_mcp_core::ClipboardConfig,
-    /// Optional reference to the herdr event subscriber client (for status reporting).
-    pub herdr_client: Option<std::sync::Arc<HerdrClient>>,
+    /// The herdr event subscriber client (for status reporting), once
+    /// attached. Shared by every clone, including the scheduler's.
+    pub herdr_client: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<HerdrClient>>>,
     /// Control channels of in-flight recipe runs (state is in their records).
     pub runs: crate::runs::Runs,
 }
@@ -651,20 +652,42 @@ impl HerdrMcpServer {
                 });
             }
         }
-        Self {
+        let server = Self {
             persistence,
             scheduler,
             registry,
             data_dir,
             clipboard: config.clipboard.clone(),
-            herdr_client: None,
+            herdr_client: std::sync::Arc::default(),
             runs: crate::runs::Runs::default(),
-        }
+        };
+        // Scheduled recipes run through the run engine like any other run.
+        // The closure holds a server clone (and so the scheduler): a
+        // reference cycle that lives as long as the process, like the server.
+        let runner = server.clone();
+        server
+            .scheduler
+            .set_executor(std::sync::Arc::new(move |recipe_id| {
+                let server = runner.clone();
+                Box::pin(async move {
+                    let req = herdr_mcp_api::StartRunRequest {
+                        recipe_id: Some(recipe_id),
+                        ..Default::default()
+                    };
+                    match crate::runs::start_run(&server, req).await {
+                        Ok((_, done)) => {
+                            let _ = done.await;
+                        }
+                        Err(e) => tracing::warn!("scheduled run of recipe {recipe_id}: {e:?}"),
+                    }
+                })
+            }));
+        server
     }
 
     /// Attach a HerdrClient for socket/subscriber status reporting.
-    pub fn with_herdr_client(mut self, client: std::sync::Arc<HerdrClient>) -> Self {
-        self.herdr_client = Some(client);
+    pub fn with_herdr_client(self, client: std::sync::Arc<HerdrClient>) -> Self {
+        let _ = self.herdr_client.set(client);
         self
     }
 
@@ -821,7 +844,7 @@ impl HerdrMcpServer {
         );
 
         // Get herdr-mcp's socket/subscriber state
-        let (socket_active, subscriber_phase) = match &self.herdr_client {
+        let (socket_active, subscriber_phase) = match self.herdr_client.get() {
             Some(client) => {
                 let active = client.is_socket_active().await;
                 let phase = client.subscriber_state().await;

@@ -1,17 +1,25 @@
+//! Cron schedules for saved recipes.
+//!
+//! A schedule's only state is its persisted record (`data/schedules/`). Each
+//! schedule has one runner task that re-reads that record every tick, so
+//! deleting or disabling a schedule takes effect at its next tick without
+//! any in-memory copy to keep in sync. Firing hands the recipe id to the
+//! executor (the run engine), which records the run itself.
+
 use chrono::{DateTime, Utc};
 use cron::Schedule;
 use dashmap::DashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use uuid::Uuid;
 
 use crate::persistence::Persistence;
-use crate::variables::ExecutionResult;
-use crate::variables::ExecutionStatus;
 use crate::variables::ScheduledRecipe;
 
-pub type ExecutorFn =
-    Arc<dyn Fn(Uuid) -> tokio::sync::oneshot::Receiver<ExecutionResult> + Send + Sync>;
+/// Runs a recipe by id to completion.
+pub type ExecutorFn = Arc<dyn Fn(Uuid) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Scheduler {
@@ -20,20 +28,19 @@ pub struct Scheduler {
 
 struct SchedulerInner {
     persistence: Arc<Persistence>,
-    /// Receives a recipe ID, must call to execute it and return a receiver for the result.
-    executor: tokio::sync::RwLock<Option<ExecutorFn>>,
-    schedules: DashMap<Uuid, ActiveSchedule>,
-    handles: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    /// Track in-flight executions to prevent concurrent runs of the same recipe.
+    executor: OnceLock<ExecutorFn>,
+    /// Runner task per schedule id (task handles only, no schedule state).
+    runners: DashMap<Uuid, tokio::task::JoinHandle<()>>,
+    /// Recipes currently executing, so two schedules never overlap one recipe.
     in_flight: DashMap<Uuid, ()>,
 }
 
-#[derive(Clone)]
-struct ActiveSchedule {
-    recipe_id: Uuid,
-    cron: cron::Schedule,
-    next_run: DateTime<Utc>,
-    enabled: bool,
+fn parse_cron(expr: &str) -> anyhow::Result<Schedule> {
+    let cron = Schedule::from_str(expr).map_err(|e| anyhow::anyhow!("invalid cron: {e}"))?;
+    if cron.upcoming(Utc).next().is_none() {
+        anyhow::bail!("cron never fires");
+    }
+    Ok(cron)
 }
 
 impl Scheduler {
@@ -41,185 +48,151 @@ impl Scheduler {
         Self {
             inner: Arc::new(SchedulerInner {
                 persistence,
-                executor: tokio::sync::RwLock::new(None),
-                schedules: DashMap::new(),
-                handles: tokio::sync::Mutex::new(Vec::new()),
+                executor: OnceLock::new(),
+                runners: DashMap::new(),
                 in_flight: DashMap::new(),
             }),
         }
     }
 
-    /// Load persisted schedules from disk and re-spawn their runners.
-    /// This ensures schedules survive server restarts.
+    /// Set the function schedules fire into. Only the first call takes effect.
+    pub fn set_executor(&self, executor: ExecutorFn) {
+        let _ = self.inner.executor.set(executor);
+    }
+
+    /// Start runners for every persisted schedule (after a restart).
+    /// Schedules with an invalid cron are skipped with a warning.
     pub async fn load_existing(&self) -> anyhow::Result<()> {
-        let schedules = self.inner.persistence.list_schedules().await?;
-        for schedule in schedules {
-            if schedule.enabled {
-                let cron = Schedule::from_str(&schedule.cron_schedule)
-                    .map_err(|e| anyhow::anyhow!("invalid cron in persisted schedule: {e}"))?;
-                let next_run = cron
-                    .upcoming(Utc)
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("cron never fires"))?;
-                let active = ActiveSchedule {
-                    recipe_id: schedule.recipe_id,
-                    cron,
-                    next_run,
-                    enabled: schedule.enabled,
-                };
-                self.inner.schedules.insert(schedule.id, active.clone());
-                let handle = self.spawn_runner(schedule.id, active);
-                let mut handles = self.inner.handles.lock().await;
-                handles.retain(|h| !h.is_finished());
-                handles.push(handle);
+        for schedule in self.inner.persistence.list_schedules().await? {
+            if let Err(e) = parse_cron(&schedule.cron_schedule) {
+                tracing::warn!("schedule {}: {e}; not started", schedule.id);
+                continue;
             }
+            self.spawn_runner(schedule.id);
         }
         Ok(())
     }
 
     pub async fn schedule_one(&self, s: ScheduledRecipe) -> anyhow::Result<()> {
-        let cron = Schedule::from_str(&s.cron_schedule)
-            .map_err(|e| anyhow::anyhow!("invalid cron: {e}"))?;
-        let next_run = cron
-            .upcoming(Utc)
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("cron never fires"))?;
-        let active = ActiveSchedule {
-            recipe_id: s.recipe_id,
-            cron,
-            next_run,
-            enabled: s.enabled,
-        };
-        self.inner.schedules.insert(s.id, active.clone());
+        parse_cron(&s.cron_schedule)?;
         self.inner.persistence.save_schedule(&s).await?;
-        let handle = self.spawn_runner(s.id, active);
-        let mut handles = self.inner.handles.lock().await;
-        handles.retain(|h| !h.is_finished());
-        handles.push(handle);
+        self.spawn_runner(s.id);
         Ok(())
     }
 
-    fn spawn_runner(&self, id: Uuid, mut active: ActiveSchedule) -> tokio::task::JoinHandle<()> {
+    fn spawn_runner(&self, id: Uuid) {
         let inner = Arc::clone(&self.inner);
-        tokio::spawn(async move {
-            loop {
-                if !active.enabled {
-                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    continue;
-                }
-                let now = Utc::now();
-                if active.next_run > now {
-                    let dur = (active.next_run - now)
-                        .to_std()
-                        .unwrap_or(std::time::Duration::from_secs(60));
-                    tokio::time::sleep(dur).await;
-                }
-
-                // Check if this recipe is already running — skip to next scheduled time
-                if inner.in_flight.contains_key(&active.recipe_id) {
-                    tracing::debug!(
-                        recipe_id = %active.recipe_id,
-                        "scheduled recipe already running, skipping this tick"
-                    );
-                    // Compute next run and continue without executing
-                    active.next_run = match active.cron.upcoming(Utc).next() {
-                        Some(t) => t,
-                        None => break,
-                    };
-                    inner.schedules.insert(id, active.clone());
-                    continue;
-                }
-
-                // Trigger the executor if available
-                let exec = inner.executor.read().await.clone();
-                if let Some(exec_fn) = exec {
-                    // Mark as in-flight before executing
-                    inner.in_flight.insert(active.recipe_id, ());
-
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    let exec_fn = Arc::clone(&exec_fn);
-                    let recipe_id = active.recipe_id;
-                    let persistence = Arc::clone(&inner.persistence);
-                    let sched_id = id;
-                    tokio::spawn(async move {
-                        let exec_rx = exec_fn(recipe_id);
-                        let result = exec_rx.await.unwrap_or_else(|_| ExecutionResult {
-                            id: Uuid::new_v4(),
-                            recipe_id,
-                            started_at: Utc::now(),
-                            completed_at: Some(Utc::now()),
-                            status: ExecutionStatus::Failed,
-                            results: Default::default(),
-                            variables: Default::default(),
-                            error: Some("executor dropped channel".into()),
-                        });
-                        let _ = persistence.save_execution(&result).await;
-                        // update schedule last_run
-                        if let Ok(Some(mut sched)) = persistence.load_schedule(&sched_id).await {
-                            sched.last_run = Some(Utc::now());
-                            let _ = persistence.save_schedule(&sched).await;
-                        }
-                        let _ = tx.send(());
-                    });
-                    let _ = rx.await;
-
-                    // Remove from in-flight after execution completes
-                    inner.in_flight.remove(&recipe_id);
-                } else {
-                    tracing::warn!("no executor available for scheduled recipe");
-                }
-
-                // compute next run
-                active.next_run = match active.cron.upcoming(Utc).next() {
-                    Some(t) => t,
-                    None => break,
-                };
-                inner.schedules.insert(id, active.clone());
-            }
-        })
+        let handle = tokio::spawn(async move { inner.run_schedule(id).await });
+        if let Some(old) = self.inner.runners.insert(id, handle) {
+            old.abort();
+        }
     }
 
     pub async fn remove(&self, id: Uuid) -> anyhow::Result<bool> {
         let removed = self.inner.persistence.delete_schedule(&id).await?;
-        self.inner.schedules.remove(&id);
-        let mut handles = self.inner.handles.lock().await;
-        handles.retain(|h| !h.is_finished());
+        if let Some((_, handle)) = self.inner.runners.remove(&id) {
+            handle.abort();
+        }
         Ok(removed)
     }
 
-    /// Update the enabled flag of an existing schedule. Persists the change so
-    /// it survives restarts, and updates the live runner via the in-memory map.
+    /// Persist the enabled flag; the runner reads it at its next tick.
     pub async fn set_enabled(&self, id: Uuid, enabled: bool) -> anyhow::Result<bool> {
-        if let Some(mut sched) = self.inner.persistence.load_schedule(&id).await? {
-            sched.enabled = enabled;
-            self.inner.persistence.save_schedule(&sched).await?;
-            if let Some(mut active) = self.inner.schedules.get_mut(&id) {
-                active.enabled = enabled;
-            }
-            Ok(true)
-        } else {
-            Ok(false)
-        }
+        let Some(mut sched) = self.inner.persistence.load_schedule(&id).await? else {
+            return Ok(false);
+        };
+        sched.enabled = enabled;
+        self.inner.persistence.save_schedule(&sched).await?;
+        Ok(true)
     }
 
+    /// Persisted schedules, with `next_run` computed from the cron when enabled.
     pub async fn list(&self) -> Vec<ScheduledRecipe> {
-        self.inner
-            .schedules
-            .iter()
-            .map(|entry| {
-                let id = *entry.key();
-                let active = entry.value().clone();
-                ScheduledRecipe {
-                    id,
-                    recipe_id: active.recipe_id,
-                    cron_schedule: active.cron.to_string(),
-                    next_run: Some(active.next_run),
-                    last_run: None,
-                    enabled: active.enabled,
-                    created_at: Utc::now(),
+        let mut list = self
+            .inner
+            .persistence
+            .list_schedules()
+            .await
+            .unwrap_or_default();
+        for s in &mut list {
+            s.next_run = if s.enabled {
+                parse_cron(&s.cron_schedule)
+                    .ok()
+                    .and_then(|c| c.upcoming(Utc).next())
+            } else {
+                None
+            };
+        }
+        list
+    }
+}
+
+impl SchedulerInner {
+    async fn load(&self, id: Uuid) -> Option<ScheduledRecipe> {
+        self.persistence.load_schedule(&id).await.ok().flatten()
+    }
+
+    /// Fire schedule `id` at each cron tick until its record is deleted.
+    async fn run_schedule(&self, id: Uuid) {
+        loop {
+            let Some(sched) = self.load(id).await else {
+                return;
+            };
+            let Some(next) = parse_cron(&sched.cron_schedule)
+                .ok()
+                .and_then(|c| c.upcoming(Utc).next())
+            else {
+                tracing::warn!("schedule {id}: cron no longer valid; stopping");
+                return;
+            };
+            sleep_until(next).await;
+
+            // Re-read: it may have been deleted or disabled while we slept.
+            let Some(sched) = self.load(id).await else {
+                return;
+            };
+            if !sched.enabled {
+                continue;
+            }
+            let Some(executor) = self.executor.get() else {
+                tracing::warn!("schedule {id}: no executor set; skipping tick");
+                continue;
+            };
+            if self.in_flight.insert(sched.recipe_id, ()).is_some() {
+                tracing::debug!(
+                    "schedule {id}: recipe {} still running; skipping tick",
+                    sched.recipe_id
+                );
+                continue;
+            }
+            {
+                // Cleared on drop, so an abort mid-run (remove) can't leave
+                // the recipe marked in flight forever.
+                let _in_flight = InFlight(&self.in_flight, sched.recipe_id);
+                executor(sched.recipe_id).await;
+            }
+
+            if let Some(mut latest) = self.load(id).await {
+                latest.last_run = Some(Utc::now());
+                if let Err(e) = self.persistence.save_schedule(&latest).await {
+                    tracing::warn!("schedule {id}: failed to record last_run: {e}");
                 }
-            })
-            .collect()
+            }
+        }
+    }
+}
+
+struct InFlight<'a>(&'a DashMap<Uuid, ()>, Uuid);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.remove(&self.1);
+    }
+}
+
+async fn sleep_until(at: DateTime<Utc>) {
+    if let Ok(wait) = (at - Utc::now()).to_std() {
+        tokio::time::sleep(wait).await;
     }
 }
 
@@ -305,6 +278,45 @@ mod tests {
         let p = Persistence::new(tmp.path().to_path_buf());
         let sched = Scheduler::new(std::sync::Arc::new(p));
         assert!(!sched.set_enabled(Uuid::new_v4(), false).await.unwrap());
+    }
+
+    /// A per-second schedule fires into the executor; disabling stops it,
+    /// and removing ends the runner. Uses real time (~4s).
+    #[tokio::test]
+    async fn fires_until_disabled_and_stops_when_removed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Arc::new(Persistence::new(tmp.path().to_path_buf()));
+        let sched = Scheduler::new(Arc::clone(&p));
+        let fired = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&fired);
+        sched.set_executor(Arc::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {})
+        }));
+        let mut s = scheduled();
+        s.cron_schedule = "* * * * * *".into();
+        sched.schedule_one(s.clone()).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
+        assert!(fired.load(Ordering::SeqCst) >= 1, "never fired");
+        let stored = p.load_schedule(&s.id).await.unwrap().unwrap();
+        assert!(stored.last_run.is_some());
+
+        sched.set_enabled(s.id, false).await.unwrap();
+        assert_eq!(sched.list().await[0].next_run, None);
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let after_disable = fired.load(Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            after_disable,
+            "fired while disabled"
+        );
+
+        assert!(sched.remove(s.id).await.unwrap());
+        assert!(sched.inner.runners.is_empty());
+        assert!(sched.list().await.is_empty());
     }
 
     #[tokio::test]
