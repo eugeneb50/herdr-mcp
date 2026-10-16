@@ -111,6 +111,7 @@ fn flatten(prop: &Value, defs: &Value) -> Value {
         desc = format!("{desc} (JSON)").trim().to_string();
     }
     if let Some(d) = prop.get("default").or(target.get("default")) {
+        out.insert("default".into(), d.clone());
         desc = format!("{desc} — default {d}")
             .trim_start_matches(" — ")
             .to_string();

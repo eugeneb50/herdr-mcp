@@ -57,7 +57,7 @@ herdr-mcp folder-key   # per-folder PFC1 key management
 - **HTTP bridge** — built-in Axum HTTP server enables browser-based interaction
 - **Web playground** — Dioxus (Rust → wasm) UI for exploring and invoking tools, building recipes, and inspecting results (served from the HTTP bridge itself, no separate dev server needed in production)
 - **Kitchen-sink TUI** — VS Code-style tabbed terminal dashboard with mouse + keyboard navigation, trim analytics, variable editor, and settings
-- **55 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, message-trim, recipe templates, scheduler, folder-key, clipboard, and proxy operations against herdr
+- **58 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, message-trim, recipe templates, scheduler, folder-key, clipboard, and proxy operations against herdr
 - **Recipe engine** — chain multiple tool calls with variable interpolation (`{{ stepId.result.path }}`)
 - **Message-trim pipeline** — `caveman` (lossy style) + `pfc1` (lossless Cherokee-syllabary phonetic) compressors for agent-to-agent comms
 - **Per-pane trim policies** — attach staged compression pipelines to agents via `trim_policy_set`/`trim_policy_get`
@@ -285,21 +285,20 @@ All endpoints return JSON. Request/response types are defined in
 |--------|------|-------------|
 | `GET` | `/*` | Web playground (Dioxus bundle from `http.web-dir`, SPA fallback to `index.html`) |
 | `GET` | `/api/health` | Health check → `"ok"` |
-| `GET` | `/api/tools` | List all 55 tools with JSON schemas |
+| `GET` | `/api/tools` | List all 58 tools with JSON schemas |
 | `POST` | `/api/tools/:name` | Invoke a tool by name, body is the parameter object |
 | `GET` | `/api/agents?workspace_id=` | Live pane list from AgentRegistry (canonical) |
 | `GET` | `/api/workspaces` | Workspace list via herdr CLI |
-| `POST` | `/api/recipe` | Execute a multi-step recipe with variable interpolation |
+| `POST` | `/api/runs` | Start a run (saved `recipe_id` or ad-hoc `steps`); `?wait=true` returns the finished run |
+| `GET` | `/api/herdr/schema` | The installed herdr's API schema (every socket method + params) |
 | `GET` / `POST` | `/api/recipes` | List / create recipes |
 | `GET` / `PUT` / `DELETE` | `/api/recipes/:id` | Get / update / delete a recipe |
-| `POST` | `/api/recipes/:id/run` | Run a recipe by ID |
 | `GET` / `POST` | `/api/variables` | List / save variables |
 | `GET` / `DELETE` | `/api/variables/{key}` | Get / delete a variable |
 | `GET` | `/api/trim/status?workspace_id=` | Aggregate trim savings |
 | `POST` | `/api/trim/diagnose` | End-to-end trim readiness check |
 | `POST` | `/api/trim/summary` | Fire savings summary notification |
 | `POST` | `/api/trim/dashboard/open` | Open live dashboard in a herdr split pane |
-| `GET` | `/api/executions/{id}` | Get recipe execution result |
 
 ### Recipe format
 
@@ -375,7 +374,9 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `create_tab` | Create a new tab |
 | `split_pane` | Split a pane right or down (by pane_id or label) |
 | `close_pane` | Close a pane by pane_id or label |
-| `start_agent` | Start an agent in a new pane |
+| `agent_spawn` | Start an agent from a profile in a new pane |
+| `herdr_api` | Call any herdr socket API method (`GET /api/herdr/schema` lists them) |
+| `pane_exec` | Run a shell command in a pane; return its output and exit code |
 
 ### Read (2) / Write (4)
 | Tool | Description |

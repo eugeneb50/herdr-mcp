@@ -86,6 +86,11 @@ pub fn DynamicForm(
                     let desc = prop.get("description").and_then(|d| d.as_str()).unwrap_or("");
                     let is_required = required.contains(&key);
                     let val = values.get(&key).cloned().unwrap_or_default();
+                    // A boolean left alone shows (and toggles from) its default.
+                    let on = match val.as_str() {
+                        "" => prop.get("default") == Some(&Value::Bool(true)),
+                        v => v == "true",
+                    };
                     let resolved = preview.get(&key).cloned().unwrap_or_default();
                     let show_resolved = !resolved.is_empty() && resolved != val;
                     rsx! {
@@ -122,16 +127,12 @@ pub fn DynamicForm(
                                 label { class: "check-row",
                                     input {
                                         r#type: "checkbox",
-                                        checked: val == "true",
+                                        checked: on,
                                         onchange: {
                                             let key = key.clone();
-                                            let cur = val.clone();
                                             move |_| {
                                                 let mut next = values.clone();
-                                                next.insert(
-                                                    key.clone(),
-                                                    if cur == "true" { "false".to_string() } else { "true".to_string() },
-                                                );
+                                                next.insert(key.clone(), (!on).to_string());
                                                 on_change.call(next);
                                             }
                                         },

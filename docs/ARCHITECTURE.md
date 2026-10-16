@@ -48,7 +48,7 @@ Dioxus consolidation)
 │                        ▼                                     │
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │              HerdrMcpServer (server.rs)                  │ │
-│  │  - 55 tool definitions (discovery, lifecycle, read, write, synchronize, a2a, trim, recipes, scheduler, folder-key) │ │
+│  │  - 58 tool definitions (discovery, lifecycle, read, write, synchronize, a2a, trim, recipes, scheduler, folder-key) │ │
 │  │  - Recipe engine with {{ variable }} interpolation      │ │
 │  │  - Outbound trim: apply_outbound_trim()                 │ │
 │  │  - Badge push: push_badge_for_workspace()               │ │
@@ -167,7 +167,7 @@ herdr-mcp/
 
 ---
 
-## 4. MCP Tool Reference (55 tools total)
+## 4. MCP Tool Reference (58 tools total)
 
 ### 4.1 Discovery Tools (7)
 
@@ -189,7 +189,7 @@ herdr-mcp/
 | `create_tab` | `workspace_id?`, `label?`, `cwd?` | Create a new tab |
 | `split_pane` | `pane_id?`, `label?`, `direction?`, `cwd?`, `no_focus?` | Split a pane right or down |
 | `close_pane` | `pane_id?`, `label?` | Close a pane |
-| `start_agent` | `name`, `args`, `cwd?`, `workspace_id?`, `tab_id?`, `split?` | Start an agent (appends `--` before agent name) |
+| `herdr_api` | `method`, `params?`, `timeout_ms?` | Any herdr socket API method; returns herdr's response |
 
 ### 4.3 Read Tools (2)
 
@@ -303,7 +303,7 @@ herdr-mcp/
 | `POST` | `/api/tools/{name}` | `call_tool_handler` | Dispatch tool by name |
 | `GET` | `/api/agents?workspace_id=` | `agents_handler` | Live pane list from AgentRegistry |
 | `GET` | `/api/workspaces` | `workspaces_handler` | Workspace list via herdr CLI |
-| `POST` | `/api/recipe` | `run_recipe_handler` | Execute multi-step recipe |
+| `POST` | `/api/runs` | `start_run_handler` | Start a run; `?wait=true` waits for the final record |
 
 ### 5.2 Recipe CRUD Routes
 
@@ -314,7 +314,6 @@ herdr-mcp/
 | `GET` | `/api/recipes/{id}` | Get recipe by ID |
 | `PUT` | `/api/recipes/{id}` | Update recipe |
 | `DELETE` | `/api/recipes/{id}` | Delete recipe |
-| `POST` | `/api/recipes/{id}/run` | Run recipe by ID |
 
 ### 5.3 Variable & Execution Routes
 
@@ -324,7 +323,6 @@ herdr-mcp/
 | `POST` | `/api/variables` | Save variable |
 | `GET` | `/api/variables/{key}` | Get variable |
 | `DELETE` | `/api/variables/{key}` | Delete variable |
-| `GET` | `/api/executions/{id}` | Get execution result |
 
 ### 5.4 Trim Routes
 
@@ -392,7 +390,7 @@ Variables use `{{ path }}` syntax with dot/bracket navigation:
 ### 6.2 Recipe Lifecycle
 
 ```
-1. HTTP POST /api/recipe or MCP tool dispatch
+1. HTTP POST /api/runs (or the scheduler)
 2. Seed accumulated from agent registry (for session_id workspace)
 3. For each step:
    a. resolve_variables() in params from accumulated
@@ -896,13 +894,6 @@ single-server deployment.
 **Decision:** Session variables use herdr workspace ID as scope.  
 **Rationale:** Recipes run within a workspace context; variables should chain
 across runs in the same workspace but not leak between workspaces.
-
-### 14.9 `start_agent` Appends `--`
-
-**Decision:** `start_agent` prepends `--` before the agent name to prevent
-herdr from consuming agent-specific flags.  
-**Rationale:** Prevents argument confusion between herdr's flags and agent
-flags.
 
 ### 14.10 Clipboard Detection & Override
 
