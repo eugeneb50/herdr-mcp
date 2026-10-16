@@ -11,8 +11,8 @@ use super::runner::{ToolInfo, schema_parts, tool_list};
 use crate::client::use_api;
 use crate::vars::substitute;
 use herdr_mcp_api::{
-    CreateRecipeRequest, InstantiateTemplateRequest, Recipe, RecipeRequest, RecipeStep,
-    RecipeTemplate, UpdateRecipeRequest, Uuid,
+    CreateRecipeRequest, InstantiateTemplateRequest, Recipe, RecipeStep, RecipeTemplate,
+    StartRunRequest, UpdateRecipeRequest, Uuid,
 };
 
 #[derive(Clone, PartialEq)]
@@ -135,29 +135,27 @@ pub fn RecipeBuilder(
             loading.set(true);
             error.set(None);
             results.set(None);
-            // Both shapes are shown raw in the ResponseViewer.
-            let saved = *saved_id.read();
-            let res = match saved {
-                Some(id) => client
-                    .run_recipe_by_id(id)
-                    .await
-                    .map(|r| serde_json::to_value(r).unwrap_or_default()),
-                None => {
-                    let req = RecipeRequest {
-                        name: Some(name.read().clone()),
-                        session_id: None,
-                        steps: steps
+            let req = match *saved_id.read() {
+                Some(id) => StartRunRequest {
+                    recipe_id: Some(id),
+                    ..Default::default()
+                },
+                None => StartRunRequest {
+                    name: Some(name.read().clone()),
+                    steps: Some(
+                        steps
                             .read()
                             .iter()
                             .map(|s| step_to_api(s, &tools.read()))
                             .collect(),
-                    };
-                    client
-                        .run_recipe(&req)
-                        .await
-                        .map(|r| serde_json::to_value(r).unwrap_or_default())
-                }
+                    ),
+                    ..Default::default()
+                },
             };
+            let res = client
+                .run_and_wait(&req)
+                .await
+                .map(|r| serde_json::to_value(r).unwrap_or_default());
             match res {
                 Err(e) => error.set(Some(format!("Request failed: {e}"))),
                 Ok(data) => results.set(Some(data)),
@@ -330,9 +328,8 @@ pub fn RecipeBuilder(
     }
 }
 
-/// A recipe run (`RecipeResponse` or `ExecutionResult`: both carry
-/// `status`, `results` by step id and an optional `error`): its status, then
-/// each step's result in step order.
+/// A finished run (`RunRecord`): its status, then each step's result in
+/// step order.
 #[component]
 fn RunResults(data: Value, order: Vec<String>) -> Element {
     let status = data

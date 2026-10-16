@@ -331,6 +331,34 @@ impl HerdrClient {
         }
     }
 
+    /// The herdr API socket this client talks to.
+    pub fn socket_path(&self) -> &std::path::Path {
+        &self.socket_path
+    }
+
+    /// One request on herdr's socket API (`{id, method, params}` per line);
+    /// returns herdr's response (`{id, result}` or `{id, error}`) as-is.
+    /// Streaming methods (`events.subscribe`) return their first message.
+    pub async fn call(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: std::time::Duration,
+    ) -> anyhow::Result<serde_json::Value> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let stream = tokio::net::UnixStream::connect(&self.socket_path)
+            .await
+            .map_err(|e| anyhow::anyhow!("herdr socket {}: {e}", self.socket_path.display()))?;
+        let (read, mut write) = stream.into_split();
+        let req = serde_json::json!({ "id": "herdr-mcp-call", "method": method, "params": params });
+        write.write_all(format!("{req}\n").as_bytes()).await?;
+        let line = tokio::time::timeout(timeout, BufReader::new(read).lines().next_line())
+            .await
+            .map_err(|_| anyhow::anyhow!("herdr did not answer {method} within {timeout:?}"))??
+            .ok_or_else(|| anyhow::anyhow!("herdr closed the connection"))?;
+        Ok(serde_json::from_str(&line)?)
+    }
+
     /// Get the current subscriber phase.
     pub async fn subscriber_state(&self) -> SubscriberPhase {
         self.subscriber_state.get().await
@@ -577,7 +605,7 @@ impl HerdrClient {
 
     /// Fetch and parse `herdr pane list` -> array of pane objects (best-effort).
     async fn list_panes_json(&self) -> Option<Vec<serde_json::Value>> {
-        let binary = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
+        let binary = herdr_mcp_core::herdr_bin();
         let output = tokio::process::Command::new(binary)
             .args(["pane", "list"])
             .output()
@@ -658,8 +686,7 @@ impl HerdrClient {
                             s.messages_trimmed,
                             s.net_saved_bytes
                         );
-                        let binary =
-                            std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
+                        let binary = herdr_mcp_core::herdr_bin();
                         let _ = tokio::process::Command::new(binary)
                             .args(["notification", "show", "herdr-mcp trim", "--body", &body])
                             .output()
@@ -698,7 +725,7 @@ struct SubData {
 /// Read a pane's recent output via the herdr CLI. Best-effort; errors are
 /// swallowed by callers.
 async fn read_pane_output(pane_id: &str) -> anyhow::Result<String> {
-    let binary = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
+    let binary = herdr_mcp_core::herdr_bin();
     let output = tokio::process::Command::new(binary)
         .args([
             "pane", "read", pane_id, "--source", "recent", "--lines", "200",

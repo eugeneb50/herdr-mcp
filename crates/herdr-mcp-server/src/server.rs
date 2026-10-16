@@ -10,7 +10,7 @@ use crate::herdr_client::{AgentRegistry, HerdrClient, SubscriberPhase};
 use crate::persistence::Persistence;
 use crate::scheduler::Scheduler;
 use crate::templates as tmpl;
-use crate::variables::{ExecutionResult, Recipe, ScheduledRecipe};
+use crate::variables::{Recipe, ScheduledRecipe};
 use herdr_mcp_trim::pfc1::CompressionKey;
 use herdr_mcp_trim::pipeline;
 use herdr_mcp_trim::policy::{TrimPolicy, TrimPolicyExt};
@@ -110,25 +110,6 @@ pub struct ClosePaneParams {
     pub label: Option<String>,
 }
 
-/// Parameters for starting an agent in a new pane.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-#[serde(deny_unknown_fields)]
-pub struct StartAgentParams {
-    /// Name of the agent to start.
-    pub name: String,
-    /// Arguments to pass to the agent (after '--').
-    pub args: Vec<String>,
-    /// Working directory for the agent.
-    pub cwd: Option<String>,
-    /// Workspace ID for the agent.
-    pub workspace_id: Option<String>,
-    /// Tab ID for the agent.
-    pub tab_id: Option<String>,
-    /// Split direction: "right" or "down".
-    pub split: Option<String>,
-}
-
 /// Parameters for reading text output from a pane.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
@@ -194,6 +175,20 @@ pub struct RunCommandParams {
     pub label: Option<String>,
     /// Command to run (text + Enter sent atomically).
     pub command: String,
+}
+
+/// Parameters for a raw herdr socket API call.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+#[serde(deny_unknown_fields)]
+pub struct HerdrApiParams {
+    /// herdr API method, e.g. `pane.read`, `workspace.list`, `agent.prompt`
+    /// (all methods + param schemas: `GET /api/herdr/schema`).
+    pub method: String,
+    /// The method's params object (default `{}`).
+    pub params: Option<serde_json::Value>,
+    /// How long to wait for herdr's answer (default 60000).
+    pub timeout_ms: Option<u32>,
 }
 
 /// Parameters for running a command in a pane and capturing its result.
@@ -856,8 +851,8 @@ impl HerdrMcpServer {
                     &h.pane_id,
                     "--source",
                     "herdr-mcp",
-                    "--custom-status",
-                    &badge,
+                    "--token",
+                    &format!("trim={badge}"),
                     "--ttl-ms",
                     "25000",
                 ])
@@ -1114,41 +1109,6 @@ impl HerdrMcpServer {
         run_herdr_json(&["pane", "close", &pid]).await
     }
 
-    #[tool(
-        description = "Start an agent in a new pane. Pass the agent name and any arguments after '--'"
-    )]
-    async fn start_agent(
-        &self,
-        Parameters(StartAgentParams {
-            name,
-            args,
-            cwd,
-            workspace_id,
-            tab_id,
-            split,
-        }): Parameters<StartAgentParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let mut cli = vec!["agent", "start"];
-        if let Some(ref path) = cwd {
-            cli.extend(["--cwd", path]);
-        }
-        if let Some(ref wid) = workspace_id {
-            cli.extend(["--workspace", wid]);
-        }
-        if let Some(ref tid) = tab_id {
-            cli.extend(["--tab", tid]);
-        }
-        if let Some(ref dir) = split {
-            cli.extend(["--split", dir]);
-        }
-        cli.push("--");
-        cli.push(&name);
-        for a in &args {
-            cli.push(a);
-        }
-        run_herdr_json(&cli).await
-    }
-
     // ── Read ───────────────────────────────────────────────────────────
 
     #[tool(
@@ -1308,6 +1268,36 @@ impl HerdrMcpServer {
             }))
             .map_err(to_mcp_err)?,
         ]))
+    }
+
+    #[tool(
+        description = "Call any herdr socket API method directly and return herdr's response ({id, result} or {id, error}). Covers everything the installed herdr can do: workspace.*, tab.*, pane.*, agent.*, layout.*, worktree.*, plugin.*, server.*, events.wait, ... `GET /api/herdr/schema` (or `herdr api schema --json`) lists every method with its params schema."
+    )]
+    async fn herdr_api(
+        &self,
+        Parameters(HerdrApiParams {
+            method,
+            params,
+            timeout_ms,
+        }): Parameters<HerdrApiParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.herdr_client.get().ok_or_else(|| McpError {
+            code: rmcp::model::ErrorCode(-32000),
+            message: "not connected to herdr (no socket client attached)".into(),
+            data: None,
+        })?;
+        let timeout = std::time::Duration::from_millis(u64::from(timeout_ms.unwrap_or(60_000)));
+        let params = params.unwrap_or_else(|| serde_json::json!({}));
+        let response = client
+            .call(&method, params, timeout)
+            .await
+            .map_err(to_mcp_err)?;
+        let text = serde_json::to_string_pretty(&response).map_err(to_mcp_err)?;
+        Ok(if response.get("error").is_some() {
+            CallToolResult::error(vec![Content::text(text)])
+        } else {
+            CallToolResult::success(vec![Content::text(text)])
+        })
     }
 
     #[tool(description = "Send text directly to an agent's stream")]
@@ -2623,24 +2613,6 @@ pub(crate) fn to_mcp_err(e: impl std::fmt::Display) -> McpError {
     }
 }
 
-/// Escape a string for safe use in a shell command.
-/// Uses single-quote escaping which is safe for all characters except single quotes.
-fn shell_escape(s: &str) -> String {
-    let mut escaped = String::with_capacity(s.len() + 2);
-    escaped.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            // Can't escape single quotes inside single quotes; end quote,
-            // add escaped quote, restart quote
-            escaped.push_str("'\''");
-        } else {
-            escaped.push(c);
-        }
-    }
-    escaped.push('\'');
-    escaped
-}
-
 /// Recursively find a string value for `key` anywhere in a JSON tree.
 fn extract_string(value: &serde_json::Value, key: &str) -> Option<String> {
     match value {
@@ -2769,7 +2741,7 @@ async fn resolve_target_pane(server: &HerdrMcpServer, target: &str) -> Result<St
 
 /// Read a pane's recent output via the herdr CLI.
 async fn read_pane_text(pane_id: &str) -> anyhow::Result<String> {
-    let binary = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
+    let binary = herdr_mcp_core::herdr_bin();
     let output = tokio::process::Command::new(binary)
         .args([
             "pane", "read", pane_id, "--source", "recent", "--lines", "200",
@@ -2976,7 +2948,7 @@ pub fn spawn_trim_poller(server: std::sync::Arc<HerdrMcpServer>) {
 pub(crate) async fn herdr_cli(args: &[&str]) -> Result<String, McpError> {
     tracing::debug!("herdr {}", args.join(" "));
 
-    let binary = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
+    let binary = herdr_mcp_core::herdr_bin();
     let output = tokio::process::Command::new(binary)
         .args(args)
         .output()
@@ -3095,8 +3067,7 @@ use axum::{
 };
 use herdr_mcp_api::{
     AgentsResponse, AutoVariablesResponse, ConfigResponse, CreateRecipeRequest,
-    ExportScriptResponse, RecipeRequest, RecipeResponse, SaveVariableRequest, ToolsResponse,
-    UpdateRecipeRequest,
+    SaveVariableRequest, ToolsResponse, UpdateRecipeRequest,
 };
 use regex::Regex;
 use tower_http::services::{ServeDir, ServeFile};
@@ -3131,7 +3102,6 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path) -> Router {
         .route("/api/tools/{name}", post(call_tool_handler))
         .route("/api/agents", get(agents_handler))
         .route("/api/workspaces", get(workspaces_handler))
-        .route("/api/recipe", post(run_recipe_handler))
         .route(
             "/api/recipes",
             get(list_recipes_handler).post(create_recipe_handler),
@@ -3142,12 +3112,12 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path) -> Router {
                 .put(update_recipe_handler)
                 .delete(delete_recipe_handler),
         )
+        .route("/api/herdr/schema", get(herdr_schema_handler))
         .route("/api/templates", get(list_templates_handler))
         .route(
             "/api/templates/{id}/instantiate",
             post(instantiate_template_handler),
         )
-        .route("/api/recipes/{id}/run", post(run_recipe_by_id_handler))
         .route("/api/runs", get(list_runs_handler).post(start_run_handler))
         .route("/api/runs/{id}", get(get_run_handler))
         .route("/api/runs/{id}/events", get(run_events_handler))
@@ -3160,7 +3130,6 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path) -> Router {
                 .put(save_profile_handler)
                 .delete(delete_profile_handler),
         )
-        .route("/api/recipes/{id}/export", get(export_recipe_handler))
         .route(
             "/api/variables",
             get(list_variables_handler).post(save_variable_handler),
@@ -3174,7 +3143,6 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path) -> Router {
             "/api/variables/{key}",
             get(get_variable_handler).delete(delete_variable_handler),
         )
-        .route("/api/executions/{id}", get(get_execution_handler))
         .route("/api/trim/status", get(trim_status_http_handler))
         .route("/api/trim/diagnose", post(trim_diagnose_http_handler))
         .route("/api/trim/summary", post(trim_summary_http_handler))
@@ -3209,9 +3177,12 @@ async fn health_handler() -> &'static str {
 fn config_response(server: &HerdrMcpServer) -> ConfigResponse {
     ConfigResponse {
         data_dir: server.data_dir.display().to_string(),
-        herdr_socket: std::env::var("HERDR_SOCKET_PATH")
-            .unwrap_or_else(|_| "~/.config/herdr/herdr.sock".into()),
-        herdr_bin: std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".into()),
+        herdr_socket: server
+            .herdr_client
+            .get()
+            .map(|c| c.socket_path().display().to_string())
+            .unwrap_or_default(),
+        herdr_bin: herdr_mcp_core::herdr_bin(),
         clipboard: server.clipboard_config(),
         config_path: herdr_mcp_core::config_file_or_default()
             .display()
@@ -3447,13 +3418,6 @@ pub(crate) async fn dispatch_tool(
                 .await
                 .map_err(mcp_err_to_http)
         }
-        "start_agent" => {
-            let p: StartAgentParams = serde_json::from_value(body).map_err(bad_request)?;
-            server
-                .start_agent(Parameters(p))
-                .await
-                .map_err(mcp_err_to_http)
-        }
         "read_pane" => {
             let p: ReadPaneParams = serde_json::from_value(body).map_err(bad_request)?;
             server
@@ -3486,6 +3450,13 @@ pub(crate) async fn dispatch_tool(
             let p: RunCommandParams = serde_json::from_value(body).map_err(bad_request)?;
             server
                 .run_command(Parameters(p))
+                .await
+                .map_err(mcp_err_to_http)
+        }
+        "herdr_api" => {
+            let p: HerdrApiParams = serde_json::from_value(body).map_err(bad_request)?;
+            server
+                .herdr_api(Parameters(p))
                 .await
                 .map_err(mcp_err_to_http)
         }
@@ -3803,50 +3774,6 @@ fn start_error_to_http(e: crate::runs::StartError) -> (StatusCode, String) {
     }
 }
 
-/// Start a run and wait for it to finish (the synchronous recipe endpoints).
-async fn run_to_completion(
-    server: &HerdrMcpServer,
-    req: herdr_mcp_api::StartRunRequest,
-) -> Result<herdr_mcp_api::RunRecord, (StatusCode, String)> {
-    let (_, handle) = crate::runs::start_run(server, req)
-        .await
-        .map_err(start_error_to_http)?;
-    handle.await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("run task failed: {e}"),
-        )
-    })
-}
-
-/// `POST /api/recipe` — run ad-hoc steps and wait for the result.
-async fn run_recipe_handler(
-    State(AppState { server, .. }): State<AppState>,
-    Json(req): Json<RecipeRequest>,
-) -> Result<Json<RecipeResponse>, (StatusCode, String)> {
-    let run = run_to_completion(
-        &server,
-        herdr_mcp_api::StartRunRequest {
-            steps: Some(req.steps),
-            name: req.name,
-            session_id: req.session_id,
-            recipe_id: None,
-        },
-    )
-    .await?;
-    let status = match run.status {
-        herdr_mcp_api::RunStatus::Completed => "completed",
-        herdr_mcp_api::RunStatus::Cancelled => "cancelled",
-        _ => "failed",
-    };
-    Ok(Json(RecipeResponse {
-        results: run.results,
-        status: status.into(),
-        failed_step: run.failed_step,
-        error: run.error,
-    }))
-}
-
 pub(crate) fn resolve_variables(
     value: &mut serde_json::Value,
     results: &HashMap<String, serde_json::Value>,
@@ -3942,6 +3869,17 @@ fn json_value_to_string(v: &serde_json::Value) -> String {
 
 async fn list_templates_handler() -> Result<Json<Vec<tmpl::RecipeTemplate>>, (StatusCode, String)> {
     Ok(Json(tmpl::list_templates()))
+}
+
+/// `GET /api/herdr/schema` — the installed herdr's API schema
+/// (`herdr api schema --json`): every socket method and its params.
+async fn herdr_schema_handler() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let text = herdr_cli(&["api", "schema", "--json"])
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.message.to_string()))?;
+    serde_json::from_str(&text)
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("herdr api schema: {e}")))
 }
 
 /// `POST /api/templates/{id}/instantiate` — fill in a template (not saved).
@@ -4052,31 +3990,32 @@ async fn delete_recipe_handler(
         .ok_or((StatusCode::NOT_FOUND, "Recipe not found".into()))
 }
 
-/// `POST /api/recipes/{id}/run` — run a saved recipe and wait for the result.
-async fn run_recipe_by_id_handler(
-    State(AppState { server, .. }): State<AppState>,
-    Path(id): Path<uuid::Uuid>,
-) -> Result<Json<ExecutionResult>, (StatusCode, String)> {
-    let run = run_to_completion(
-        &server,
-        herdr_mcp_api::StartRunRequest {
-            recipe_id: Some(id),
-            ..Default::default()
-        },
-    )
-    .await?;
-    Ok(Json(crate::runs::to_execution(&run)))
+#[derive(Debug, Deserialize)]
+struct WaitQuery {
+    #[serde(default)]
+    wait: bool,
 }
 
-/// `POST /api/runs` — start a run in the background (202 + first record).
+/// `POST /api/runs` — start a run in the background (202 + first record);
+/// with `?wait=true`, wait for it to finish (200 + final record).
 async fn start_run_handler(
     State(AppState { server, .. }): State<AppState>,
+    Query(q): Query<WaitQuery>,
     Json(req): Json<herdr_mcp_api::StartRunRequest>,
 ) -> Result<(StatusCode, Json<herdr_mcp_api::RunRecord>), (StatusCode, String)> {
-    let (run, _) = crate::runs::start_run(&server, req)
+    let (run, done) = crate::runs::start_run(&server, req)
         .await
         .map_err(start_error_to_http)?;
-    Ok((StatusCode::ACCEPTED, Json(run)))
+    if !q.wait {
+        return Ok((StatusCode::ACCEPTED, Json(run)));
+    }
+    let run = done.await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("run task failed: {e}"),
+        )
+    })?;
+    Ok((StatusCode::OK, Json(run)))
 }
 
 /// `GET /api/runs` — every run, newest first.
@@ -4255,369 +4194,6 @@ async fn control_run_handler(
     ))
 }
 
-async fn export_recipe_handler(
-    State(AppState { server, .. }): State<AppState>,
-    Path(id): Path<uuid::Uuid>,
-) -> Result<Json<ExportScriptResponse>, (StatusCode, String)> {
-    let recipe = server
-        .persistence
-        .load_recipe(&id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Recipe not found".to_string()))?;
-
-    let mut lines = vec![
-        "#!/usr/bin/env bash".to_string(),
-        "set -euo pipefail".to_string(),
-        String::new(),
-        format!("# Recipe: {}", recipe.name),
-        String::new(),
-    ];
-
-    for step in &recipe.steps {
-        if let Some(desc) = &step.description {
-            lines.push(format!("# {desc}"));
-        }
-        let params = step.params.as_object().cloned().unwrap_or_default();
-        lines.push(step_to_shell(&step.tool, &params));
-        lines.push(String::new());
-    }
-
-    Ok(Json(ExportScriptResponse {
-        script: lines.join("\n"),
-    }))
-}
-
-fn step_to_shell(tool: &str, params: &serde_json::Map<String, serde_json::Value>) -> String {
-    let mut args: Vec<String> = Vec::new();
-
-    let push_str = |args: &mut Vec<String>, key: &str, val: &serde_json::Value| {
-        if let serde_json::Value::String(s) = val
-            && !s.is_empty()
-        {
-            args.push(format!("--{key}"));
-            args.push(shell_escape(s));
-        }
-    };
-
-    match tool {
-        "status" => "herdr status".into(),
-        "list_workspaces" => "herdr workspace list".into(),
-        "list_tabs" => {
-            let mut cmd = "herdr tab list".to_string();
-            if let Some(v) = params.get("workspace_id") {
-                push_str(&mut args, "workspace", v);
-            }
-            if !args.is_empty() {
-                cmd.push(' ');
-                cmd.push_str(&args.join(" "));
-            }
-            cmd
-        }
-        "list_panes" => {
-            let mut cmd = "herdr pane list".to_string();
-            if let Some(v) = params.get("workspace_id") {
-                push_str(&mut args, "workspace", v);
-            }
-            if !args.is_empty() {
-                cmd.push(' ');
-                cmd.push_str(&args.join(" "));
-            }
-            cmd
-        }
-        "list_agents" => "herdr agent list".into(),
-        "get_pane" => {
-            let pid = params
-                .get("pane_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<pane_id>");
-            format!("herdr pane get {pid}")
-        }
-        "get_agent" => {
-            let target = params
-                .get("target")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<target>");
-            format!("herdr agent get {target}")
-        }
-        "create_workspace" => {
-            let mut cmd = "herdr workspace create".to_string();
-            if let Some(v) = params.get("cwd") {
-                push_str(&mut args, "cwd", v);
-            }
-            if let Some(v) = params.get("label") {
-                push_str(&mut args, "label", v);
-            }
-            if params
-                .get("no_focus")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                args.push("--no-focus".into());
-            }
-            if !args.is_empty() {
-                cmd.push(' ');
-                cmd.push_str(&args.join(" "));
-            }
-            cmd
-        }
-        "create_tab" => {
-            let mut cmd = "herdr tab create".to_string();
-            if let Some(v) = params.get("workspace_id") {
-                push_str(&mut args, "workspace", v);
-            }
-            if let Some(v) = params.get("label") {
-                push_str(&mut args, "label", v);
-            }
-            if let Some(v) = params.get("cwd") {
-                push_str(&mut args, "cwd", v);
-            }
-            if !args.is_empty() {
-                cmd.push(' ');
-                cmd.push_str(&args.join(" "));
-            }
-            cmd
-        }
-        "split_pane" => {
-            let pid = params
-                .get("pane_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<pane_id>");
-            let mut cmd = format!("herdr pane split {pid}");
-            if let Some(v) = params.get("direction") {
-                push_str(&mut args, "direction", v);
-            }
-            if let Some(v) = params.get("cwd") {
-                push_str(&mut args, "cwd", v);
-            }
-            if params
-                .get("no_focus")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                args.push("--no-focus".into());
-            }
-            if !args.is_empty() {
-                cmd.push(' ');
-                cmd.push_str(&args.join(" "));
-            }
-            cmd
-        }
-        "close_pane" => {
-            let pid = params
-                .get("pane_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<pane_id>");
-            format!("herdr pane close {pid}")
-        }
-        "start_agent" => {
-            let mut cmd = "herdr agent start".to_string();
-            if let Some(v) = params.get("cwd") {
-                push_str(&mut args, "cwd", v);
-            }
-            if let Some(v) = params.get("workspace_id") {
-                push_str(&mut args, "workspace", v);
-            }
-            if let Some(v) = params.get("tab_id") {
-                push_str(&mut args, "tab", v);
-            }
-            if let Some(v) = params.get("split") {
-                push_str(&mut args, "split", v);
-            }
-            if let Some(name) = params.get("name").and_then(|v| v.as_str()) {
-                if !args.is_empty() {
-                    cmd.push(' ');
-                    cmd.push_str(&args.join(" "));
-                }
-                cmd.push_str(" -- ");
-                cmd.push_str(name);
-                if let Some(rest) = params.get("args").and_then(|v| v.as_array()) {
-                    for a in rest {
-                        if let serde_json::Value::String(s) = a {
-                            cmd.push(' ');
-                            cmd.push_str(s);
-                        }
-                    }
-                }
-            } else {
-                if !args.is_empty() {
-                    cmd.push(' ');
-                    cmd.push_str(&args.join(" "));
-                }
-            }
-            cmd
-        }
-        "read_pane" => {
-            let pid = params
-                .get("pane_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<pane_id>");
-            let mut cmd = format!("herdr pane read {pid}");
-            if let Some(v) = params.get("source") {
-                push_str(&mut args, "source", v);
-            }
-            if let Some(v) = params.get("lines")
-                && let Some(n) = v.as_u64()
-            {
-                args.push("--lines".into());
-                args.push(n.to_string());
-            }
-            if !args.is_empty() {
-                cmd.push(' ');
-                cmd.push_str(&args.join(" "));
-            }
-            cmd
-        }
-        "read_agent" => {
-            let target = params
-                .get("target")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<target>");
-            let mut cmd = format!("herdr agent read {target}");
-            if let Some(v) = params.get("source") {
-                push_str(&mut args, "source", v);
-            }
-            if let Some(v) = params.get("lines")
-                && let Some(n) = v.as_u64()
-            {
-                args.push("--lines".into());
-                args.push(n.to_string());
-            }
-            if !args.is_empty() {
-                cmd.push(' ');
-                cmd.push_str(&args.join(" "));
-            }
-            cmd
-        }
-        "send_text" => {
-            let pid = params
-                .get("pane_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<pane_id>");
-            let text = params
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<text>");
-            format!("herdr pane send-text {pid} {text}")
-        }
-        "send_keys" => {
-            let pid = params
-                .get("pane_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<pane_id>");
-            let mut cmd = format!("herdr pane send-keys {pid}");
-            if let Some(keys) = params.get("keys").and_then(|v| v.as_array()) {
-                for k in keys {
-                    if let serde_json::Value::String(s) = k {
-                        cmd.push(' ');
-                        cmd.push_str(&shell_escape(s));
-                    }
-                }
-            }
-            cmd
-        }
-        "run_command" => {
-            let pid = params
-                .get("pane_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<pane_id>");
-            let command = params
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<command>");
-            format!("herdr pane run {pid} {command}")
-        }
-        "send_agent" => {
-            let target = params
-                .get("target")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<target>");
-            let text = params
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<text>");
-            format!("herdr agent send {target} {text}")
-        }
-        "wait_output" => {
-            let pid = params
-                .get("pane_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<pane_id>");
-            let text = params
-                .get("match_text")
-                .and_then(|v| v.as_str())
-                .unwrap_or(".");
-            let mut cmd = format!("herdr wait output {pid} --match {text}");
-            if let Some(v) = params.get("timeout_ms")
-                && let Some(n) = v.as_u64()
-            {
-                args.push("--timeout".into());
-                args.push(n.to_string());
-            }
-            if let Some(v) = params.get("source") {
-                push_str(&mut args, "source", v);
-            }
-            if params
-                .get("use_regex")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                args.push("--regex".into());
-            }
-            if !args.is_empty() {
-                cmd.push(' ');
-                cmd.push_str(&args.join(" "));
-            }
-            cmd
-        }
-        "wait_pane_agent_status" => {
-            let pid = params
-                .get("pane_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<pane_id>");
-            let status = params
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<status>");
-            let mut cmd = format!("herdr wait agent-status {pid} --status {status}");
-            if let Some(v) = params.get("timeout_ms")
-                && let Some(n) = v.as_u64()
-            {
-                args.push("--timeout".into());
-                args.push(n.to_string());
-            }
-            if !args.is_empty() {
-                cmd.push(' ');
-                cmd.push_str(&args.join(" "));
-            }
-            cmd
-        }
-        "wait_agent_status" => {
-            let target = params
-                .get("target")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<target>");
-            let status = params
-                .get("status")
-                .and_then(|v| v.as_str())
-                .unwrap_or("<status>");
-            let mut cmd = format!("herdr agent wait {target} --status {status}");
-            if let Some(v) = params.get("timeout_ms")
-                && let Some(n) = v.as_u64()
-            {
-                args.push("--timeout".into());
-                args.push(n.to_string());
-            }
-            if !args.is_empty() {
-                cmd.push(' ');
-                cmd.push_str(&args.join(" "));
-            }
-            cmd
-        }
-        other => format!("echo 'TODO: {other} (no CLI equivalent)'"),
-    }
-}
-
 // ── Variables API ──────────────────────────────────────────────────────
 
 /// Flexible save body: the playground sends `{key, value}` while MCP clients
@@ -4770,34 +4346,10 @@ async fn delete_variable_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
-// ── Executions API ────────────────────────────────────────────────────
-
-async fn get_execution_handler(
-    State(AppState { server, .. }): State<AppState>,
-    Path(id): Path<uuid::Uuid>,
-) -> Result<Json<ExecutionResult>, (StatusCode, String)> {
-    let legacy = server
-        .persistence
-        .load_execution(&id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    if let Some(execution) = legacy {
-        return Ok(Json(execution));
-    }
-    // Runs are recorded once, as run records; serve them in this shape too.
-    match load_run(&server, id).await {
-        Ok(run) => Ok(Json(crate::runs::to_execution(&run))),
-        Err((StatusCode::NOT_FOUND, _)) => {
-            Err((StatusCode::NOT_FOUND, "Execution not found".into()))
-        }
-        Err(e) => Err(e),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::variables::{ExecutionStatus, RecipeStep};
+    use crate::variables::RecipeStep;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
 
@@ -5592,10 +5144,6 @@ mod tests {
                 .iter()
                 .any(|r| r.id == run.id)
         );
-        assert_eq!(
-            api.get_execution(run.id).await.unwrap().status,
-            ExecutionStatus::Completed
-        );
         assert!(matches!(
             api.control_run(run.id, herdr_mcp_api::RunAction::Cancel)
                 .await,
@@ -5633,20 +5181,22 @@ mod tests {
             Err(ApiError::Status { status: 404, .. })
         ));
 
-        let adhoc = api
-            .run_recipe(&RecipeRequest {
-                steps: vec![step("only")],
+        // ?wait=true returns the finished run.
+        let waited = api
+            .run_and_wait(&herdr_mcp_api::StartRunRequest {
+                steps: Some(vec![step("only")]),
                 ..Default::default()
             })
             .await
             .unwrap();
-        assert_eq!(adhoc.status, "completed");
+        assert_eq!(waited.status, herdr_mcp_api::RunStatus::Completed);
+        assert_eq!(waited.results.len(), 1);
         assert!(matches!(
             api.get_variable("greeting").await,
             Err(ApiError::Status { status: 404, .. })
         ));
 
-        // Recipes CRUD + export.
+        // Recipes CRUD.
         let created = api
             .create_recipe(&CreateRecipeRequest {
                 name: "r1".into(),
@@ -5674,12 +5224,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(updated.name, "r2");
-        assert!(
-            api.export_recipe(created.id)
-                .await
-                .unwrap()
-                .contains("# Recipe: r2")
-        );
         assert_eq!(api.list_recipes().await.unwrap().len(), 1);
         api.delete_recipe(created.id).await.unwrap();
         assert!(api.list_recipes().await.unwrap().is_empty());

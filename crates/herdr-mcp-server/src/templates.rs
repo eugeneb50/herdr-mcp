@@ -69,7 +69,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
             category: "agents".to_string(),
             variables: vec![TemplateVariable {
                 name: "agent".to_string(),
-                description: "Agent name (e.g., claude, gpt-4)".to_string(),
+                description: "Agent profile or herdr agent kind (e.g. claude, codex, hermes); also its label".to_string(),
                 default_value: None,
                 required: true,
             }],
@@ -84,12 +84,12 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 },
                 RecipeStep {
                     id: "start".to_string(),
-                    tool: "start_agent".to_string(),
+                    tool: "agent_spawn".to_string(),
                     params: serde_json::json!({
-                        "name": "{{ template.agent }}",
-                        "args": []
+                        "role": "{{ template.agent }}",
+                        "agent": "{{ template.agent }}"
                     }),
-                    description: Some("Start fresh agent".to_string()),
+                    description: Some("Start a fresh agent (profile or herdr agent kind)".to_string()),
                 },
             ],
         },
@@ -625,7 +625,7 @@ mod tests {
         let start = recipe
             .steps
             .iter()
-            .find(|s| s.tool == "start_agent")
+            .find(|s| s.tool == "agent_spawn")
             .unwrap();
         assert!(start.params.to_string().contains("claude"));
     }
@@ -636,7 +636,7 @@ mod tests {
         vars.insert("agent".to_string(), serde_json::json!("gpt"));
         let recipe = instantiate("restart-agent", vars, None).expect("should instantiate");
         assert!(recipe.steps.iter().any(|s| s.tool == "close_pane"));
-        assert!(recipe.steps.iter().any(|s| s.tool == "start_agent"));
+        assert!(recipe.steps.iter().any(|s| s.tool == "agent_spawn"));
     }
 
     #[test]

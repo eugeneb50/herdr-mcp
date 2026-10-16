@@ -113,6 +113,30 @@ pub struct Config {
 /// Defined in `herdr-mcp-api` (it is also the `/api/config` wire type).
 pub use herdr_mcp_api::ClipboardConfig;
 
+/// The herdr binary to run: `HERDR_BIN`, else `HERDR_BIN_PATH` (herdr sets
+/// it inside its panes), else `herdr` on `PATH`.
+pub fn herdr_bin() -> String {
+    env::var("HERDR_BIN")
+        .or_else(|_| env::var("HERDR_BIN_PATH"))
+        .unwrap_or_else(|_| "herdr".to_string())
+}
+
+impl Config {
+    /// Make every `herdr` child process talk to the server this config
+    /// resolved (inside a herdr pane: that pane's session; outside: the
+    /// configured / `HERDR_SESSION` / default socket), so CLI calls and the
+    /// socket client never disagree. Exported as `HERDR_SOCKET_PATH`, which
+    /// herdr's own CLI honours.
+    ///
+    /// # Safety
+    /// Mutates the process environment: call before any other thread runs
+    /// (before the async runtime starts).
+    pub unsafe fn export_herdr_socket(&self) {
+        // SAFETY: the caller guarantees no other thread reads the environment.
+        unsafe { env::set_var("HERDR_SOCKET_PATH", self.herdr_socket_path()) };
+    }
+}
+
 /// `~/x` → `$HOME/x`; any other path unchanged.
 fn expand_home(path: &std::path::Path) -> PathBuf {
     match (path.strip_prefix("~"), env::var_os("HOME")) {
@@ -142,7 +166,6 @@ impl Default for Config {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]

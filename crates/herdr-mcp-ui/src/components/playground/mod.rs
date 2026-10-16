@@ -1,11 +1,13 @@
 //! Playground: tool runner + recipe builder tabs. Port of `Playground`.
 
 pub mod forms;
+pub mod herdr_api;
 pub mod recipes;
 pub mod runner;
 
 use dioxus::prelude::*;
 
+use herdr_api::HerdrApi;
 use recipes::{RecipeBuilder, RecipeLibrary, Step};
 use runner::ToolRunner;
 
@@ -33,6 +35,11 @@ pub fn Playground() -> Element {
                 "Tool Runner"
             }
             button {
+                class: if *tab.read() == "herdr" { "tab tab-active" } else { "tab" },
+                onclick: move |_| tab.set("herdr"),
+                "herdr API"
+            }
+            button {
                 class: if *tab.read() == "builder" { "tab tab-active" } else { "tab" },
                 onclick: move |_| tab.set("builder"),
                 "Recipe Builder"
@@ -40,6 +47,8 @@ pub fn Playground() -> Element {
         }
         if *tab.read() == "runner" {
             ToolRunner {}
+        } else if *tab.read() == "herdr" {
+            HerdrApi {}
         } else {
             div { class: "builder-grid",
                 div {

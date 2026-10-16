@@ -276,11 +276,6 @@ impl ApiClient {
 
     // ── recipes ────────────────────────────────────────────────────────
 
-    /// `POST /api/recipe` — run an ad-hoc recipe.
-    pub async fn run_recipe(&self, req: &RecipeRequest) -> Result<RecipeResponse, ApiError> {
-        self.post(&["api", "recipe"], req).await
-    }
-
     /// `GET /api/recipes`.
     pub async fn list_recipes(&self) -> Result<Vec<Recipe>, ApiError> {
         self.get(&["api", "recipes"]).await
@@ -315,25 +310,14 @@ impl ApiClient {
             .await
     }
 
-    /// `POST /api/recipes/{id}/run`.
-    pub async fn run_recipe_by_id(&self, id: Uuid) -> Result<ExecutionResult, ApiError> {
-        self.post(
-            &["api", "recipes", &id.to_string(), "run"],
-            &serde_json::json!({}),
-        )
-        .await
-    }
-
-    /// `GET /api/recipes/{id}/export` — bash script equivalent.
-    pub async fn export_recipe(&self, id: Uuid) -> Result<String, ApiError> {
-        self.get::<ExportScriptResponse>(&["api", "recipes", &id.to_string(), "export"])
-            .await
-            .map(|r| r.script)
-    }
-
     /// `GET /api/templates` — bundled recipe templates.
     pub async fn list_templates(&self) -> Result<Vec<RecipeTemplate>, ApiError> {
         self.get(&["api", "templates"]).await
+    }
+
+    /// `GET /api/herdr/schema` — the installed herdr's socket API schema.
+    pub async fn herdr_schema(&self) -> Result<Value, ApiError> {
+        self.get(&["api", "herdr", "schema"]).await
     }
 
     /// `POST /api/templates/{id}/instantiate` — the template with its
@@ -345,11 +329,6 @@ impl ApiClient {
     ) -> Result<Recipe, ApiError> {
         self.post(&["api", "templates", id, "instantiate"], req)
             .await
-    }
-
-    /// `GET /api/executions/{id}`.
-    pub async fn get_execution(&self, id: Uuid) -> Result<ExecutionResult, ApiError> {
-        self.get(&["api", "executions", &id.to_string()]).await
     }
 
     // ── agent profiles ─────────────────────────────────────────────────
@@ -384,6 +363,16 @@ impl ApiClient {
     /// `POST /api/runs` — start a run in the background; returns its first record.
     pub async fn start_run(&self, req: &StartRunRequest) -> Result<RunRecord, ApiError> {
         self.post(&["api", "runs"], req).await
+    }
+
+    /// `POST /api/runs?wait=true` — run and wait for the final record.
+    pub async fn run_and_wait(&self, req: &StartRunRequest) -> Result<RunRecord, ApiError> {
+        Self::json(
+            self.request(Method::POST, &["api", "runs"])
+                .query(&[("wait", "true")])
+                .json(req),
+        )
+        .await
     }
 
     /// `GET /api/runs` — every run, newest first.
@@ -526,6 +515,20 @@ pub fn tool_text(v: &Value) -> String {
         return texts.join("\n");
     }
     v.as_str().map(str::to_string).unwrap_or_default()
+}
+
+/// A property's JSON type. Optional fields are `["integer", "null"]` in the
+/// schemas rmcp/schemars generate; the non-null member is the type.
+pub fn schema_type(prop: &Value) -> &str {
+    match prop.get("type") {
+        Some(Value::String(t)) => t,
+        Some(Value::Array(ts)) => ts
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|t| *t != "null")
+            .unwrap_or("string"),
+        _ => "string",
+    }
 }
 
 /// The JSON a tool returned as text (its first text content parsed), if any.

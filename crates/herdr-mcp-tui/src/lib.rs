@@ -10,10 +10,9 @@
 //! shared `herdr_mcp_api::ApiClient` (see `http`). It also reads herdr workspace/pane context via the `herdr`
 //! CLI for the sidecar header.
 //!
-//! Entry point: [`run`]. The older trim-only ANSI dashboard is [`legacy::run`].
+//! Entry point: [`run`].
 
 pub mod http;
-pub mod legacy;
 pub mod nav;
 pub mod tabs;
 pub mod theme;
@@ -471,7 +470,6 @@ pub enum EditField {
 pub struct SettingsState {
     pub http_port: u16,
     pub data_dir: String,
-    pub herdr_socket: String,
     pub selected: usize,
     /// Clipboard backend configuration.
     pub clipboard: ClipboardSettingsState,
@@ -680,10 +678,6 @@ impl App {
             settings: SettingsState {
                 http_port,
                 data_dir,
-                herdr_socket: std::env::var("HERDR_SOCKET_PATH").unwrap_or_else(|_| {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                    format!("{home}/.config/herdr/herdr.sock")
-                }),
                 selected: 0,
                 clipboard: ClipboardSettingsState {
                     preset_index: 0,
@@ -977,8 +971,15 @@ impl App {
                     self.log_debug(msg);
                 }
             }
-            // 3. Diagnostic fallback — ask herdr directly.
-            if let Ok(raw) = herdr_cli(&["pane", "list"]).await
+            // 3. Fallback — herdr's own pane list, through the bridge.
+            let listed = match &self.http {
+                Some(http) => http
+                    .call_tool("list_panes", &serde_json::json!({}))
+                    .await
+                    .ok(),
+                None => None,
+            };
+            if let Some(raw) = listed.map(|r| herdr_mcp_api::tool_text(&r))
                 && let Ok(v) = serde_json::from_str::<Value>(&raw)
             {
                 self.herdr.pane_id = v
@@ -1166,7 +1167,7 @@ impl App {
                 match row {
                     0 => Some(self.settings.http_port.to_string()),
                     1 => Some(self.settings.data_dir.clone()),
-                    2 => Some(self.settings.herdr_socket.clone()),
+                    2 => self.config.as_ref().map(|c| c.herdr_socket.clone()),
                     _ => None,
                 }
             }
@@ -1350,7 +1351,11 @@ impl App {
     }
 
     async fn paste_to_pane(&mut self) {
-        let text = match self.http.clone() {
+        let Some(http) = self.http.clone() else {
+            self.status_msg = "bridge not connected".into();
+            return;
+        };
+        let text = match Some(http.clone()) {
             Some(http) => match http.clipboard_get().await {
                 Ok(t) => t,
                 Err(e) => {
@@ -1370,7 +1375,8 @@ impl App {
                 return;
             }
         };
-        match herdr_cli(&["pane", "send-text", &pane_id, &text]).await {
+        let params = serde_json::json!({ "pane_id": pane_id, "text": text });
+        match http.call_tool("send_text", &params).await {
             Ok(_) => self.status_msg = format!("sent {} chars to pane {pane_id}", text.len()),
             Err(e) => self.status_msg = format!("send-text failed: {e}"),
         }
@@ -2033,7 +2039,7 @@ pub fn parse_tool_schema(tool: &Value) -> Vec<ToolField> {
 
     let mut fields = Vec::new();
     for (name, spec) in props {
-        let typ = spec.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let typ = herdr_mcp_api::schema_type(spec);
         let enum_variants = spec.get("enum").and_then(|e| e.as_array()).map(|a| {
             a.iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
@@ -2087,21 +2093,6 @@ fn parse_variables(vars: &[VariableStore]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Best-effort synchronous herdr CLI invocation shared by the sidecar refresh.
-async fn herdr_cli(args: &[&str]) -> Result<String> {
-    use tokio::process::Command;
-    let bin = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
-    let out = Command::new(&bin)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("running {bin} {}", args.join(" ")))?;
-    if !out.status.success() {
-        anyhow::bail!("herdr {} failed", args.join(" "));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
 /// Truncate a string to `max` display cells (char count, not grapheme width).
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -2129,7 +2120,7 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "workspace_id": { "type": "string", "title": "Workspace", "description": "ws id" },
-                    "limit": { "type": "integer", "default": 20 },
+                    "limit": { "type": ["integer", "null"], "default": 20 },
                     "enabled": { "type": "boolean", "default": true },
                     "mode": { "type": "string", "enum": ["fast", "slow"] }
                 },

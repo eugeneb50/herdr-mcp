@@ -48,8 +48,7 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
     common::init_tracing()?;
     config_tools_note(&args)?;
@@ -86,11 +85,9 @@ async fn main() -> Result<()> {
     };
 
     let config = Config::load(cli_overrides)?;
-
-    match args.command {
-        None => common::run_serve(&config).await,
-        Some(Command::Serve { .. }) => common::run_serve(&config).await,
-    }
+    // SAFETY: single-threaded here; the runtime starts below.
+    unsafe { config.export_herdr_socket() };
+    tokio::runtime::Runtime::new()?.block_on(common::run_serve(&config))
 }
 
 /// Forward-compat stub: `--tools` is accepted and validated, gating follows.

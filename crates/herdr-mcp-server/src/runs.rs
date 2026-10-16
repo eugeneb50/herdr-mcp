@@ -23,7 +23,6 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::server::{HerdrMcpServer, dispatch_tool, resolve_variables};
-use crate::variables::{ExecutionResult, ExecutionStatus};
 
 /// The immutable start of a run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -498,26 +497,6 @@ async fn cancelled(ctl: &mut watch::Receiver<Control>) {
     }
 }
 
-/// A run in the legacy `ExecutionResult` shape (`POST /api/recipes/{id}/run`,
-/// `GET /api/executions/{id}`).
-pub fn to_execution(run: &RunRecord) -> ExecutionResult {
-    ExecutionResult {
-        id: run.id,
-        recipe_id: run.recipe_id.unwrap_or_else(Uuid::nil),
-        started_at: run.started_at,
-        completed_at: run.finished_at,
-        status: match run.status {
-            RunStatus::Running | RunStatus::Paused => ExecutionStatus::Running,
-            RunStatus::Completed => ExecutionStatus::Completed,
-            RunStatus::Failed | RunStatus::Interrupted => ExecutionStatus::Failed,
-            RunStatus::Cancelled => ExecutionStatus::Cancelled,
-        },
-        results: run.results.clone(),
-        variables: run.variables.clone(),
-        error: run.error.clone(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,7 +619,6 @@ mod tests {
         assert_eq!(done.status, RunStatus::Failed);
         assert_eq!(done.failed_step.as_deref(), Some("bad"));
         assert!(done.results.contains_key("ok") && !done.results.contains_key("never"));
-        assert_eq!(to_execution(&done).status, ExecutionStatus::Failed);
     }
 
     #[tokio::test]

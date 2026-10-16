@@ -8,7 +8,8 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 use herdr_mcp_api::{
-    CreateRecipeRequest, Recipe, RecipeRequest, RecipeTemplate, UpdateRecipeRequest,
+    CreateRecipeRequest, Recipe, RecipeTemplate, RunRecord, RunStatus, StartRunRequest,
+    UpdateRecipeRequest,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -41,18 +42,19 @@ fn tool_category_map() -> Vec<(&'static str, Vec<&'static str>)> {
         ),
         (
             "Lifecycle",
-            vec![
-                "create_workspace",
-                "create_tab",
-                "split_pane",
-                "close_pane",
-                "start_agent",
-            ],
+            vec!["create_workspace", "create_tab", "split_pane", "close_pane"],
         ),
         ("Read", vec!["read_pane", "read_agent"]),
         (
             "Write",
-            vec!["send_text", "send_keys", "run_command", "send_agent"],
+            vec![
+                "send_text",
+                "send_keys",
+                "run_command",
+                "pane_exec",
+                "send_agent",
+                "herdr_api",
+            ],
         ),
         (
             "Synchronize",
@@ -924,18 +926,11 @@ async fn handle_builder_global(app: &mut App, code: KeyCode, mods: KeyModifiers)
                 if let Some(http) = app.http.clone() {
                     app.playground.builder_loading = true;
                     app.status_msg = "running recipe…".into();
-                    match http.run_recipe_by_id(id).await {
-                        Ok(v) => {
-                            app.playground.builder_result = serde_json::to_value(v).ok();
-                            app.playground.builder_error = None;
-                            app.status_msg = "recipe run ok".into();
-                        }
-                        Err(e) => {
-                            app.playground.builder_error = Some(e.to_string());
-                            app.status_msg = format!("run failed: {e}");
-                        }
-                    }
-                    app.playground.builder_loading = false;
+                    let req = StartRunRequest {
+                        recipe_id: Some(id),
+                        ..Default::default()
+                    };
+                    show_run(app, http.run_and_wait(&req).await);
                 }
             } else {
                 app.playground.builder_error =
@@ -1085,32 +1080,36 @@ async fn builder_run_inline(app: &mut App) {
         return;
     }
 
-    let req = RecipeRequest {
+    let req = StartRunRequest {
         name: Some(app.playground.builder_recipe_name.clone()),
-        session_id: None,
-        steps: app
-            .playground
-            .builder_steps
-            .iter()
-            .map(RecipeStep::to_api)
-            .collect(),
+        steps: Some(
+            app.playground
+                .builder_steps
+                .iter()
+                .map(RecipeStep::to_api)
+                .collect(),
+        ),
+        ..Default::default()
     };
-
     app.playground.builder_loading = true;
     app.status_msg = "running recipe…".into();
-    match http.run_recipe(&req).await {
-        Ok(resp) => {
-            // The server reports "completed" or "failed".
-            let failed = resp.status != "completed";
-            let err = resp.error.clone();
-            app.playground.builder_result = serde_json::to_value(&resp).ok();
-            if failed {
-                let err = err.unwrap_or_else(|| format!("status {}", resp.status));
-                app.playground.builder_error = Some(err.clone());
-                app.status_msg = format!("recipe failed: {err}");
-            } else {
+    show_run(app, http.run_and_wait(&req).await);
+}
+
+/// Put a finished run (or the request error) in the builder's result pane.
+fn show_run(app: &mut App, run: Result<RunRecord, herdr_mcp_api::ApiError>) {
+    match run {
+        Ok(run) => {
+            app.playground.builder_result = serde_json::to_value(&run).ok();
+            if run.status == RunStatus::Completed {
                 app.playground.builder_error = None;
                 app.status_msg = "recipe run ok".into();
+            } else {
+                let err = run
+                    .error
+                    .unwrap_or_else(|| format!("status {:?}", run.status));
+                app.playground.builder_error = Some(err.clone());
+                app.status_msg = format!("recipe {:?}: {err}", run.status);
             }
         }
         Err(e) => {

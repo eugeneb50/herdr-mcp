@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-pub use herdr_mcp_api::{ExecutionResult, ExecutionStatus, Recipe, RecipeStep};
+pub use herdr_mcp_api::{Recipe, RecipeStep};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScheduledRecipe {

@@ -470,7 +470,12 @@ fn render_runtime(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let herdr_bin = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
+    // What the server actually uses (GET /api/config).
+    let (herdr_socket, herdr_bin) = app
+        .config
+        .as_ref()
+        .map(|c| (c.herdr_socket.clone(), c.herdr_bin.clone()))
+        .unwrap_or_default();
     let lines = vec![
         row(
             app.settings.selected == 0,
@@ -485,9 +490,9 @@ fn render_runtime(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         row(
             app.settings.selected == 2,
             "herdr socket".into(),
-            truncate(&app.settings.herdr_socket, 40),
+            truncate(&herdr_socket, 40),
         ),
-        row(app.settings.selected == 3, "HERDR_BIN".into(), herdr_bin),
+        row(app.settings.selected == 3, "herdr binary".into(), herdr_bin),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

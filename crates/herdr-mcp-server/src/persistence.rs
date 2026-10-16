@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::variables::{ExecutionResult, Recipe, ScheduledRecipe};
+use crate::variables::{Recipe, ScheduledRecipe};
 
 pub use crate::runs::RunHeader;
 pub use herdr_mcp_api::{PlaygroundSnapshot, RunEvent, VariableStore};
@@ -50,7 +50,6 @@ impl Persistence {
 
     pub async fn init(&self) -> anyhow::Result<()> {
         fs::create_dir_all(self.data_dir.join("recipes")).await?;
-        fs::create_dir_all(self.data_dir.join("executions")).await?;
         fs::create_dir_all(self.data_dir.join("variables")).await?;
         fs::create_dir_all(self.data_dir.join("schedules")).await?;
         fs::create_dir_all(self.data_dir.join("sessions")).await?;
@@ -353,33 +352,6 @@ impl Persistence {
         Ok(ids)
     }
 
-    pub async fn save_execution(&self, result: &ExecutionResult) -> anyhow::Result<()> {
-        let path = self
-            .data_dir
-            .join("executions")
-            .join(format!("{}.json", result.id));
-        fs::create_dir_all(self.data_dir.join("executions")).await?;
-        let json = serde_json::to_string_pretty(result)?;
-        fs::write(path, json).await?;
-        Ok(())
-    }
-
-    pub async fn load_execution(&self, id: &Uuid) -> anyhow::Result<Option<ExecutionResult>> {
-        let path = self
-            .data_dir
-            .join("executions")
-            .join(format!("{}.json", id));
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(None);
-        }
-        let content = fs::read_to_string(path).await?;
-        if content.trim().is_empty() {
-            return Ok(None);
-        }
-        let result: ExecutionResult = serde_json::from_str(&content)?;
-        Ok(Some(result))
-    }
-
     pub async fn save_schedule(&self, schedule: &ScheduledRecipe) -> anyhow::Result<()> {
         let path = self
             .data_dir
@@ -431,7 +403,7 @@ impl Persistence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::variables::{ExecutionStatus, RecipeStep};
+    use crate::variables::RecipeStep;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
     use uuid::Uuid;
@@ -461,7 +433,6 @@ mod tests {
         let p = Persistence::new(tmp.path().to_path_buf());
         p.init().await.unwrap();
         assert!(tmp.path().join("recipes").exists());
-        assert!(tmp.path().join("executions").exists());
         assert!(tmp.path().join("variables").exists());
         assert!(tmp.path().join("schedules").exists());
         assert!(tmp.path().join("sessions").exists());
@@ -583,26 +554,6 @@ mod tests {
                 .await
                 .is_err()
         );
-    }
-
-    #[tokio::test]
-    async fn test_save_load_execution() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = Persistence::new(tmp.path().to_path_buf());
-        let result = ExecutionResult {
-            id: Uuid::new_v4(),
-            recipe_id: Uuid::new_v4(),
-            started_at: chrono::Utc::now(),
-            completed_at: Some(chrono::Utc::now()),
-            status: ExecutionStatus::Completed,
-            results: HashMap::new(),
-            variables: HashMap::new(),
-            error: None,
-        };
-        p.save_execution(&result).await.unwrap();
-        let loaded = p.load_execution(&result.id).await.unwrap().unwrap();
-        assert_eq!(loaded.id, result.id);
-        assert_eq!(loaded.status, ExecutionStatus::Completed);
     }
 
     #[tokio::test]

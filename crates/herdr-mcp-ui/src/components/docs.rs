@@ -17,7 +17,7 @@ pub fn Docs() -> Element {
             ul { class: "doc-list",
                 li { code { "GET /api/agents" } " — live registry pane list" }
                 li { code { "POST /api/tools/:name" } " — invoke any MCP tool" }
-                li { code { "POST /api/recipe" } " — run a multi-step recipe" }
+                li { code { "POST /api/runs?wait=true" } " — run a recipe (saved or ad-hoc steps) and get the result" }
                 li { code { "GET /api/variables/auto" } " — auto-populated pane variables" }
                 li { code { "GET /api/trim/status" } " — aggregate trim savings" }
             }

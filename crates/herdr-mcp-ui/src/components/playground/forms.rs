@@ -6,19 +6,7 @@ use dioxus::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// A property's JSON type. Optional fields are `["integer", "null"]` in the
-/// schemas rmcp/schemars generate; the non-null member is the type.
-pub fn schema_type(prop: &Value) -> &str {
-    match prop.get("type") {
-        Some(Value::String(t)) => t,
-        Some(Value::Array(ts)) => ts
-            .iter()
-            .filter_map(Value::as_str)
-            .find(|t| *t != "null")
-            .unwrap_or("string"),
-        _ => "string",
-    }
-}
+use herdr_mcp_api::schema_type;
 
 /// Tool arguments from raw form values: each `resolve`d (variable
 /// substitution) and converted per its schema type. Blank fields are left
@@ -90,6 +78,11 @@ pub fn DynamicForm(
                     let values = values.clone();
                     let prop = properties.get(&key).cloned().unwrap_or(Value::Null);
                     let ptype = schema_type(&prop);
+                    let choices: Vec<String> = prop
+                        .get("enum")
+                        .and_then(Value::as_array)
+                        .map(|e| e.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                        .unwrap_or_default();
                     let desc = prop.get("description").and_then(|d| d.as_str()).unwrap_or("");
                     let is_required = required.contains(&key);
                     let val = values.get(&key).cloned().unwrap_or_default();
@@ -107,7 +100,25 @@ pub fn DynamicForm(
                             if !desc.is_empty() {
                                 p { class: "field-desc", "{desc}" }
                             }
-                            if ptype == "boolean" {
+                            if !choices.is_empty() {
+                                select {
+                                    class: "input",
+                                    onchange: {
+                                        let key = key.clone();
+                                        move |e: Event<FormData>| {
+                                            let mut next = values.clone();
+                                            next.insert(key.clone(), e.value());
+                                            on_change.call(next);
+                                        }
+                                    },
+                                    option { value: "", selected: val.is_empty(),
+                                        if is_required { "— choose —" } else { "(default)" }
+                                    }
+                                    for c in choices {
+                                        option { value: "{c}", selected: val == c, "{c}" }
+                                    }
+                                }
+                            } else if ptype == "boolean" {
                                 label { class: "check-row",
                                     input {
                                         r#type: "checkbox",
