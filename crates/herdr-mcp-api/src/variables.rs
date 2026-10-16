@@ -33,8 +33,9 @@ pub struct SaveVariableRequest {
     pub execution_id: Option<String>,
 }
 
-/// `GET /api/variables/auto` response: registry-seeded + session variables
-/// for one workspace, resolved on request.
+/// `GET /api/variables/auto` response: live panes, registry agents and (for
+/// a workspace) its session variables, resolved on request. `workspace_id`
+/// is empty when none was asked for.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AutoVariablesResponse {
     pub workspace_id: String,

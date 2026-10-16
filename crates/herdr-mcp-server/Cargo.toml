@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-rmcp = { workspace = true, features = ["server", "transport-io", "macros"] }
+rmcp = { workspace = true, features = ["server", "client", "transport-io", "macros"] }
 tokio = { workspace = true, features = ["full"] }
 axum = { workspace = true }
 async-stream = "0.3"

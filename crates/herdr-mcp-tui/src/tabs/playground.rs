@@ -24,145 +24,36 @@ use crate::theme::{
 };
 use crate::{App, FieldKind, PlaygroundSub, RecipeStep, ToolCategory, ToolField};
 
-/// Hardcoded category definitions for the tool picker.
-/// Each entry: (category label, tool name prefixes).
-fn tool_category_map() -> Vec<(&'static str, Vec<&'static str>)> {
-    vec![
-        (
-            "Discovery",
-            vec![
-                "status",
-                "list_workspaces",
-                "list_agents",
-                "list_tabs",
-                "list_panes",
-                "get_pane",
-                "get_agent",
-            ],
-        ),
-        (
-            "Lifecycle",
-            vec!["create_workspace", "create_tab", "split_pane", "close_pane"],
-        ),
-        ("Read", vec!["read_pane", "read_agent"]),
-        (
-            "Write",
-            vec![
-                "send_text",
-                "send_keys",
-                "run_command",
-                "pane_exec",
-                "send_agent",
-                "herdr_api",
-            ],
-        ),
-        (
-            "Synchronize",
-            vec!["wait_output", "wait_pane_agent_status", "wait_agent_status"],
-        ),
-        (
-            "A2A",
-            vec![
-                "agent_spawn",
-                "agent_message",
-                "agent_read",
-                "agent_wait",
-                "agent_list",
-            ],
-        ),
-        ("Variables", vec!["var_get", "var_set"]),
-        (
-            "Templates",
-            vec!["list_templates", "get_template", "instantiate_template"],
-        ),
-        (
-            "Trim",
-            vec![
-                "compress",
-                "decompress",
-                "trim_policy_set",
-                "trim_policy_get",
-                "trim_eval",
-                "trim_bench",
-                "trim_status",
-                "trim_diagnose",
-                "trim_summary",
-                "trim_dashboard_open",
-            ],
-        ),
-        (
-            "Scheduler",
-            vec![
-                "schedule_recipe",
-                "list_schedules",
-                "delete_schedule",
-                "enable_schedule",
-            ],
-        ),
-        ("Folder Key", vec!["build_folder_key", "get_folder_key"]),
-        ("Clipboard", vec!["clipboard_set", "clipboard_get"]),
-        (
-            "Proxy",
-            vec![
-                "proxy_startup",
-                "proxy_diagnose",
-                "proxy_policy_get",
-                "proxy_policy_set",
-            ],
-        ),
-    ]
-}
-
-/// Parse the flat tool list from `app.tools` into curated `ToolCategory`s.
-/// Unrecognised tools go into an "Other" category.
+/// Group the flat tool list from `app.tools` by each tool's
+/// `_meta.category` (set on the tool's server definition), categories and
+/// tools sorted by name. Tools without one go under "Other".
 pub fn parse_tool_categories(tool_arr: &[Value]) -> Vec<ToolCategory> {
-    let cat_map = tool_category_map();
-    let mut categories: Vec<ToolCategory> = cat_map
-        .into_iter()
-        .map(|(label, _names)| ToolCategory {
-            label: label.to_string(),
-            tools: Vec::new(),
-        })
-        .collect();
-    let mut other = ToolCategory {
-        label: "Other".to_string(),
-        tools: Vec::new(),
-    };
-
+    let mut groups: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
     for tool in tool_arr {
-        let name = tool
-            .get("name")
-            .and_then(|n| n.as_str())
-            .unwrap_or("")
-            .to_string();
-        if name.is_empty() {
+        let Some(name) = tool.get("name").and_then(Value::as_str) else {
             continue;
-        }
+        };
         let desc = tool
             .get("description")
-            .and_then(|d| d.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let mut placed = false;
-        for (ci, cat_def) in tool_category_map().iter().enumerate() {
-            if cat_def.1.contains(&name.as_str()) {
-                categories[ci].tools.push((name.clone(), desc.clone()));
-                placed = true;
-                break;
-            }
-        }
-        if !placed {
-            other.tools.push((name, desc));
-        }
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let category = tool
+            .pointer("/_meta/category")
+            .and_then(Value::as_str)
+            .unwrap_or("Other");
+        groups
+            .entry(category.to_string())
+            .or_default()
+            .push((name.to_string(), desc.to_string()));
     }
-
-    // Drop empty categories.
-    categories.retain(|c| !c.tools.is_empty());
-    if !other.tools.is_empty() {
-        categories.push(other);
-    }
-    categories
+    groups
+        .into_iter()
+        .map(|(label, mut tools)| {
+            tools.sort();
+            ToolCategory { label, tools }
+        })
+        .collect()
 }
 
 /// Auto-generate a step ID from the tool name and step index.

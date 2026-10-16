@@ -195,7 +195,6 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release
 |------|-------------|
 | `--data-dir <path>` | Data directory (default: ./data) |
 | `--http-port <port>` | HTTP bridge port for playground/live data (default: 7676) |
-| `--legacy` | Run the legacy trim-only dashboard instead of the kitchen-sink TUI |
 
 ### Trim flags
 
