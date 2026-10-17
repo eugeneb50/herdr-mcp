@@ -302,6 +302,7 @@ pub(crate) async fn start_with(
             HashMap::new(),
         ),
     };
+    seed.extend(req.variables);
     let session_id = workspace_for(req.session_id, &seed);
     seed_scope(server, &session_id, &mut seed).await;
     let header = RunHeader {
@@ -666,6 +667,7 @@ mod tests {
             updated_at: now,
             is_template: false,
             category: None,
+            triggers: Vec::new(),
         };
         server.persistence.save_recipe(&recipe).await.unwrap();
 
@@ -706,6 +708,7 @@ mod tests {
             updated_at: now,
             is_template: false,
             category: None,
+            triggers: Vec::new(),
         };
         server.persistence.save_recipe(&recipe).await.unwrap();
         let schedule = crate::variables::ScheduledRecipe {

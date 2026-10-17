@@ -16,11 +16,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, broadcast};
 
 use crate::persistence::Persistence;
+use herdr_mcp_api::HerdrEvent;
 use herdr_mcp_proxy::ProxyPolicy;
-use herdr_mcp_trim::policy::{TrimDirection, TrimPolicy};
+use herdr_mcp_trim::policy::TrimPolicy;
 
 /// Agent lifecycle state, mirroring herdr's `AgentStatus` (snake_case).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -313,7 +314,12 @@ pub struct HerdrClient {
     reconnect_attempts: u32,
     reconnect_backoff_ms: u64,
     subscriber_state: SubscriberState,
+    /// Relays herdr's event stream to in-process listeners (triggers, SSE).
+    events: broadcast::Sender<HerdrEvent>,
 }
+
+/// herdr events buffered per listener before it lags (and skips ahead).
+const EVENT_BUFFER: usize = 256;
 
 impl HerdrClient {
     pub fn new(
@@ -328,7 +334,13 @@ impl HerdrClient {
             reconnect_attempts,
             reconnect_backoff_ms,
             subscriber_state: SubscriberState::new(),
+            events: broadcast::channel(EVENT_BUFFER).0,
         }
+    }
+
+    /// herdr's events from now on, as the subscriber receives them.
+    pub fn events(&self) -> broadcast::Receiver<HerdrEvent> {
+        self.events.subscribe()
     }
 
     /// The herdr API socket this client talks to.
@@ -338,7 +350,8 @@ impl HerdrClient {
 
     /// One request on herdr's socket API (`{id, method, params}` per line);
     /// returns herdr's response (`{id, result}` or `{id, error}`) as-is.
-    /// Streaming methods (`events.subscribe`) return their first message.
+    /// Streaming methods (`events.subscribe`) return their first message;
+    /// the live stream is [`HerdrClient::events`].
     pub async fn call(
         &self,
         method: &str,
@@ -486,64 +499,50 @@ impl HerdrClient {
         });
     }
 
+    /// One subscription per pane set: herdr reads nothing more on a
+    /// connection once it streams, so a new or closed pane (whose status
+    /// events need their own subscription) means reconnecting.
     async fn run_subscribe_loop(&self) -> anyhow::Result<()> {
         #[cfg(unix)]
         {
             use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-            let stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
-            let (read_half, mut write_half) = stream.into_split();
+            loop {
+                let request = self.build_subscribe_request().await;
+                let stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
+                let (read_half, mut write_half) = stream.into_split();
+                write_half
+                    .write_all(format!("{request}\n").as_bytes())
+                    .await?;
 
-            // Channel to push additional subscribe requests (e.g. when a new
-            // workspace appears and we must (re)subscribe its panes).
-            let (sub_tx, mut sub_rx) = mpsc::channel::<serde_json::Value>(16);
+                let mut lines = BufReader::new(read_half).lines();
+                // First line is the subscribe ack.
+                if let Some(line) = lines.next_line().await?
+                    && let Ok(ack) = serde_json::from_str::<serde_json::Value>(&line)
+                    && ack.get("error").is_some()
+                {
+                    anyhow::bail!("events.subscribe rejected: {line}");
+                }
+                self.subscriber_state.set(SubscriberPhase::Connected).await;
 
-            // Writer task drains the channel and writes subscribe requests.
-            let writer_task = tokio::spawn(async move {
-                while let Some(req) = sub_rx.recv().await {
-                    if write_half
-                        .write_all(format!("{}\n", req).as_bytes())
-                        .await
-                        .is_err()
-                    {
+                let mut panes_changed = false;
+                while let Some(line) = lines.next_line().await? {
+                    let Some(event) = HerdrEvent::parse(&line) else {
+                        continue;
+                    };
+                    panes_changed = matches!(event.event.as_str(), "pane.created" | "pane.closed");
+                    // No listeners is fine.
+                    let _ = self.events.send(event.clone());
+                    let client = self.clone();
+                    tokio::spawn(async move { client.handle_event(event).await });
+                    if panes_changed {
                         break;
                     }
-                    let _ = write_half.flush().await;
                 }
-            });
-
-            // Initial subscription: workspace events (global) + per-pane status
-            // events. This also populates the registry from the live pane list.
-            let initial = self.build_subscribe_request().await;
-            let _ = sub_tx.send(initial).await;
-
-            let mut lines = BufReader::new(read_half).lines();
-            // First line is the subscribe ack.
-            if let Some(line) = lines.next_line().await?
-                && let Ok(ack) = serde_json::from_str::<serde_json::Value>(&line)
-                && ack.get("error").is_some()
-            {
-                writer_task.abort();
-                anyhow::bail!("events.subscribe rejected: {line}");
-            }
-
-            // Successfully connected and subscribed
-            self.subscriber_state.set(SubscriberPhase::Connected).await;
-
-            while let Some(line) = lines.next_line().await? {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Ok(event) = serde_json::from_str::<SubEvent>(&line) {
-                    let client = self.clone();
-                    let sub_tx = sub_tx.clone();
-                    tokio::spawn(async move {
-                        client.handle_event(event, sub_tx).await;
-                    });
+                if !panes_changed {
+                    anyhow::bail!("event stream ended");
                 }
             }
-            writer_task.abort();
-            anyhow::bail!("event stream ended")
         }
         #[cfg(not(unix))]
         {
@@ -556,15 +555,22 @@ impl HerdrClient {
         }
     }
 
-    /// Build a `events.subscribe` request for the current set of panes.
-    ///
-    /// herdr's API requires `params.pane_id: null` for global (workspace-level)
-    /// subscriptions, while pane-scoped event types must carry the pane id in
-    /// each subscription entry. As a side effect this also seeds the registry
+    /// Build a `events.subscribe` request: every global event herdr's schema
+    /// lists, plus `pane.agent_status_changed` for each live pane (herdr
+    /// scopes that one to a pane). As a side effect this seeds the registry
     /// from the live `pane list` so the a2a tools can resolve targets by
     /// pane id / role / label without waiting for the first event.
     async fn build_subscribe_request(&self) -> serde_json::Value {
-        let mut pane_subs: Vec<serde_json::Value> = Vec::new();
+        let mut subscriptions: Vec<serde_json::Value> = match herdr_schema().await {
+            Some(schema) => global_subscriptions(&schema)
+                .into_iter()
+                .map(|t| serde_json::json!({ "type": t }))
+                .collect(),
+            None => {
+                tracing::debug!("herdr api schema unavailable; subscribing to pane status only");
+                Vec::new()
+            }
+        };
 
         if let Some(panes) = self.list_panes_json().await {
             for p in &panes {
@@ -583,23 +589,17 @@ impl HerdrClient {
                 if !status.is_empty() {
                     self.registry.set_status(pane_id, status).await;
                 }
-                pane_subs.push(serde_json::json!({
+                subscriptions.push(serde_json::json!({
                     "type": "pane.agent_status_changed",
                     "pane_id": pane_id
                 }));
             }
         }
 
-        let mut subscriptions = vec![
-            serde_json::json!({ "type": "workspace.created" }),
-            serde_json::json!({ "type": "workspace.closed" }),
-        ];
-        subscriptions.extend(pane_subs);
-
         serde_json::json!({
             "id": "herdr-mcp-subscribe",
             "method": "events.subscribe",
-            "params": { "pane_id": null, "subscriptions": subscriptions }
+            "params": { "subscriptions": subscriptions }
         })
     }
 
@@ -619,80 +619,46 @@ impl HerdrClient {
             .cloned()
     }
 
-    async fn handle_event(&self, event: SubEvent, sub_tx: mpsc::Sender<serde_json::Value>) {
+    async fn handle_event(&self, event: HerdrEvent) {
         match event.event.as_str() {
             "pane.agent_status_changed" => {
-                let pane_id = event.data.pane_id;
-                let ws = event.data.workspace_id;
-                let agent = event.data.agent.clone().unwrap_or_default();
-                let label = event.data.label.clone().unwrap_or_default();
-                self.registry.upsert(&pane_id, &ws, "", &agent, "").await;
-                if !label.is_empty() {
-                    self.registry.set_label(&pane_id, &label).await;
-                }
-                if let Some(status) = event
-                    .data
-                    .agent_status
-                    .as_deref()
-                    .and_then(AgentStatus::parse)
-                {
-                    let status_str = status.as_str().to_string();
-                    self.registry.set_status(&pane_id, &status_str).await;
+                let Ok(data) = serde_json::from_value::<StatusData>(event.data) else {
+                    return;
+                };
+                let agent = data.agent.unwrap_or_default();
+                self.registry
+                    .upsert(&data.pane_id, &data.workspace_id, "", &agent, "")
+                    .await;
+                if let Some(status) = AgentStatus::parse(&data.agent_status) {
+                    self.registry
+                        .set_status(&data.pane_id, status.as_str())
+                        .await;
                     if status == AgentStatus::Idle {
                         // Capture the work product: pane output at idle.
-                        let client = self.clone();
-                        let pane = pane_id.clone();
-                        tokio::spawn(async move {
-                            if let Ok(out) = read_pane_output(&pane).await {
-                                client.registry.set_output(&pane, out).await;
-                            }
-                        });
-                    }
-                }
-            }
-            "workspace.created" => {
-                let ws = event.data.workspace_id;
-                if !ws.is_empty() {
-                    // A new workspace means new panes: refresh the registry and
-                    // (re)subscribe to every pane's status events.
-                    let req = self.build_subscribe_request().await;
-                    let _ = sub_tx.send(req).await;
-
-                    // Seed a default trim policy for the workspace so all panes inherit it.
-                    let default_policy = TrimPolicy {
-                        stages: vec!["caveman:full".to_string(), "pfc1".to_string()],
-                        direction: TrimDirection::OutboundWithAck,
-                    };
-                    for handle in self.registry.list_for_ws(&ws).await {
-                        if handle.trim_policy.is_none() {
-                            self.registry
-                                .set_trim_policy(&handle.pane_id, Some(default_policy.clone()))
-                                .await;
+                        if let Ok(out) = read_pane_output(&data.pane_id).await {
+                            self.registry.set_output(&data.pane_id, out).await;
                         }
                     }
-                    tracing::info!("workspace {ws} created; seeded default trim policy");
                 }
             }
             "workspace.closed" => {
-                let ws = event.data.workspace_id;
-                if !ws.is_empty() {
-                    // Best-effort: summarize the session's trim savings and
-                    // clean up per-workspace trim state.
-                    let s = herdr_mcp_trim::stats::load_stats(self.registry.data_dir(), &ws).await;
-                    if s.messages_trimmed > 0 {
-                        let body = format!(
-                            "Workspace {ws} closed — trim saved {:.1}% net ({} messages, {} bytes net).",
-                            s.savings_pct(),
-                            s.messages_trimmed,
-                            s.net_saved_bytes
-                        );
-                        let binary = herdr_mcp_core::herdr_bin();
-                        let _ = tokio::process::Command::new(binary)
-                            .args(["notification", "show", "herdr-mcp trim", "--body", &body])
-                            .output()
-                            .await;
-                    }
-                    tracing::info!("workspace {ws} closed; cleaned up trim state");
+                let Some(ws) = event.workspace_id().map(str::to_string) else {
+                    return;
+                };
+                // Summarize the session's trim savings.
+                let s = herdr_mcp_trim::stats::load_stats(self.registry.data_dir(), &ws).await;
+                if s.messages_trimmed > 0 {
+                    let body = format!(
+                        "Workspace {ws} closed — trim saved {:.1}% net ({} messages, {} bytes net).",
+                        s.savings_pct(),
+                        s.messages_trimmed,
+                        s.net_saved_bytes
+                    );
+                    let binary = herdr_mcp_core::herdr_bin();
+                    let _ = tokio::process::Command::new(binary)
+                        .args(["notification", "show", "herdr-mcp trim", "--body", &body])
+                        .output()
+                        .await;
                 }
             }
             _ => {}
@@ -700,26 +666,38 @@ impl HerdrClient {
     }
 }
 
+/// `pane.agent_status_changed` payload (the fields the registry keeps).
 #[derive(Debug, Deserialize)]
-struct SubEvent {
-    #[serde(rename = "event")]
-    event: String,
-    #[serde(rename = "data", default)]
-    data: SubData,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct SubData {
-    #[serde(default)]
+struct StatusData {
     pane_id: String,
-    #[serde(default)]
     workspace_id: String,
-    #[serde(default)]
-    agent_status: Option<String>,
+    agent_status: String,
     #[serde(default)]
     agent: Option<String>,
-    #[serde(default)]
-    label: Option<String>,
+}
+
+/// `herdr api schema --json`, if herdr answers.
+async fn herdr_schema() -> Option<serde_json::Value> {
+    let output = tokio::process::Command::new(herdr_mcp_core::herdr_bin())
+        .args(["api", "schema", "--json"])
+        .output()
+        .await
+        .ok()?;
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+/// Subscription types herdr's schema lists that take no parameters (the
+/// global events), e.g. `workspace.created`, `pane.created`.
+fn global_subscriptions(schema: &serde_json::Value) -> Vec<String> {
+    schema
+        .pointer("/schemas/request/$defs/Subscription/oneOf")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|s| s.get("required") == Some(&serde_json::json!(["type"])))
+        .filter_map(|s| s.pointer("/properties/type/const")?.as_str())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Read a pane's recent output via the herdr CLI. Best-effort; errors are
@@ -738,7 +716,23 @@ async fn read_pane_output(pane_id: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use herdr_mcp_trim::policy::TrimDirection;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn global_subscriptions_are_the_parameterless_ones() {
+        let schema = serde_json::json!({"schemas": {"request": {"$defs": {"Subscription": {"oneOf": [
+            {"properties": {"type": {"const": "workspace.created"}}, "required": ["type"]},
+            {"properties": {"type": {"const": "pane.created"}}, "required": ["type"]},
+            {"properties": {"type": {"const": "pane.agent_status_changed"}, "pane_id": {}},
+             "required": ["type", "pane_id"]},
+        ]}}}}});
+        assert_eq!(
+            global_subscriptions(&schema),
+            vec!["workspace.created".to_string(), "pane.created".to_string()]
+        );
+        assert!(global_subscriptions(&serde_json::json!({})).is_empty());
+    }
 
     fn make_persistence() -> Arc<Persistence> {
         // Keep the tempdir alive for the test duration by leaking it; the OS

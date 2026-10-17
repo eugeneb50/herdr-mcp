@@ -1,6 +1,7 @@
-//! `herdr-mcp` — daemon binary: MCP stdio server + optional HTTP bridge.
+//! `herdr-mcp` — daemon binary: MCP stdio server + optional HTTP bridge,
+//! and `plugin` (herdr-mcp as a herdr plugin, see `plugin.rs`).
 //!
-//! Serve-only. Local tools (`trim`, `dashboard`, `folder-key`) live in the
+//! Local tools (`trim`, `dashboard`, `folder-key`) live in the
 //! sibling `herdr-trim` binary. Running `herdr-mcp trim …` is a hard break:
 //! clap rejects it — use `herdr-trim`.
 
@@ -15,6 +16,8 @@ use herdr_mcp_core::{CliOverrides, Config};
 #[allow(dead_code)]
 #[path = "../common.rs"]
 mod common;
+#[path = "../plugin.rs"]
+mod plugin;
 
 #[derive(Parser)]
 #[command(name = "herdr-mcp", version)]
@@ -46,6 +49,11 @@ enum Command {
         #[arg(long, default_value = "extended")]
         tools: String,
     },
+    /// herdr plugin: link/unlink it, and the entry points herdr runs.
+    Plugin {
+        #[command(subcommand)]
+        command: plugin::PluginCommand,
+    },
 }
 
 fn main() -> Result<()> {
@@ -54,6 +62,11 @@ fn main() -> Result<()> {
     config_tools_note(&args)?;
 
     // Load config with CLI overrides
+    if let Some(Command::Plugin { command }) = args.command {
+        let config = Config::load(None)?;
+        return tokio::runtime::Runtime::new()?.block_on(plugin::run(command, &config));
+    }
+
     let cli_overrides = match &args.command {
         Some(Command::Serve {
             http,
@@ -82,6 +95,7 @@ fn main() -> Result<()> {
             trim_stages: Vec::new(),
             proxy_port: None,
         }),
+        Some(Command::Plugin { .. }) => unreachable!("handled above"),
     };
 
     let config = Config::load(cli_overrides)?;
@@ -94,7 +108,7 @@ fn main() -> Result<()> {
 fn config_tools_note(args: &Args) -> Result<()> {
     let selection = match &args.command {
         Some(Command::Serve { tools, .. }) => tools.as_str(),
-        None => "extended",
+        _ => "extended",
     };
     if selection != "core" && selection != "extended" && !selection.starts_with("core,") {
         anyhow::bail!("--tools must be `core`, `extended`, or `core,...` (got `{selection}`)");

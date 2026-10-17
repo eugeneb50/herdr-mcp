@@ -19,7 +19,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 rmcp = { workspace = true, features = ["server", "transport-io", "macros"] }
 serde_json = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+dirs = { workspace = true }
 
+herdr-mcp-api = { path = "../herdr-mcp-api" }
 herdr-mcp-core = { path = "../herdr-mcp-core" }
 herdr-mcp-server = { path = "../herdr-mcp-server" }
 herdr-mcp-trim = { path = "../herdr-mcp-trim" }

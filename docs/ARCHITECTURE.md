@@ -306,7 +306,8 @@ herdr-mcp/
 | `POST` | `/api/tools/{name}` | `call_tool_handler` | Dispatch tool by name |
 | `GET` | `/api/agents?workspace_id=` | `agents_handler` | Live pane list from AgentRegistry |
 | `GET` | `/api/workspaces` | `workspaces_handler` | Workspace list via herdr CLI |
-| `POST` | `/api/runs` | `start_run_handler` | Start a run; `?wait=true` waits for the final record |
+| `POST` | `/api/runs` | `start_run_handler` | Start a run; `?wait=true` waits for the final record; `variables` add to the run's scope |
+| `GET` | `/api/herdr/events` | `herdr_events_handler` | SSE: herdr's live event stream (`HerdrEvent` per message) |
 
 ### 5.2 Recipe CRUD Routes
 
@@ -315,7 +316,7 @@ herdr-mcp/
 | `GET` | `/api/recipes` | List all recipes |
 | `POST` | `/api/recipes` | Create recipe |
 | `GET` | `/api/recipes/{id}` | Get recipe by ID |
-| `PUT` | `/api/recipes/{id}` | Update recipe |
+| `PUT` | `/api/recipes/{id}` | Update recipe (incl. `triggers`) |
 | `DELETE` | `/api/recipes/{id}` | Delete recipe |
 
 ### 5.3 Variable & Execution Routes
@@ -617,18 +618,29 @@ scoped to workspace)
 
 ### 8.2 Event Subscriber (`HerdrClient`)
 
-Connects to herdr's Unix socket (`~/.config/herdr/herdr.sock`) for live
-events:
+One `events.subscribe` connection to herdr's socket. Subscriptions: every
+parameterless type in herdr's schema (`herdr api schema --json` →
+`Subscription.oneOf`, never hand-listed) plus `pane.agent_status_changed`
+per live pane. herdr reads nothing more on a streaming connection, so a
+`pane.created` / `pane.closed` reconnects with the new pane set.
 
-**Subscriptions:**
-- `workspace.created` → re-subscribe all panes, seed default trim policy
-- `workspace.closed` → send trim summary notification
+herdr names global events `pane_created` on the wire; `HerdrEvent::parse`
+(`herdr-mcp-api`) maps them to the subscription name (`pane.created`).
+Every event is broadcast (`HerdrClient::events()`) to recipe triggers and
+`GET /api/herdr/events`, and handled locally:
 - `pane.agent_status_changed` → update registry, capture work product on idle
+- `workspace.closed` → send trim summary notification
 
-**Transport:** Newline-terminated JSON requests/responses. Dedicated
-long-lived socket with background writer task via `mpsc` channel.
+### 8.3 Recipe Triggers (`triggers.rs`)
 
-### 8.3 Label Resolution
+`Recipe.triggers: [{ on, when }]`: an event named `on` whose `data` equals
+every `when` entry (dotted paths, e.g. `agent_status = "done"`) starts a run
+in the event's workspace with `herdr` = the event data + `event`
+(`{{herdr.pane_id}}`). Triggers are read from the saved recipes on every
+event. A recipe whose triggered run is still going is skipped, so it cannot
+re-trigger itself.
+
+### 8.4 Label Resolution
 
 `registry.resolve(ws, target)` matches by:
 1. **pane_id** (exact key match)
@@ -672,7 +684,9 @@ Cron-based recipe scheduling using the `cron` crate:
 
 - `Scheduler::schedule_one()` spawns a background task per schedule
 - Each task sleeps until next cron fire, then invokes the executor
-- Executor function injected at runtime (currently not wired in `main.rs`)
+- Executor: the run engine (wired in `HerdrMcpServer::with_config`)
+- Persisted schedules start in `serve_core`, which builds the one
+  `HerdrMcpServer` shared by HTTP, stdio, triggers and the trim poller
 - `DashMap` for concurrent schedule access
 - Persistence: `data/schedules/{uuid}.json`
 - Enable/disable without losing schedule state
@@ -792,6 +806,7 @@ cargo fmt --all -- --check
 herdr-mcp                         # MCP stdio + HTTP bridge on port 7676
 herdr-mcp serve                   # Explicit MCP + HTTP
 herdr-trim dashboard              # TUI dashboard
+herdr-mcp plugin link             # register herdr-mcp as a herdr plugin (see §13.3)
 herdr-mcp trim --stage caveman:full --stage pfc1 "text to compress"
 herdr-mcp trim --decompress "compressed text"
 herdr-mcp trim --file input.txt
@@ -801,7 +816,24 @@ herdr-mcp folder-key show ./my-folder
 herdr-mcp folder-key decompress ./my-folder "compressed text"
 ```
 
-### 13.3 Environment Variables
+### 13.3 herdr Plugin
+
+`herdr-mcp plugin link` writes `~/.config/herdr-mcp/herdr-plugin/herdr-plugin.toml`
+(generated in `crates/herdr-mcp-cli/src/plugin.rs`, commands pointing at this
+binary; bridge port and data dir taken from config at link time) and runs
+`herdr plugin link`. `--print` shows the manifest; `plugin unlink` removes it.
+
+| Action (`herdr-mcp.<id>`) | Opens |
+|---|---|
+| `recipes` | popup: pick a saved recipe, run it with the invocation context as `{{herdr.…}}` (`workspace_id`, `pane_id` = focused pane, `selected_text`, …), follow its steps |
+| `bridge` | tab: `herdr-mcp serve --http-only` |
+| `dashboard` | split: `herdr-trim dashboard` |
+| `web` | the web playground in a browser |
+
+Bind one in herdr's config: `[[keys.command]] key = "prefix+r"`,
+`type = "plugin_action"`, `command = "herdr-mcp.recipes"`.
+
+### 13.4 Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|

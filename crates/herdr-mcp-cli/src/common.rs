@@ -15,8 +15,9 @@ use rmcp::{ServiceExt, transport::stdio};
 
 use herdr_mcp_core::Config;
 use herdr_mcp_server::{
-    AgentRegistry, HerdrClient, HerdrMcpServer, Persistence,
+    HerdrClient, HerdrMcpServer, Persistence,
     server::{spawn_trim_poller, start_http},
+    triggers,
 };
 
 /// Tracing to stderr. Never stdout: stdout is MCP/ACP JSON-RPC on the daemon.
@@ -32,19 +33,13 @@ pub fn init_tracing() -> Result<()> {
 }
 
 /// Build the full serve stack (persistence, herdr subscriber, registry, HTTP
-/// bridge) and spawn its background tasks. Does NOT block — the spawned tasks
-/// live on the Tokio runtime until it shuts down. Returns the shared
-/// `AgentRegistry` + `Persistence` + `HerdrClient` so callers can build a stdio server against
-/// the exact same registry the HTTP bridge uses. Shared by both `serve` and
-/// `dashboard`: the former awaits the MCP/HTTP server afterwards, the latter
-/// runs the TUI on the main task against the same registry.
-pub async fn serve_core(
-    config: &Config,
-) -> Result<(
-    AgentRegistry,
-    std::sync::Arc<Persistence>,
-    std::sync::Arc<HerdrClient>,
-)> {
+/// bridge, recipe triggers) and spawn its background tasks. Does NOT block —
+/// the spawned tasks live on the Tokio runtime until it shuts down. Returns
+/// the one `HerdrMcpServer` every surface shares (HTTP, stdio, triggers, trim
+/// poller): a single scheduler and one set of live runs. Shared by both
+/// `serve` and `dashboard`: the former awaits the MCP server afterwards, the
+/// latter runs the TUI on the main task.
+pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
     let data_dir = config.data_dir.clone();
     let persistence = Persistence::new(data_dir.clone());
     persistence.init().await?;
@@ -59,14 +54,21 @@ pub async fn serve_core(
     herdr_client.spawn_subscriber();
     let registry = herdr_client.registry.clone();
 
-    // Periodic trim-badge refresh so savings badges survive server restarts.
-    let trim_server = HerdrMcpServer::with_config((*persistence).clone(), registry.clone(), config)
+    let server = HerdrMcpServer::with_config((*persistence).clone(), registry, config)
         .with_herdr_client(herdr_client.clone());
-    spawn_trim_poller(std::sync::Arc::new(trim_server));
+    // Periodic trim-badge refresh so savings badges survive server restarts.
+    spawn_trim_poller(std::sync::Arc::new(server.clone()));
+
+    let scheduler = server.scheduler.clone();
+    tokio::spawn(async move {
+        if let Err(e) = scheduler.load_existing().await {
+            tracing::warn!("failed to load existing schedules: {e}");
+        }
+    });
+    triggers::spawn(server.clone(), herdr_client.events());
 
     if let Some(port) = config.http.port {
-        let server = HerdrMcpServer::with_config((*persistence).clone(), registry.clone(), config)
-            .with_herdr_client(herdr_client.clone());
+        let server = server.clone();
         let bind = config
             .http
             .bind_addr
@@ -112,12 +114,12 @@ pub async fn serve_core(
         tracing::info!("Proxy listener auto-started on {bind_for_log}:{proxy_port}");
     }
 
-    Ok((registry, persistence, herdr_client))
+    Ok(server)
 }
 
 /// `serve` — full MCP server (stdio + optional HTTP).
 pub async fn run_serve(config: &Config) -> Result<()> {
-    let (registry, persistence, herdr_client) = serve_core(config).await?;
+    let server = serve_core(config).await?;
 
     if config.http.http_only {
         tracing::info!("HTTP-only mode — waiting for shutdown signal");
@@ -127,8 +129,6 @@ pub async fn run_serve(config: &Config) -> Result<()> {
     }
 
     tracing::info!("Starting herdr-mcp MCP server");
-    let server = HerdrMcpServer::with_config((*persistence).clone(), registry, config)
-        .with_herdr_client(herdr_client);
     let service = server.serve(stdio()).await?;
     tracing::info!("herdr-mcp server initialized, waiting for requests");
     service.waiting().await?;

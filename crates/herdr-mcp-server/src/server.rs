@@ -724,20 +724,8 @@ impl HerdrMcpServer {
     ) -> Self {
         let data_dir = persistence.data_dir().to_path_buf();
         let persistence = std::sync::Arc::new(persistence);
+        // Persisted schedules start with `serve` (see `serve_core`).
         let scheduler = Scheduler::new(persistence.clone());
-        // Load persisted schedules so they survive server restarts. Deferred
-        // to a background task: constructors stay sync (used in non-runtime
-        // test contexts), and startup never blocks on disk I/O.
-        {
-            let loader = scheduler.clone();
-            if tokio::runtime::Handle::try_current().is_ok() {
-                tokio::spawn(async move {
-                    if let Err(e) = loader.load_existing().await {
-                        tracing::warn!("failed to load existing schedules: {e}");
-                    }
-                });
-            }
-        }
         let server = Self {
             persistence,
             scheduler,
@@ -3162,6 +3150,7 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path, bind: &str) ->
                 .delete(delete_recipe_handler),
         )
         .route("/api/herdr/schema", get(herdr_schema_handler))
+        .route("/api/herdr/events", get(herdr_events_handler))
         .route("/api/templates", get(list_templates_handler))
         .route(
             "/api/templates/{id}/instantiate",
@@ -3602,6 +3591,7 @@ async fn create_recipe_handler(
         updated_at: now,
         is_template: false,
         category: req.category,
+        triggers: req.triggers,
     };
 
     server
@@ -3649,6 +3639,9 @@ async fn update_recipe_handler(
     }
     if let Some(vars) = req.variables {
         recipe.variables = vars;
+    }
+    if let Some(triggers) = req.triggers {
+        recipe.triggers = triggers;
     }
     recipe.updated_at = chrono::Utc::now();
 
@@ -3840,6 +3833,33 @@ async fn events_handler(
             .json_data(&event)
             .unwrap_or_else(|_| Event::default().comment("unencodable event")))
     });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// `GET /api/herdr/events` — Server-Sent Events: herdr's own event stream
+/// (`HerdrEvent` JSON per message) as the subscriber receives it, from now
+/// on. Without a herdr subscriber attached the stream stays empty.
+async fn herdr_events_handler(
+    State(AppState { server, .. }): State<AppState>,
+) -> axum::response::sse::Sse<
+    impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    let rx = server.herdr_client.get().map(|c| c.events());
+    let stream = async_stream::stream! {
+        let Some(mut rx) = rx else { return };
+        loop {
+            match rx.recv().await {
+                Ok(event) => yield Ok(Event::default()
+                    .json_data(&event)
+                    .unwrap_or_else(|_| Event::default().comment("unencodable event"))),
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    yield Ok(Event::default().comment(format!("skipped {n} events")));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -4946,21 +4966,34 @@ mod tests {
                 }],
                 variables: HashMap::new(),
                 category: None,
+                triggers: Vec::new(),
             })
             .await
             .unwrap();
         assert_eq!(api.get_recipe(created.id).await.unwrap().name, "r1");
+        let trigger = herdr_mcp_api::RecipeTrigger {
+            on: "pane.agent_status_changed".into(),
+            when: serde_json::json!({"agent_status": "done"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        };
         let updated = api
             .update_recipe(
                 created.id,
                 &herdr_mcp_api::UpdateRecipeRequest {
                     name: Some("r2".into()),
+                    triggers: Some(vec![trigger.clone()]),
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
         assert_eq!(updated.name, "r2");
+        assert_eq!(
+            api.get_recipe(created.id).await.unwrap().triggers,
+            vec![trigger]
+        );
         assert_eq!(api.list_recipes().await.unwrap().len(), 1);
         api.delete_recipe(created.id).await.unwrap();
         assert!(api.list_recipes().await.unwrap().is_empty());

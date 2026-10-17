@@ -12,4 +12,5 @@ dioxus = { version = "0.7", features = ["web", "router"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 herdr-mcp-api = { path = "../herdr-mcp-api" }
-web-sys = { version = "0.3", features = ["Window", "Location"] }
+web-sys = { version = "0.3", features = ["Window", "Location", "EventSource", "MessageEvent"] }
+wasm-bindgen = "0.2"

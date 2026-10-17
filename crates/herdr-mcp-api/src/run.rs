@@ -64,6 +64,10 @@ pub struct StartRunRequest {
     /// herdr workspace id; defaults to the recipe's workspace hint, else "w1".
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Added to the run's starting scope, over the recipe's own variables
+    /// (a plugin invocation or trigger passes `herdr` = its context).
+    #[serde(default)]
+    pub variables: HashMap<String, serde_json::Value>,
 }
 
 /// `pause` / `resume` / `cancel` for `POST /api/runs/{id}/{action}`.

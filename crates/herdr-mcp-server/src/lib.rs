@@ -6,6 +6,7 @@ pub mod runs;
 pub mod scheduler;
 pub mod server;
 pub mod templates;
+pub mod triggers;
 pub mod variables;
 
 // Convenience re-exports so consumers don't need deep paths
