@@ -97,9 +97,6 @@ herdr-mcp serve --http 7676 --http-only
 # Kitchen-sink TUI dashboard (VS Code-style tabs, mouse+keyboard)
 herdr-trim dashboard
 
-# Legacy trim-only dashboard
-herdr-trim dashboard --legacy
-
 # Message trim CLI
 herdr-trim trim "text to compress"
 ```
@@ -148,7 +145,7 @@ Every workspace crate carries a stability tier.
 | `herdr-mcp-api` | Experimental | HTTP bridge wire contract: every `/api/*` type + typed `ApiClient`. Leaf crate, must build for `wasm32-unknown-unknown`. |
 | `herdr-mcp-core` | Beta | Config system (`TOML + env + CLI`), error types. Stable schema. |
 | `herdr-mcp-trim` | Experimental | Message-trim compressors (caveman, pfc1), pipeline, policy, stats, folder keys. |
-| `herdr-mcp-tui` | Experimental | Terminal dashboard (kitchen-sink + legacy). Bridge client only — no server deps. |
+| `herdr-mcp-tui` | Experimental | Terminal dashboard. Bridge client only — no server deps. |
 | `herdr-mcp-server` | Experimental | MCP server, 58 tools, HTTP bridge, recipe engine, event subscriber, scheduler. |
 | `herdr-mcp-cli` | Experimental | Binary entrypoint (`serve`/`trim`/`dashboard`/`folder-key`) + integration tests. |
 
@@ -161,7 +158,7 @@ through deliberate team decision.
 - `crates/herdr-mcp-api/` — single definition of every `/api/*` request/response type (`agents.rs`, `recipe.rs`, `trim.rs`, `variables.rs`) + typed `ApiClient` (`client.rs`). Server/trim/proxy re-export these; web UI and TUI call the bridge through `ApiClient`. No tokio, no `herdr-mcp-*` deps.
 - `crates/herdr-mcp-core/` — `config.rs` (full config system), `error.rs` (anyhow-based error context), `lib.rs`
 - `crates/herdr-mcp-trim/` — `pfc1.rs`, `caveman.rs`, `code_regions.rs`, `pipeline.rs`, `policy.rs`, `runner.rs`, `stats.rs`, `eval.rs`, `folder_key.rs`
-- `crates/herdr-mcp-tui/` — kitchen-sink TUI dashboard (`lib.rs` app loop, `tabs/`, `nav.rs`, `theme.rs`, `http.rs` bridge discovery) + `legacy.rs` trim-only ANSI dashboard; talks to the bridge through `herdr-mcp-api::ApiClient`
+- `crates/herdr-mcp-tui/` — kitchen-sink TUI dashboard (`lib.rs` app loop, `tabs/`, `nav.rs`, `theme.rs`, `http.rs` bridge discovery); talks to the bridge through `herdr-mcp-api::ApiClient`
 - `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers + recipe engine), `herdr_client.rs`, `persistence.rs`, `scheduler.rs`, `templates.rs`, `variables.rs`, `lib.rs`
 - `crates/herdr-mcp-cli/` — `src/bin/herdr-mcp.rs` (serve), `src/bin/herdr-trim.rs` (trim/dashboard/folder-key), `tests/` (integration)
 - `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); served by the HTTP bridge from `http.web-dir`
@@ -217,6 +214,9 @@ When uncertain, classify as higher risk.
 - **Workspace-scoped variables** — session variables use herdr workspace ID as scope; they chain across runs in the same workspace but don't leak between workspaces.
 - **herdr from inside or outside a pane** — socket: `--herdr-socket` > `HERDR_SOCKET_PATH` (herdr sets it in panes) > config file > `HERDR_SESSION` > default; binary: `HERDR_BIN` > `HERDR_BIN_PATH` > `herdr`. The resolved socket is exported to child `herdr` processes so CLI calls and the socket client hit the same server.
 - **Every herdr method** — `herdr_api` + `GET /api/herdr/schema`; the playground's herdr API tab is generated from the installed herdr's schema, never hand-listed.
+- **One tool dispatch** — the bridge and run engine call tools through rmcp's router over an in-process MCP session, never a hand-written match. Tool groups come from each tool's `#[tool(meta = category("…"))]`.
+- **Auto variables are a view** — `GET /api/variables/auto` resolves live herdr panes + registry agents (+ a workspace's `var_set` vars) on request; tool calls never write variables behind the user's back.
+- **Host allowlist** — the bridge answers only `localhost`, `*.localhost`, IP literals and its bind name (DNS-rebinding guard; it can type into panes).
 - **Default command is `serve`** — running `herdr-mcp` with no arguments starts MCP stdio + HTTP on port 7676 (bound to `127.0.0.1`), enabling both AI client integration and web playground access out of the box.
 - **Kitchen-sink TUI** — the `dashboard` subcommand launches a VS Code-style tabbed terminal interface with mouse + keyboard navigation, consolidating the playground, trim dashboard, variables, and settings into a single herdr sidecar pane.
 

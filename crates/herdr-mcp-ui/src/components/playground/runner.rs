@@ -18,6 +18,8 @@ pub struct ToolInfo {
     pub name: String,
     pub description: String,
     pub schema: Value,
+    /// The tool's `_meta.category` from its server definition.
+    pub category: String,
 }
 
 pub fn tool_list(tools: &[Value]) -> Vec<ToolInfo> {
@@ -32,7 +34,30 @@ pub fn tool_list(tools: &[Value]) -> Vec<ToolInfo> {
                     .unwrap_or("")
                     .to_string(),
                 schema: t.get("inputSchema").cloned().unwrap_or(Value::Null),
+                category: t
+                    .pointer("/_meta/category")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Other")
+                    .to_string(),
             })
+        })
+        .collect()
+}
+
+/// Tools grouped by category, categories and tools sorted by name.
+pub fn tool_groups(tools: &[ToolInfo]) -> Vec<(String, Vec<ToolInfo>)> {
+    let mut groups: std::collections::BTreeMap<String, Vec<ToolInfo>> = Default::default();
+    for t in tools {
+        groups
+            .entry(t.category.clone())
+            .or_default()
+            .push(t.clone());
+    }
+    groups
+        .into_iter()
+        .map(|(label, mut tools)| {
+            tools.sort_by(|a, b| a.name.cmp(&b.name));
+            (label, tools)
         })
         .collect()
 }
@@ -215,8 +240,12 @@ pub fn ToolRunner() -> Element {
                                 response.set(None);
                                 error.set(None);
                             },
-                            for t in tools.read().iter() {
-                                option { key: "{t.name}", value: "{t.name}", "{t.name}" }
+                            for (label, group) in tool_groups(&tools.read()) {
+                                optgroup { key: "{label}", label: "{label}",
+                                    for t in group {
+                                        option { key: "{t.name}", value: "{t.name}", "{t.name}" }
+                                    }
+                                }
                             }
                         }
                         if let Some(c) = current.as_ref() {

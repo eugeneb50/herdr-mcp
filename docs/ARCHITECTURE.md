@@ -128,7 +128,7 @@ herdr-mcp/
 │   │       ├── lib.rs      # Re-exports Config, CliOverrides, Error
 │   │       ├── config.rs   # Full config system: TOML + env + CLI
 │   │       └── error.rs    # anyhow-based error context
-│   ├── herdr-mcp-trim/     # Message-trim pipeline + TUI dashboard
+│   ├── herdr-mcp-trim/     # Message-trim pipeline
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports all public types
 │   │       ├── pfc1.rs     # PFC1 phonetic compressor
@@ -139,19 +139,22 @@ herdr-mcp/
 │   │       ├── runner.rs   # PipelineRunner with persistence
 │   │       ├── stats.rs    # TrimStats per workspace
 │   │       ├── eval.rs     # trim_eval + trim_bench
-│   │       ├── dashboard.rs # Legacy trim-only TUI
-│   │       ├── folder_key.rs # Per-folder PFC1 keys
-│   │       └── tui/        # Kitchen-sink TUI dashboard (crossterm + ratatui)
-│   │           ├── mod.rs      # App state, event loop, mouse handling
-│   │           ├── http.rs     # HTTP client for bridge communication
-│   │           ├── nav.rs      # NavigationFrame + FrameFocus
-│   │           ├── theme.rs    # Color palette and styles
-│   │           └── tabs/       # Tabbed panels (overview, playground, trim, variables, settings, proxy)
+│   │       └── folder_key.rs # Per-folder PFC1 keys
+│   ├── herdr-mcp-tui/      # TUI dashboard (crossterm + ratatui); bridge client only
+│   │   └── src/
+│   │       ├── lib.rs      # App state, event loop, mouse handling
+│   │       ├── http.rs     # Bridge discovery; every call goes through ApiClient
+│   │       ├── nav.rs      # NavigationFrame + FrameFocus
+│   │       ├── theme.rs    # Color palette and styles
+│   │       └── tabs/       # overview, playground, trim, variables, settings, proxy
 │   ├── herdr-mcp-server/   # MCP server, tools, HTTP bridge
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports HerdrMcpServer, Persistence, etc.
 │   │       ├── server.rs   # Tool definitions + HTTP handlers + recipe engine
-│   │       ├── herdr_client.rs # Event subscriber + AgentRegistry
+│   │       ├── herdr_client.rs # Socket client (events, raw API calls) + AgentRegistry
+│   │       ├── runs.rs     # Background run engine (pause/resume/cancel, event log)
+│   │       ├── profiles.rs # Agent profiles (drive any CLI agent)
+│   │       ├── agents.rs   # Agent helpers shared by the a2a tools
 │   │       ├── persistence.rs  # File-based storage
 │   │       ├── scheduler.rs    # Cron-based recipe scheduling
 │   │       ├── templates.rs    # Bundled recipe templates
@@ -394,7 +397,7 @@ Variables use `{{ path }}` syntax with dot/bracket navigation:
 2. Seed accumulated from agent registry (for session_id workspace)
 3. For each step:
    a. resolve_variables() in params from accumulated
-   b. dispatch_tool() — calls the actual tool
+   b. dispatch_tool() — calls the tool through rmcp's router (in-process MCP session)
    c. extract_variables() from result → accumulated
    d. Insert step result under both step.id AND pane_id/role
 4. Persist ExecutionResult
@@ -551,16 +554,7 @@ Per-folder PFC1 keys for domain-specific compression:
 - Central registry: `data/folder_keys/` for cross-folder visibility
 - mtime-based caching: unchanged file set reuses the cached key
 
-### 7.9 Legacy Dashboard (`dashboard.rs`)
-
-Live ANSI TUI using crossterm:
-- 2-second refresh cycle
-- Reads `data/sessions/*.trim_stats.json`
-- Shows per-workspace savings %, per-pane bar charts
-- Quit with `q` or `Ctrl+C`
-- RAII terminal restoration guard
-
-### 7.10 Kitchen-Sink TUI Dashboard (`tui/`)
+### 7.9 TUI Dashboard (`crates/herdr-mcp-tui`)
 
 Full-featured terminal dashboard with VS Code-style tabs, mouse + keyboard
 navigation, running as a herdr sidecar pane:
@@ -797,8 +791,7 @@ cargo fmt --all -- --check
 ```bash
 herdr-mcp                         # MCP stdio + HTTP bridge on port 7676
 herdr-mcp serve                   # Explicit MCP + HTTP
-herdr-mcp dashboard               # Kitchen-sink TUI (no legacy flag)
-herdr-mcp dashboard --legacy      # Legacy trim-only dashboard
+herdr-trim dashboard              # TUI dashboard
 herdr-mcp trim --stage caveman:full --stage pfc1 "text to compress"
 herdr-mcp trim --decompress "compressed text"
 herdr-mcp trim --file input.txt
@@ -914,9 +907,11 @@ overrides let users pin a specific tool.
    `HerdrMcpServer` with `#[tool]` macro attributes. The `#[tool_router]`
    macro auto-generates dispatch.
 
-2. **Dual dispatch:** The same tool functions serve both MCP (via
-   `tool_router`) and HTTP (via `dispatch_tool` match statement). Manual HTTP
-   handlers exist for routes that need custom response shaping.
+2. **One dispatch:** MCP clients, `POST /api/tools/{name}` and recipe runs
+   all reach tools through rmcp's `tool_router`: the bridge and run engine
+   hold an in-process MCP client session to the server (`tool_session`,
+   opened on first use). Each tool's `_meta.category` groups it in both
+   playgrounds. Manual HTTP handlers exist only for custom response shapes.
 
 3. **Registry-driven a2a:** The live `AgentRegistry` (fed by herdr events)
    enables `agent_spawn`→`agent_message`→`agent_read` chains where one

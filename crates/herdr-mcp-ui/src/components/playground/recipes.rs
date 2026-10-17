@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use super::forms::{DynamicForm, ResponseViewer, build_params};
-use super::runner::{ToolInfo, schema_parts, tool_list};
+use super::runner::{ToolInfo, schema_parts, tool_groups, tool_list};
 use crate::client::use_api;
 use crate::vars::substitute;
 use herdr_mcp_api::{
@@ -74,19 +74,6 @@ fn steps_from_api(steps: &[RecipeStep]) -> Vec<Step> {
         .enumerate()
         .map(|(i, s)| step_from_api(i, s))
         .collect()
-}
-
-fn group_label(name: &str) -> &str {
-    match name.split('_').next().unwrap_or("") {
-        "list" | "get" | "status" => "Reads",
-        "create" | "split" | "close" => "Workspace/Tab",
-        "start" | "send" | "run" => "Commands",
-        "wait" => "Waits",
-        "agent" | "var" => "Agents",
-        "trim" | "compress" | "decompress" => "Trim",
-        "proxy" | "clipboard" | "folder" => "Ops",
-        _ => "Other",
-    }
 }
 
 #[component]
@@ -214,16 +201,7 @@ pub fn RecipeBuilder(
     };
 
     // Group tools for the add-step picker.
-    let tools_list = tools.read().clone();
-    let mut groups: HashMap<&str, Vec<ToolInfo>> = HashMap::new();
-    for t in tools_list.iter() {
-        groups
-            .entry(group_label(&t.name))
-            .or_default()
-            .push(t.clone());
-    }
-    let mut groups: Vec<(&str, Vec<ToolInfo>)> = groups.into_iter().collect();
-    groups.sort_by(|a, b| a.0.cmp(b.0));
+    let groups = tool_groups(&tools.read());
 
     rsx! {
         div { class: "builder-head",
@@ -437,8 +415,12 @@ fn StepCard(
                         }
                     },
                     option { value: "", "— pick tool —" }
-                    for t in tools.iter() {
-                        option { key: "{t.name}", value: "{t.name}", "{t.name}" }
+                    for (label, group) in tool_groups(&tools) {
+                        optgroup { key: "{label}", label: "{label}",
+                            for t in group {
+                                option { key: "{t.name}", value: "{t.name}", "{t.name}" }
+                            }
+                        }
                     }
                 }
                 button { class: "link-btn", disabled: index == 0, onclick: move |_| on_move.call((index, -1)), "↑" }
