@@ -14,7 +14,7 @@ or anywhere else. You reference it. You resolve it from its source on demand.
 ### Forcing mechanism — what happens when you violate
 
 Adding a duplicate state field is an automatic-revert-on-detect change. The
-pre-push gate runs `dev/ci.sh dry-check` (or `cargo test --workspace` +
+pre-push gate runs `dev/ci.sh dry-check` (or `cargo nextest run --workspace` +
 `cargo clippy --all-targets -- -D warnings`). If it fires, the maintainer
 will `git reset --hard` your branch back to the prior good state, and the
 time you spent is wasted. Save yourself the burn: do not write the duplicate
@@ -55,7 +55,7 @@ write the field. Two valid answers:
 ```bash
 cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
-cargo test --workspace
+cargo nextest run --workspace   # cargo install cargo-nextest --locked
 # wire crate + web UI must stay wasm-clean:
 cargo clippy -p herdr-mcp-api -p herdr-mcp-ui --target wasm32-unknown-unknown -- -D warnings
 ```
@@ -68,7 +68,7 @@ Full pre-PR validation (recommended):
 
 ```bash
 cargo build --release
-cargo test --workspace
+cargo nextest run --workspace
 cargo clippy --all-targets -- -D warnings
 ```
 
@@ -180,7 +180,7 @@ When uncertain, classify as higher risk.
 1. **Read before write** — inspect existing module, factory wiring, and adjacent tests before editing.
 2. **One concern per PR** — avoid mixed feature+refactor+infra patches.
 3. **Implement minimal patch** — no speculative abstractions, no config keys without a concrete use case.
-4. **Validate by risk tier** — docs-only: lightweight checks. Code changes: full relevant checks (`cargo test`, `cargo clippy`).
+4. **Validate by risk tier** — docs-only: lightweight checks. Code changes: full relevant checks (`cargo nextest run`, `cargo clippy`).
 5. **Document impact** — update PR notes for behavior, risk, side effects, and rollback.
 6. **Update project memory** — at the end of each session, update `herdr-mcp-context.toml` with new spec facts, gotchas, and test counts.
 

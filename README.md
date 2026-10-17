@@ -433,7 +433,7 @@ cargo run --release --bin herdr-mcp -- serve --http-only
 cd crates/herdr-mcp-ui && dx serve
 
 # Full test suite
-cargo test --workspace
+cargo nextest run --workspace
 
 # Lint + format check (native, plus wasm for the API crate and web UI)
 cargo clippy --all-targets -- -D warnings

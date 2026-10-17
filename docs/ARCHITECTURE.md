@@ -18,8 +18,8 @@ sophisticated message-trim (compression) pipeline, and a recipe engine for
 chaining tool calls with variable interpolation.
 
 **License:** AGPL v3
-**Current test suite:** run `cargo test --workspace` (361 passing at the
-Dioxus consolidation)
+**Current test suite:** run `cargo nextest run --workspace` (400 passing at the
+herdr plugin)
 **Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---
@@ -791,8 +791,8 @@ cargo run --release --bin herdr-mcp -- serve --http-only   # Terminal 1 (port 76
 cd crates/herdr-mcp-ui && dx serve                          # Terminal 2 (proxies /api)
 
 # Tests
-cargo test --workspace
-cargo test -p herdr-mcp-server http_contract   # API wire-contract round-trip
+cargo nextest run --workspace
+cargo nextest run -p herdr-mcp-server http_contract   # API wire-contract round-trip
 
 # Lint + format
 cargo clippy --all-targets -- -D warnings
