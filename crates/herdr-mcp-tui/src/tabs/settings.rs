@@ -8,11 +8,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::tui::App;
-use crate::tui::theme::{
-    accent_style, dim_style, focused_panel_block, panel_block, selected_style,
-};
-use crate::tui::truncate;
+use crate::App;
+use crate::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
+use crate::truncate;
 
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     // Editing a clipboard field — feed all keys to textarea.
@@ -80,7 +78,7 @@ async fn handle_frame_clipboard(app: &mut App, code: KeyCode, _mods: KeyModifier
         // Left/Right in preset list cycles presets
         KeyCode::Left | KeyCode::Right => {
             if app.settings.clipboard.field_focus == 0 {
-                let presets = crate::tui::BackendPreset::ALL.len();
+                let presets = crate::BackendPreset::ALL.len();
                 match code {
                     KeyCode::Right => {
                         app.settings.clipboard.preset_index =
@@ -97,8 +95,8 @@ async fn handle_frame_clipboard(app: &mut App, code: KeyCode, _mods: KeyModifier
                     _ => {}
                 }
                 // When preset changes, update command fields unless Custom
-                let preset = crate::tui::BackendPreset::ALL[app.settings.clipboard.preset_index];
-                if !matches!(preset, crate::tui::BackendPreset::Custom) {
+                let preset = crate::BackendPreset::ALL[app.settings.clipboard.preset_index];
+                if !matches!(preset, crate::BackendPreset::Custom) {
                     let (copy, paste) = preset.commands();
                     app.settings.clipboard.copy_cmd = copy.to_string();
                     app.settings.clipboard.paste_cmd = paste.to_string();
@@ -121,7 +119,7 @@ async fn handle_frame_clipboard(app: &mut App, code: KeyCode, _mods: KeyModifier
                 app.settings
                     .clipboard
                     .edit_area
-                    .set_block(crate::tui::theme::panel_block(" Edit (Esc to finish) "));
+                    .set_block(crate::theme::panel_block(" Edit (Esc to finish) "));
                 Ok(true)
             } else {
                 Ok(false)
@@ -154,7 +152,7 @@ async fn handle_clipboard_edit(app: &mut App, code: KeyCode, mods: KeyModifiers)
             Ok(false)
         }
         _ => {
-            if let Some(input) = crate::tui::to_textarea_input(code, mods) {
+            if let Some(input) = crate::to_textarea_input(code, mods) {
                 app.settings.clipboard.edit_area.input(input);
                 let new_text = app.settings.clipboard.edit_area.lines().join("\n");
                 if app.settings.clipboard.edit_field == 0 {
@@ -168,13 +166,9 @@ async fn handle_clipboard_edit(app: &mut App, code: KeyCode, mods: KeyModifiers)
     }
 }
 
+/// Round-trips a nonce through the server's clipboard tools, so it tests the
+/// commands the server is using now: unsaved edits need a Save (`s`) first.
 async fn run_clipboard_test(app: &mut App) {
-    let copy = &app.settings.clipboard.copy_cmd;
-    let paste = &app.settings.clipboard.paste_cmd;
-    if copy.is_empty() || paste.is_empty() {
-        app.settings.clipboard.test_msg = "copy/paste commands empty".into();
-        return;
-    }
     // Generate a nonce for this test run
     let nonce = format!("herdr-mcp-clip-test-{}", uuid::Uuid::new_v4().simple());
     let http = match &app.http {
@@ -198,8 +192,19 @@ async fn run_clipboard_test(app: &mut App) {
     match http.clipboard_get().await {
         Ok(got) => {
             if got == nonce {
+                let unsaved = app.config.as_ref().is_some_and(|c| {
+                    c.clipboard.copy_command.as_deref()
+                        != Some(app.settings.clipboard.copy_cmd.as_str())
+                        || c.clipboard.paste_command.as_deref()
+                            != Some(app.settings.clipboard.paste_cmd.as_str())
+                });
+                let note = if unsaved {
+                    " (active commands; press s to apply edits)"
+                } else {
+                    ""
+                };
                 app.settings.clipboard.test_msg =
-                    format!("✓ OK — round-trip {} chars", nonce.len());
+                    format!("✓ OK — round-trip {} chars{note}", nonce.len());
             } else {
                 app.settings.clipboard.test_msg =
                     format!("✗ mismatch: wrote {}, got {}", nonce, got);
@@ -212,20 +217,19 @@ async fn run_clipboard_test(app: &mut App) {
 }
 
 async fn save_clipboard_config(app: &mut App) {
-    let copy = &app.settings.clipboard.copy_cmd;
-    let paste = &app.settings.clipboard.paste_cmd;
-    let path = if app.settings.clipboard.config_path.is_empty() {
-        herdr_mcp_core::config_file_or_default()
-    } else {
-        std::path::PathBuf::from(&app.settings.clipboard.config_path)
+    let Some(http) = app.http.clone() else {
+        app.settings.clipboard.save_msg = "HTTP bridge not connected".into();
+        return;
     };
-    match herdr_mcp_core::upsert_clipboard_in_file(&path, copy, paste) {
-        Ok(_) => {
-            app.settings.clipboard.save_msg = format!(
-                "Saved -> {} ({} bytes)",
-                path.display(),
-                copy.len() + paste.len()
-            );
+    let cfg = herdr_mcp_api::ClipboardConfig {
+        copy_command: Some(app.settings.clipboard.copy_cmd.clone()),
+        paste_command: Some(app.settings.clipboard.paste_cmd.clone()),
+    };
+    match http.set_clipboard_config(&cfg).await {
+        Ok(config) => {
+            app.settings.clipboard.save_msg =
+                format!("Saved -> {} (active now)", config.config_path);
+            app.set_config(config);
         }
         Err(e) => {
             app.settings.clipboard.save_msg = format!("Save failed: {e}");
@@ -306,7 +310,12 @@ fn render_clipboard(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
     // Config file path
     lines.push(Line::from(Span::styled(
-        format!("Config file: {}", clip.config_path),
+        format!(
+            "Config file: {}",
+            app.config
+                .as_ref()
+                .map_or("(bridge not connected)", |c| c.config_path.as_str())
+        ),
         dim_style(),
     )));
 
@@ -315,7 +324,7 @@ fn render_clipboard(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     // Backend presets (radio-like)
     lines.push(Line::from(Span::styled("Backend:", accent_style())));
     let preset_start_y = inner.y + lines.len() as u16;
-    for (i, preset) in crate::tui::BackendPreset::ALL.iter().enumerate() {
+    for (i, preset) in crate::BackendPreset::ALL.iter().enumerate() {
         let selected = clip.preset_index == i && clip.field_focus == 0;
         let marker = if selected { "● " } else { "○ " };
         let label = format!("{} {}", marker, preset.label());
@@ -461,7 +470,12 @@ fn render_runtime(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let herdr_bin = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
+    // What the server actually uses (GET /api/config).
+    let (herdr_socket, herdr_bin) = app
+        .config
+        .as_ref()
+        .map(|c| (c.herdr_socket.clone(), c.herdr_bin.clone()))
+        .unwrap_or_default();
     let lines = vec![
         row(
             app.settings.selected == 0,
@@ -476,9 +490,9 @@ fn render_runtime(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         row(
             app.settings.selected == 2,
             "herdr socket".into(),
-            truncate(&app.settings.herdr_socket, 40),
+            truncate(&herdr_socket, 40),
         ),
-        row(app.settings.selected == 3, "HERDR_BIN".into(), herdr_bin),
+        row(app.settings.selected == 3, "herdr binary".into(), herdr_bin),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

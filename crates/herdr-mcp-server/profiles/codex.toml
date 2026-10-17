@@ -1,0 +1,4 @@
+id = "codex"
+name = "Codex"
+kind = "codex"
+notes = "Driven natively by herdr (agent start --kind codex)."

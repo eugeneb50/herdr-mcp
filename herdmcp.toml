@@ -36,8 +36,9 @@ http-port = 7676
 # Data directory for recipes, sessions, trim stats, PFC1 memory (default: ./data)
 data-dir = "./data"
 
-# herdr daemon socket path (default: ~/.config/herdr/herdr.sock)
-herdr-socket = "~/.config/herdr/herdr.sock"
+# herdr daemon socket path. Unset: $HERDR_SOCKET_PATH, else the named
+# session's socket ($HERDR_SESSION), else ~/.config/herdr/herdr.sock.
+# herdr-socket = "~/.config/herdr/herdr.sock"
 
 # Spec facts the tests rely on
 [[spec]]

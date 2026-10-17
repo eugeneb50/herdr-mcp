@@ -1,0 +1,21 @@
+[package]
+name = "herdr-mcp-tui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+tokio = { workspace = true }
+crossterm = { workspace = true }
+ratatui = { workspace = true }
+unicode-width = { workspace = true }
+uuid = { workspace = true }
+tui-textarea-2 = { version = "0.12", default-features = false, features = ["crossterm"] }
+herdr-mcp-api = { path = "../herdr-mcp-api" }
+herdr-mcp-trim = { path = "../herdr-mcp-trim" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+tempfile = { workspace = true }

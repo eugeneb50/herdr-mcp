@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.1.0--dev-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-299%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-361%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-4%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
@@ -21,7 +21,7 @@ MCP (Model Context Protocol) server written in Rust that exposes [herdr](https:/
   - [HTTP API](#http-api)
   - [Recipe format](#recipe-format)
   - [Environment](#environment)
-- [Tools (49)](#tools-49)
+- [Tools (55)](#tools-55)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
@@ -55,16 +55,16 @@ herdr-mcp folder-key   # per-folder PFC1 key management
 
 - **MCP mode** — plug into any MCP-compatible client (Claude Desktop, Cursor, Claude Code, Continue, OpenCode) to control herdr workspaces, tabs, panes, and agents
 - **HTTP bridge** — built-in Axum HTTP server enables browser-based interaction
-- **Web playground** — full React UI for exploring and invoking tools, building recipes, and inspecting results (served from the HTTP bridge itself, no separate dev server needed in production)
+- **Web playground** — Dioxus (Rust → wasm) UI for exploring and invoking tools, building recipes, and inspecting results (served from the HTTP bridge itself, no separate dev server needed in production)
 - **Kitchen-sink TUI** — VS Code-style tabbed terminal dashboard with mouse + keyboard navigation, trim analytics, variable editor, and settings
-- **51 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, message-trim, recipe templates, scheduler, folder-key, and clipboard operations against herdr
+- **58 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, message-trim, recipe templates, scheduler, folder-key, clipboard, and proxy operations against herdr
 - **Recipe engine** — chain multiple tool calls with variable interpolation (`{{ stepId.result.path }}`)
 - **Message-trim pipeline** — `caveman` (lossy style) + `pfc1` (lossless Cherokee-syllabary phonetic) compressors for agent-to-agent comms
 - **Per-pane trim policies** — attach staged compression pipelines to agents via `trim_policy_set`/`trim_policy_get`
 - **Live agent registry** — Unix socket event subscriber tracks panes in real time; role/label resolution for a2a primitives
 - **Cron-based scheduler** — schedule recipe runs on cron expressions
 - **Per-folder PFC1 keys** — domain-specific compression keys built by scanning a folder
-- **4-crate workspace** — `herdr-mcp-core`, `herdr-mcp-trim`, `herdr-mcp-server`, `herdr-mcp-cli` (299 tests, all passing)
+- **Cargo workspace** — `herdr-mcp-api`, `herdr-mcp-core`, `herdr-mcp-trim`, `herdr-mcp-server`, `herdr-mcp-proxy`, `herdr-mcp-ui`, `herdr-mcp-cli`
 - **No external dependencies** beyond herdr itself — shells out to the CLI via `tokio::process::Command`
 
 ---
@@ -118,26 +118,20 @@ The server is a thin wrapper that shells out to the local `herdr` CLI binary. It
 ```
 herdr-mcp/
 ├── crates/
+│   ├── herdr-mcp-api/       # HTTP wire contract: every /api/* type + typed ApiClient (native + wasm)
 │   ├── herdr-mcp-core/      # Config system (TOML + env + CLI), error types
 │   ├── herdr-mcp-trim/      # Message-trim pipeline (caveman, pfc1, folder keys, TUI dashboard)
-│   ├── herdr-mcp-server/    # MCP server, 51 tools, HTTP bridge, recipe engine, event subscriber
-│   └── herdr-mcp-cli/       # Binary entrypoint (serve/trim/dashboard/folder-key)
-├── src/
-│   ├── main.rs              # Legacy monolith binary entrypoint
-│   ├── server.rs            # Legacy monolith server (coexists with crates)
-│   ├── main.tsx             # React entrypoint (Vite + Tailwind + TypeScript)
-│   ├── App.tsx              # HashRouter: landing / docs / playground / trim / variables
-│   ├── components/          # Landing page + Documentation + Playground components
-│   └── recipes/             # TypeScript recipe types for frontend
-├── Cargo.toml               # 4-member workspace
-├── package.json             # Vite + React 19 + Tailwind 4
-├── vite.config.ts           # vite-plugin-singlefile, /api proxy
-└── index.html
+│   ├── herdr-mcp-server/    # MCP server, tools, HTTP bridge, recipe engine, event subscriber
+│   ├── herdr-mcp-proxy/     # HTTPS intercepting proxy with per-pane trim policies
+│   ├── herdr-mcp-ui/        # Dioxus web UI (served by the HTTP bridge)
+│   └── herdr-mcp-cli/       # Binaries: herdr-mcp (serve) + herdr-trim (trim/dashboard/folder-key)
+├── data/                    # Runtime persistence (recipes, variables, sessions, …)
+└── docs/                    # Architecture + PRD
 ```
 
-The 4-crate workspace is the canonical home for new code; the `src/` monolith
-is legacy. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full
-reference.
+The web UI and the TUI both talk to the bridge through `herdr-mcp-api`, so
+every `/api/*` shape is defined once. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+for the full reference.
 
 ---
 
@@ -150,7 +144,6 @@ reference.
 | [AGENTS.md](AGENTS.md) | Cross-tool agent instructions for AI coding assistants (conventions, risk tiers, workflow, anti-patterns) |
 | [compressorplan.md](compressorplan.md) | Message-trim design plan (caveman + pfc1) |
 | [a2a.md](a2a.md) | Agent-to-agent primitive design and usage |
-| [TEST_PLAN.md](TEST_PLAN.md) | Test suite specification (299 tests across 4 crates) |
 | [herdmcp.toml](herdmcp.toml) | Persistent configuration (HTTP port, data dir, herdr socket) |
 
 ---
@@ -161,7 +154,7 @@ reference.
 
 - [Rust](https://rustup.rs/) 1.75+
 - [herdr](https://herdr.dev) CLI on `PATH`
-- [Node.js](https://nodejs.org/) 20+ (only needed for website development)
+- [Dioxus CLI](https://dioxuslabs.com/) 0.7 (`cargo install dioxus-cli`) and the `wasm32-unknown-unknown` target — only needed to build the web UI
 
 ### Build from source
 
@@ -169,23 +162,22 @@ reference.
 git clone <repo-url>
 cd herdr-mcp
 
-# Build the MCP server binary
+# Build the binaries (herdr-mcp, herdr-trim)
 cargo build --release
 
-# Build the website (optional — single HTML file)
-npm install
-npm run build
+# Build the web UI (optional) → target/dx/herdr-mcp-ui/release/web/public
+cd crates/herdr-mcp-ui && dx bundle --platform web --release
 ```
 
-### Subcommands
+### Binaries
 
-| Subcommand | Description |
+| Command | Description |
 |------------|-------------|
-| (no subcommand) | Run MCP stdio server + HTTP bridge on port 7676 |
-| `serve` | Explicit MCP + HTTP with full flag control |
-| `dashboard` | Kitchen-sink TUI (mouse+keyboard), runs on top of the serve stack |
-| `trim` | One-shot message-trim pipeline on text or file |
-| `folder-key` | Build/list/show/decompress per-folder PFC1 keys |
+| `herdr-mcp` | Run MCP stdio server + HTTP bridge on port 7676 (same as `serve`) |
+| `herdr-mcp serve` | Explicit MCP + HTTP with full flag control |
+| `herdr-trim dashboard` | Kitchen-sink TUI (mouse+keyboard), runs on top of the serve stack |
+| `herdr-trim trim` | One-shot message-trim pipeline on text or file |
+| `herdr-trim folder-key` | Build/list/show/decompress per-folder PFC1 keys |
 
 ### Serve flags
 
@@ -195,8 +187,9 @@ npm run build
 | `--http-only` | Skip MCP stdio, HTTP only |
 | `--data-dir <path>` | Data directory (default: ./data) |
 | `--herdr-socket <path>` | herdr daemon socket path |
+| `--proxy-port <port>` | Auto-start the HTTPS intercepting proxy on this port |
 
-### Dashboard flags
+### Dashboard flags (`herdr-trim dashboard`)
 
 | Flag | Description |
 |------|-------------|
@@ -238,8 +231,10 @@ All settings are overridden by CLI flags and environment variables.
 ./target/release/herdr-mcp
 ```
 
-Starts MCP stdio transport **and** the HTTP bridge on port **7676**. The web
-playground is available at http://localhost:7676/.
+Starts MCP stdio transport **and** the HTTP bridge on `127.0.0.1:7676`. The
+web playground is available at http://localhost:7676/ once the UI is built
+(`dx bundle`, see above). The bundle is served from `http.web-dir` /
+`HERDR_MCP_WEB_DIR`, defaulting to the in-repo `dx bundle` output.
 
 Add to your MCP client config:
 
@@ -262,7 +257,7 @@ Add to your MCP client config:
 ### Kitchen-sink dashboard
 
 ```bash
-./target/release/herdr-mcp dashboard
+./target/release/herdr-trim dashboard
 ```
 
 Opens a VS Code-style tabbed TUI with mouse + keyboard navigation,
@@ -273,37 +268,37 @@ settings, and playground into a single herdr sidecar pane.
 
 ```bash
 # Terminal 1: Rust HTTP server
-cargo run --release -- serve --http-only
+cargo run --release --bin herdr-mcp -- serve --http-only
 
-# Terminal 2: Vite dev server (proxies /api → localhost:7676)
-npm run dev
+# Terminal 2: Dioxus dev server with hot reload (proxies /api → localhost:7676)
+cd crates/herdr-mcp-ui && dx serve
 
-# Open http://localhost:5173/
+# Open the URL dx prints (default http://localhost:8080/)
 ```
 
 ### HTTP API
 
-All endpoints return JSON. See [docs/ARCHITECTURE.md §5](docs/ARCHITECTURE.md#5-http-bridge-api) for the full route reference.
+All endpoints return JSON. Request/response types are defined in
+`crates/herdr-mcp-api` (use its `ApiClient` from Rust). See [docs/ARCHITECTURE.md §5](docs/ARCHITECTURE.md#5-http-bridge-api) for the full route reference.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/` | Web playground (serves the single-file React app) |
+| `GET` | `/*` | Web playground (Dioxus bundle from `http.web-dir`, SPA fallback to `index.html`) |
 | `GET` | `/api/health` | Health check → `"ok"` |
-| `GET` | `/api/tools` | List all 51 tools with JSON schemas |
+| `GET` | `/api/tools` | List all 58 tools with JSON schemas |
 | `POST` | `/api/tools/:name` | Invoke a tool by name, body is the parameter object |
 | `GET` | `/api/agents?workspace_id=` | Live pane list from AgentRegistry (canonical) |
 | `GET` | `/api/workspaces` | Workspace list via herdr CLI |
-| `POST` | `/api/recipe` | Execute a multi-step recipe with variable interpolation |
+| `POST` | `/api/runs` | Start a run (saved `recipe_id` or ad-hoc `steps`); `?wait=true` returns the finished run |
+| `GET` | `/api/herdr/schema` | The installed herdr's API schema (every socket method + params) |
 | `GET` / `POST` | `/api/recipes` | List / create recipes |
 | `GET` / `PUT` / `DELETE` | `/api/recipes/:id` | Get / update / delete a recipe |
-| `POST` | `/api/recipes/:id/run` | Run a recipe by ID |
 | `GET` / `POST` | `/api/variables` | List / save variables |
 | `GET` / `DELETE` | `/api/variables/{key}` | Get / delete a variable |
 | `GET` | `/api/trim/status?workspace_id=` | Aggregate trim savings |
 | `POST` | `/api/trim/diagnose` | End-to-end trim readiness check |
 | `POST` | `/api/trim/summary` | Fire savings summary notification |
 | `POST` | `/api/trim/dashboard/open` | Open live dashboard in a herdr split pane |
-| `GET` | `/api/executions/{id}` | Get recipe execution result |
 
 ### Recipe format
 
@@ -342,7 +337,8 @@ Variables are resolved from previous step results using `{{ stepId.result.path }
 | `HERDR_MCP_DATA_DIR` | `./data` | Data directory override |
 | `HERDR_MCP_HTTP_PORT` | — | HTTP bridge port override |
 | `HERDR_MCP_HTTP_ONLY` | — | Set to disable MCP stdio |
-| `HERDR_MCP_HTTP_BIND` | `0.0.0.0` | HTTP bind address |
+| `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
+| `HERDR_MCP_WEB_DIR` | in-repo `dx bundle` output | Directory of the built web UI |
 | `HERDR_MCP_CONFIG` | — | Config file path |
 | `HERDR_MCP_TOOL_TIMEOUT` | — | Tool call timeout in seconds |
 | `HERDR_MCP_MAX_CONCURRENT` | — | Max concurrent tool calls |
@@ -356,9 +352,9 @@ Variables are resolved from previous step results using `{{ stepId.result.path }
 
 ---
 
-## Tools (51)
+## Tools (55)
 
-Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-51-tools-total).
+Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-55-tools-total).
 
 ### Discovery (7)
 | Tool | Description |
@@ -378,7 +374,9 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `create_tab` | Create a new tab |
 | `split_pane` | Split a pane right or down (by pane_id or label) |
 | `close_pane` | Close a pane by pane_id or label |
-| `start_agent` | Start an agent in a new pane |
+| `agent_spawn` | Start an agent from a profile in a new pane |
+| `herdr_api` | Call any herdr socket API method (`GET /api/herdr/schema` lists them) |
+| `pane_exec` | Run a shell command in a pane; return its output and exit code |
 
 ### Read (2) / Write (4)
 | Tool | Description |
@@ -406,7 +404,7 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `agent_wait` | Wait for agent by role/pane |
 | `agent_list` | List registry agents |
 
-### Session variables (2) / Message-trim (10) / Recipes (3) / Scheduler (4) / Folder-key (4) / Clipboard (2)
+### Session variables (2) / Message-trim (10) / Recipes (3) / Scheduler (4) / Folder-key (4) / Clipboard (2) / Proxy (4)
 | Tool | Description |
 |------|-------------|
 | `var_get` / `var_set` | Get / set session variable |
@@ -417,6 +415,7 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `schedule_recipe` / `list_schedules` / `delete_schedule` / `enable_schedule` | Cron-based recipe scheduling |
 | `build_folder_key` / `get_folder_key` / `list_folder_keys` / `decompress_with_folder_key` | Per-folder PFC1 keys |
 | `clipboard_get` / `clipboard_set` | System clipboard access |
+| `proxy_startup` / `proxy_diagnose` / `proxy_policy_set` / `proxy_policy_get` | HTTPS intercepting proxy: start, health report, per-pane trim policy |
 
 **Important:** IDs are session-local and may compact when items are closed. Re-read IDs from list commands after structural changes.
 All pane-targeting tools accept an optional `label` parameter as an alternative to `pane_id` — the server looks up the label via `herdr pane list` automatically.
@@ -429,22 +428,22 @@ See [AGENTS.md](AGENTS.md) for full agent-specific development conventions, buil
 
 ```bash
 # Terminal 1: Rust server with HTTP bridge
-cargo run --release -- --http 8080 --http-only
+cargo run --release --bin herdr-mcp -- serve --http-only
 
-# Terminal 2: Vite dev server
-npm run dev
+# Terminal 2: web UI with hot reload
+cd crates/herdr-mcp-ui && dx serve
 
-# Full test suite (299 tests across 4 crates)
+# Full test suite
 cargo test --workspace
 
-# Lint + format check
+# Lint + format check (native, plus wasm for the API crate and web UI)
 cargo clippy --all-targets -- -D warnings
+cargo clippy -p herdr-mcp-api -p herdr-mcp-ui --target wasm32-unknown-unknown -- -D warnings
 cargo fmt --all -- --check
 ```
 
-- Rust code lives in `crates/` (4-crate workspace); legacy `src/` monolith also present
-- Website is a single-page React app bundled via `vite-plugin-singlefile` into `dist/index.html`
-- 299 tests across 4 crates (all passing): `herdr-mcp-trim` (169), `herdr-mcp-server` (82), `herdr-mcp-core` (38), `herdr-mcp-cli` (10)
+- All code lives in `crates/` (Cargo workspace); there is no Node toolchain
+- `/api/*` shapes live in `crates/herdr-mcp-api`; `http_contract_roundtrip_with_api_client` (server crate) checks them against the real router
 - `RUST_LOG` controls tracing verbosity; stdout is reserved for MCP JSON-RPC (stderr for logs)
 
 ---

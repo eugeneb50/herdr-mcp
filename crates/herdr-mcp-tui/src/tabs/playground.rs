@@ -8,7 +8,7 @@
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
 use herdr_mcp_api::{
-    CreateRecipeRequest, Recipe, RecipeRequest, RecipeTemplate, SaveVariableRequest,
+    CreateRecipeRequest, Recipe, RecipeTemplate, RunRecord, RunStatus, StartRunRequest,
     UpdateRecipeRequest,
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -18,11 +18,11 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use serde_json::{Map, Value};
 
 use super::variables::is_auto_stored_key;
-use crate::tui::theme::{
+use crate::theme::{
     accent_style, dim_style, focused_panel_block, muted_style, panel_block, selected_style,
     warn_style,
 };
-use crate::tui::{App, FieldKind, PlaygroundSub, RecipeStep, ToolCategory, ToolField};
+use crate::{App, FieldKind, PlaygroundSub, RecipeStep, ToolCategory, ToolField};
 
 /// Hardcoded category definitions for the tool picker.
 /// Each entry: (category label, tool name prefixes).
@@ -42,18 +42,19 @@ fn tool_category_map() -> Vec<(&'static str, Vec<&'static str>)> {
         ),
         (
             "Lifecycle",
-            vec![
-                "create_workspace",
-                "create_tab",
-                "split_pane",
-                "close_pane",
-                "start_agent",
-            ],
+            vec!["create_workspace", "create_tab", "split_pane", "close_pane"],
         ),
         ("Read", vec!["read_pane", "read_agent"]),
         (
             "Write",
-            vec!["send_text", "send_keys", "run_command", "send_agent"],
+            vec![
+                "send_text",
+                "send_keys",
+                "run_command",
+                "pane_exec",
+                "send_agent",
+                "herdr_api",
+            ],
         ),
         (
             "Synchronize",
@@ -441,7 +442,7 @@ async fn handle_runner_fields(app: &mut App, code: KeyCode, mods: KeyModifiers) 
                     .iter()
                     .map(|f| f.default.clone().unwrap_or_default())
                     .collect();
-                pg.edit_area = crate::tui::TextArea::default();
+                pg.edit_area = crate::TextArea::default();
                 pg.editing_field = false;
                 pg.error = None;
                 Ok(true)
@@ -489,9 +490,9 @@ async fn handle_runner_fields(app: &mut App, code: KeyCode, mods: KeyModifiers) 
                 {
                     pg.editing_field = true;
                     let cur = pg.field_values.get(i).cloned().unwrap_or_default();
-                    pg.edit_area = crate::tui::TextArea::new(vec![cur]);
+                    pg.edit_area = crate::TextArea::new(vec![cur]);
                     pg.edit_area
-                        .input(crate::tui::to_textarea_input(code, mods).unwrap());
+                        .input(crate::to_textarea_input(code, mods).unwrap());
                 }
                 Ok(true)
             }
@@ -637,8 +638,8 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
     // Shift+Tab / Tab cycles between Templates and Saved tabs.
     if matches!(code, KeyCode::BackTab | KeyCode::Tab) {
         app.playground.builder_library_tab = match app.playground.builder_library_tab {
-            crate::tui::BuilderLibraryTab::Templates => crate::tui::BuilderLibraryTab::Saved,
-            crate::tui::BuilderLibraryTab::Saved => crate::tui::BuilderLibraryTab::Templates,
+            crate::BuilderLibraryTab::Templates => crate::BuilderLibraryTab::Saved,
+            crate::BuilderLibraryTab::Saved => crate::BuilderLibraryTab::Templates,
         };
         app.playground.builder_library_focus = 0;
         return Ok(true);
@@ -646,8 +647,8 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
 
     // Up/Down navigation.
     let item_count = match app.playground.builder_library_tab {
-        crate::tui::BuilderLibraryTab::Saved => app.recipes.as_ref().map_or(0, Vec::len),
-        crate::tui::BuilderLibraryTab::Templates => app.templates.as_ref().map_or(0, Vec::len),
+        crate::BuilderLibraryTab::Saved => app.recipes.as_ref().map_or(0, Vec::len),
+        crate::BuilderLibraryTab::Templates => app.templates.as_ref().map_or(0, Vec::len),
     };
     match code {
         KeyCode::Up => {
@@ -668,7 +669,7 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
             let lib_tab = app.playground.builder_library_tab;
             let lib_focus = app.playground.builder_library_focus;
             match lib_tab {
-                crate::tui::BuilderLibraryTab::Saved => {
+                crate::BuilderLibraryTab::Saved => {
                     let id = app
                         .recipes
                         .as_ref()
@@ -686,7 +687,7 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
                         }
                     }
                 }
-                crate::tui::BuilderLibraryTab::Templates => {
+                crate::BuilderLibraryTab::Templates => {
                     let tmpl = app
                         .templates
                         .as_ref()
@@ -702,7 +703,7 @@ async fn handle_library(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
             return Ok(true);
         }
         KeyCode::Char('x')
-            if app.playground.builder_library_tab == crate::tui::BuilderLibraryTab::Saved =>
+            if app.playground.builder_library_tab == crate::BuilderLibraryTab::Saved =>
         {
             let id = app
                 .recipes
@@ -789,7 +790,7 @@ async fn handle_builder_param_edit(
             return Ok(true);
         }
         _ => {
-            if let Some(input) = crate::tui::to_textarea_input(code, mods) {
+            if let Some(input) = crate::to_textarea_input(code, mods) {
                 pg.builder_param_edit_area.input(input);
             }
         }
@@ -842,7 +843,7 @@ async fn handle_builder_step_detail(
                             other => other.to_string(),
                         })
                         .unwrap_or_default();
-                    pg.builder_param_edit_area = crate::tui::TextArea::new(vec![val]);
+                    pg.builder_param_edit_area = crate::TextArea::new(vec![val]);
                     pg.builder_editing_param = true;
                 }
             }
@@ -891,7 +892,7 @@ async fn handle_builder_global(app: &mut App, code: KeyCode, mods: KeyModifiers)
         }
         KeyCode::Char('n') if mods.contains(KeyModifiers::CONTROL) => {
             let cur = app.playground.builder_recipe_name.clone();
-            app.playground.builder_param_edit_area = crate::tui::TextArea::new(vec![cur]);
+            app.playground.builder_param_edit_area = crate::TextArea::new(vec![cur]);
             app.playground.builder_open_step = None;
             app.playground.builder_editing_param = true;
             app.playground.builder_param_focus = usize::MAX;
@@ -925,18 +926,11 @@ async fn handle_builder_global(app: &mut App, code: KeyCode, mods: KeyModifiers)
                 if let Some(http) = app.http.clone() {
                     app.playground.builder_loading = true;
                     app.status_msg = "running recipe…".into();
-                    match http.run_recipe_by_id(id).await {
-                        Ok(v) => {
-                            app.playground.builder_result = serde_json::to_value(v).ok();
-                            app.playground.builder_error = None;
-                            app.status_msg = "recipe run ok".into();
-                        }
-                        Err(e) => {
-                            app.playground.builder_error = Some(e.to_string());
-                            app.status_msg = format!("run failed: {e}");
-                        }
-                    }
-                    app.playground.builder_loading = false;
+                    let req = StartRunRequest {
+                        recipe_id: Some(id),
+                        ..Default::default()
+                    };
+                    show_run(app, http.run_and_wait(&req).await);
                 }
             } else {
                 app.playground.builder_error =
@@ -1086,32 +1080,36 @@ async fn builder_run_inline(app: &mut App) {
         return;
     }
 
-    let req = RecipeRequest {
+    let req = StartRunRequest {
         name: Some(app.playground.builder_recipe_name.clone()),
-        session_id: None,
-        steps: app
-            .playground
-            .builder_steps
-            .iter()
-            .map(RecipeStep::to_api)
-            .collect(),
+        steps: Some(
+            app.playground
+                .builder_steps
+                .iter()
+                .map(RecipeStep::to_api)
+                .collect(),
+        ),
+        ..Default::default()
     };
-
     app.playground.builder_loading = true;
     app.status_msg = "running recipe…".into();
-    match http.run_recipe(&req).await {
-        Ok(resp) => {
-            // The server reports "completed" or "failed".
-            let failed = resp.status != "completed";
-            let err = resp.error.clone();
-            app.playground.builder_result = serde_json::to_value(&resp).ok();
-            if failed {
-                let err = err.unwrap_or_else(|| format!("status {}", resp.status));
-                app.playground.builder_error = Some(err.clone());
-                app.status_msg = format!("recipe failed: {err}");
-            } else {
+    show_run(app, http.run_and_wait(&req).await);
+}
+
+/// Put a finished run (or the request error) in the builder's result pane.
+fn show_run(app: &mut App, run: Result<RunRecord, herdr_mcp_api::ApiError>) {
+    match run {
+        Ok(run) => {
+            app.playground.builder_result = serde_json::to_value(&run).ok();
+            if run.status == RunStatus::Completed {
                 app.playground.builder_error = None;
                 app.status_msg = "recipe run ok".into();
+            } else {
+                let err = run
+                    .error
+                    .unwrap_or_else(|| format!("status {:?}", run.status));
+                app.playground.builder_error = Some(err.clone());
+                app.status_msg = format!("recipe {:?}: {err}", run.status);
             }
         }
         Err(e) => {
@@ -1172,130 +1170,23 @@ async fn run_tool(app: &mut App) {
             app.playground.error = None;
             let pretty = serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string());
             app.playground.result_area =
-                crate::tui::TextArea::new(pretty.lines().map(str::to_string).collect());
+                crate::TextArea::new(pretty.lines().map(str::to_string).collect());
             app.status_msg = format!("{name} ok");
 
-            // Auto-extract and store variables from the result
-            extract_and_store_variables(app, &name, &v).await;
+            // The bridge saved any auto-variables for this tool; show them.
+            if let Ok(vars) = http.list_variables().await {
+                app.variables_state.entries = crate::parse_variables(&vars);
+            }
         }
         Err(e) => {
             app.playground.error = Some(e.to_string());
             app.playground.result = None;
-            app.playground.result_area = crate::tui::TextArea::new(vec![format!("error: {e}")]);
+            app.playground.result_area = crate::TextArea::new(vec![format!("error: {e}")]);
             app.status_msg = format!("{name} failed");
         }
     }
     // Persist last-used values so tab navigation + restarts restore context.
     app.persist_playground().await;
-}
-
-/// Extract useful variables from a tool result and store them for later use.
-/// This enables recipes to reference pane IDs, agent info, etc. from previous steps.
-async fn extract_and_store_variables(app: &mut App, tool_name: &str, result: &Value) {
-    let Some(http) = app.http.clone() else {
-        return;
-    };
-
-    // List of tools whose results should be auto-stored as variables
-    let auto_store_tools: &[&str] = &[
-        "list_workspaces",
-        "list_tabs",
-        "list_panes",
-        "list_agents",
-        "get_pane",
-        "get_agent",
-        "status",
-        "agent_spawn",
-        "agent_read",
-    ];
-
-    if !auto_store_tools.contains(&tool_name) {
-        return;
-    }
-
-    // Extract the result content
-    let result_content = extract_result_content(result);
-
-    // Generate a variable name based on the tool and timestamp
-    let var_key = format!("_{tool_name}_result");
-
-    // Store the full result, each list item, and per-pane fields.
-    let mut vars: Vec<(String, Value)> = vec![(var_key.clone(), result_content.clone())];
-    if let Some(arr) = result_content.as_array() {
-        for (i, item) in arr.iter().enumerate() {
-            vars.push((format!("{var_key}_[{i}]"), item.clone()));
-        }
-        if tool_name == "list_panes" || tool_name == "get_pane" {
-            for (i, pane) in arr.iter().enumerate() {
-                for (field, suffix) in [
-                    ("pane_id", "id"),
-                    ("label", "label"),
-                    ("agent_status", "status"),
-                ] {
-                    if let Some(v) = pane.get(field).and_then(|v| v.as_str()) {
-                        vars.push((format!("pane_{i}_{suffix}"), Value::String(v.to_string())));
-                    }
-                }
-            }
-        }
-    }
-    for (key, value) in vars {
-        let req = SaveVariableRequest {
-            key: key.clone(),
-            value,
-            ..Default::default()
-        };
-        if let Err(e) = http.save_variable(&req).await {
-            app.log_debug(format!("Failed to store variable {key}: {e}"));
-        }
-    }
-
-    // Update the variables tab to show the new variables
-    if let Ok(v) = http.list_variables().await {
-        app.variables_state.entries = crate::tui::parse_variables(&v);
-    }
-
-    app.log_debug(format!(
-        "Extracted and stored {} variables from {}",
-        if result_content.is_array() {
-            result_content.as_array().unwrap().len()
-        } else {
-            1
-        },
-        tool_name
-    ));
-}
-
-/// Extract the useful content from a tool result for variable storage.
-/// MCP results have content array; we extract JSON from text content.
-fn extract_result_content(result: &Value) -> Value {
-    // If result has a content array with JSON, extract it
-    if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
-        for item in content {
-            if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                // Try to parse as JSON
-                if let Ok(parsed) = serde_json::from_str::<Value>(text) {
-                    return parsed;
-                }
-                // Return as string if not JSON
-                return Value::String(text.to_string());
-            }
-            // Check for JSON content type
-            if item.get("type").and_then(|t| t.as_str()) == Some("json")
-                && let Some(json) = item.get("data")
-            {
-                return json.clone();
-            }
-        }
-    }
-
-    // If result has direct JSON data (not wrapped in content)
-    if result.get("result").is_some() {
-        return result.get("result").unwrap().clone();
-    }
-
-    // Return the whole result if nothing else worked
-    result.clone()
 }
 
 pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
@@ -1363,7 +1254,7 @@ fn render_tool_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
             Line::from("Not connected to herdr-mcp bridge."),
             Line::from(""),
             Line::from("Start `herdr-mcp serve` (or run"),
-            Line::from("`herdr-mcp dashboard --http-port <port>`)."),
+            Line::from("`herdr-trim dashboard --http-port <port>`)."),
             Line::from(""),
             Line::from(format!(
                 "Auto-discovering on :{} / :8080 / :7676 …",
@@ -1897,8 +1788,8 @@ fn render_builder_result(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 fn render_library(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let pg = &app.playground;
     let tab_label = match pg.builder_library_tab {
-        crate::tui::BuilderLibraryTab::Templates => "Templates",
-        crate::tui::BuilderLibraryTab::Saved => "Saved",
+        crate::BuilderLibraryTab::Templates => "Templates",
+        crate::BuilderLibraryTab::Saved => "Saved",
     };
     let block = panel_block(&format!(" Library [{tab_label}] "));
     let inner = block.inner(area);
@@ -1927,7 +1818,7 @@ fn render_library(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     );
 
     match pg.builder_library_tab {
-        crate::tui::BuilderLibraryTab::Templates => {
+        crate::BuilderLibraryTab::Templates => {
             // Same list (and order) the loader indexes into: `/api/templates`.
             let templates = app.templates.as_deref().unwrap_or_default();
             if templates.is_empty() {
@@ -1961,7 +1852,7 @@ fn render_library(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let list = List::new(items).highlight_symbol("");
             frame.render_stateful_widget(list, list_area, &mut state);
         }
-        crate::tui::BuilderLibraryTab::Saved => {
+        crate::BuilderLibraryTab::Saved => {
             let recipes = app.recipes.as_ref();
             if let Some(arr) = recipes {
                 if arr.is_empty() {

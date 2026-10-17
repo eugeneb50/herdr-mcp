@@ -8,12 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{
-    AgentHandle, AgentsResponse, AutoVariablesResponse, CreateRecipeRequest, DiagnoseReport,
-    ExecutionResult, ExportScriptResponse, PlaygroundSnapshot, ProxyPolicy, Recipe, RecipeRequest,
-    RecipeResponse, RecipeTemplate, SaveVariableRequest, ToolsResponse, TrimPolicy,
-    TrimStatusResponse, UpdateRecipeRequest, VariableStore,
-};
+use crate::*;
 
 /// Errors from [`ApiClient`].
 #[derive(Debug)]
@@ -26,7 +21,7 @@ pub enum ApiError {
     Status { status: u16, body: String },
     /// 2xx response whose body didn't match the expected type.
     Decode(serde_json::Error),
-    /// The tool ran but reported `is_error`; carries its text.
+    /// The tool ran but reported `isError`; carries its text.
     Tool(String),
 }
 
@@ -160,9 +155,22 @@ impl ApiClient {
             .map(|_| ())
     }
 
-    /// `GET /api/config` — runtime config summary (free-form JSON).
-    pub async fn config(&self) -> Result<Value, ApiError> {
+    /// `GET /api/config` — the bridge's runtime config.
+    pub async fn config(&self) -> Result<ConfigResponse, ApiError> {
         self.get(&["api", "config"]).await
+    }
+
+    /// `PUT /api/config/clipboard` — save clipboard commands to the config
+    /// file and apply them to the running server. Both must be non-empty.
+    pub async fn set_clipboard_config(
+        &self,
+        cfg: &ClipboardConfig,
+    ) -> Result<ConfigResponse, ApiError> {
+        Self::json(
+            self.request(Method::PUT, &["api", "config", "clipboard"])
+                .json(cfg),
+        )
+        .await
     }
 
     /// `GET /api/tools` — every MCP tool definition with its JSON schema.
@@ -192,7 +200,7 @@ impl ApiClient {
     }
 
     /// `clipboard_set` tool — write `text` to the server's clipboard.
-    /// A tool-level failure (`is_error`) is returned as an error.
+    /// A tool-level failure (`isError`) is returned as an error.
     pub async fn clipboard_set(&self, text: &str) -> Result<(), ApiError> {
         let v = self
             .call_tool("clipboard_set", &serde_json::json!({ "text": text }))
@@ -268,11 +276,6 @@ impl ApiClient {
 
     // ── recipes ────────────────────────────────────────────────────────
 
-    /// `POST /api/recipe` — run an ad-hoc recipe.
-    pub async fn run_recipe(&self, req: &RecipeRequest) -> Result<RecipeResponse, ApiError> {
-        self.post(&["api", "recipe"], req).await
-    }
-
     /// `GET /api/recipes`.
     pub async fn list_recipes(&self) -> Result<Vec<Recipe>, ApiError> {
         self.get(&["api", "recipes"]).await
@@ -307,30 +310,99 @@ impl ApiClient {
             .await
     }
 
-    /// `POST /api/recipes/{id}/run`.
-    pub async fn run_recipe_by_id(&self, id: Uuid) -> Result<ExecutionResult, ApiError> {
-        self.post(
-            &["api", "recipes", &id.to_string(), "run"],
-            &serde_json::json!({}),
-        )
-        .await
-    }
-
-    /// `GET /api/recipes/{id}/export` — bash script equivalent.
-    pub async fn export_recipe(&self, id: Uuid) -> Result<String, ApiError> {
-        self.get::<ExportScriptResponse>(&["api", "recipes", &id.to_string(), "export"])
-            .await
-            .map(|r| r.script)
-    }
-
     /// `GET /api/templates` — bundled recipe templates.
     pub async fn list_templates(&self) -> Result<Vec<RecipeTemplate>, ApiError> {
         self.get(&["api", "templates"]).await
     }
 
-    /// `GET /api/executions/{id}`.
-    pub async fn get_execution(&self, id: Uuid) -> Result<ExecutionResult, ApiError> {
-        self.get(&["api", "executions", &id.to_string()]).await
+    /// `GET /api/herdr/schema` — the installed herdr's socket API schema.
+    pub async fn herdr_schema(&self) -> Result<Value, ApiError> {
+        self.get(&["api", "herdr", "schema"]).await
+    }
+
+    /// `POST /api/templates/{id}/instantiate` — the template with its
+    /// variables filled in, as a recipe (not saved).
+    pub async fn instantiate_template(
+        &self,
+        id: &str,
+        req: &InstantiateTemplateRequest,
+    ) -> Result<Recipe, ApiError> {
+        self.post(&["api", "templates", id, "instantiate"], req)
+            .await
+    }
+
+    // ── agent profiles ─────────────────────────────────────────────────
+
+    /// `GET /api/profiles`.
+    pub async fn list_profiles(&self) -> Result<Vec<AgentProfile>, ApiError> {
+        self.get(&["api", "profiles"]).await
+    }
+
+    /// `GET /api/profiles/{id}`.
+    pub async fn get_profile(&self, id: &str) -> Result<AgentProfile, ApiError> {
+        self.get(&["api", "profiles", id]).await
+    }
+
+    /// `PUT /api/profiles/{id}` — create or override (400 if invalid).
+    pub async fn save_profile(&self, profile: &AgentProfile) -> Result<AgentProfile, ApiError> {
+        Self::json(
+            self.request(Method::PUT, &["api", "profiles", &profile.id])
+                .json(profile),
+        )
+        .await
+    }
+
+    /// `DELETE /api/profiles/{id}` (204) — drop a user profile.
+    pub async fn delete_profile(&self, id: &str) -> Result<(), ApiError> {
+        self.no_content(self.request(Method::DELETE, &["api", "profiles", id]))
+            .await
+    }
+
+    // ── runs ───────────────────────────────────────────────────────────
+
+    /// `POST /api/runs` — start a run in the background; returns its first record.
+    pub async fn start_run(&self, req: &StartRunRequest) -> Result<RunRecord, ApiError> {
+        self.post(&["api", "runs"], req).await
+    }
+
+    /// `POST /api/runs?wait=true` — run and wait for the final record.
+    pub async fn run_and_wait(&self, req: &StartRunRequest) -> Result<RunRecord, ApiError> {
+        Self::json(
+            self.request(Method::POST, &["api", "runs"])
+                .query(&[("wait", "true")])
+                .json(req),
+        )
+        .await
+    }
+
+    /// `GET /api/runs` — every run, newest first.
+    pub async fn list_runs(&self) -> Result<Vec<RunRecord>, ApiError> {
+        self.get(&["api", "runs"]).await
+    }
+
+    /// `GET /api/runs/{id}`.
+    pub async fn get_run(&self, id: Uuid) -> Result<RunRecord, ApiError> {
+        self.get(&["api", "runs", &id.to_string()]).await
+    }
+
+    /// `GET /api/runs/{id}/events?since=` — the run's events from `since`
+    /// (inclusive). For live updates use the SSE stream `GET /api/events`.
+    pub async fn run_events(&self, id: Uuid, since: u64) -> Result<Vec<RunEvent>, ApiError> {
+        Self::json(
+            self.request(Method::GET, &["api", "runs", &id.to_string(), "events"])
+                .query(&[("since", since)]),
+        )
+        .await
+    }
+
+    /// `POST /api/runs/{id}/{pause|resume|cancel}` (204). 409 if the run has
+    /// already finished.
+    pub async fn control_run(&self, id: Uuid, action: RunAction) -> Result<(), ApiError> {
+        self.no_content(self.request(
+            Method::POST,
+            &["api", "runs", &id.to_string(), action.as_str()],
+        ))
+        .await
     }
 
     // ── variables / playground ─────────────────────────────────────────
@@ -445,12 +517,39 @@ pub fn tool_text(v: &Value) -> String {
     v.as_str().map(str::to_string).unwrap_or_default()
 }
 
-/// Map a tool result with `is_error: true` to [`ApiError::Tool`].
+/// A property's JSON type. Optional fields are `["integer", "null"]` in the
+/// schemas rmcp/schemars generate; the non-null member is the type.
+pub fn schema_type(prop: &Value) -> &str {
+    match prop.get("type") {
+        Some(Value::String(t)) => t,
+        Some(Value::Array(ts)) => ts
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|t| *t != "null")
+            .unwrap_or("string"),
+        _ => "string",
+    }
+}
+
+/// The JSON a tool returned as text (its first text content parsed), if any.
+pub fn tool_payload(v: &Value) -> Option<Value> {
+    v.pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .and_then(|t| serde_json::from_str(t).ok())
+}
+
+/// True when an MCP `CallToolResult` JSON reports a tool-level failure
+/// (`"isError": true`; rmcp serializes the field camelCase).
+pub fn tool_is_error(v: &Value) -> bool {
+    v.get("isError").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Map a tool result with `isError: true` to [`ApiError::Tool`].
 fn tool_ok(v: &Value) -> Result<&Value, ApiError> {
-    if v.get("is_error").and_then(Value::as_bool).unwrap_or(false) {
+    if tool_is_error(v) {
         let text = tool_text(v);
         return Err(ApiError::Tool(if text.is_empty() {
-            "tool reported is_error".into()
+            "tool reported isError".into()
         } else {
             text
         }));
@@ -496,7 +595,7 @@ mod tests {
                 { "type": "image", "data": "x" },
                 { "type": "text", "text": "line two" }
             ],
-            "is_error": false
+            "isError": false
         });
         assert_eq!(tool_text(&v), "line one\nline two");
         assert_eq!(tool_text(&serde_json::json!("bare")), "bare");
@@ -505,9 +604,9 @@ mod tests {
 
     #[test]
     fn tool_ok_surfaces_is_error_text() {
-        let bad = serde_json::json!({ "content": [{ "type": "text", "text": "no backend" }], "is_error": true });
+        let bad = serde_json::json!({ "content": [{ "type": "text", "text": "no backend" }], "isError": true });
         assert!(matches!(tool_ok(&bad), Err(ApiError::Tool(t)) if t == "no backend"));
-        let good = serde_json::json!({ "content": [], "is_error": false });
+        let good = serde_json::json!({ "content": [], "isError": false });
         assert!(tool_ok(&good).is_ok());
     }
 

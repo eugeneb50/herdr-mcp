@@ -3,9 +3,10 @@ use std::path::PathBuf;
 use tokio::fs;
 use uuid::Uuid;
 
-use crate::variables::{ExecutionResult, Recipe, ScheduledRecipe};
+use crate::variables::{Recipe, ScheduledRecipe};
 
-pub use herdr_mcp_api::{PlaygroundSnapshot, VariableStore};
+pub use crate::runs::RunHeader;
+pub use herdr_mcp_api::{PlaygroundSnapshot, RunEvent, VariableStore};
 
 /// A persistent bag of variables shared across recipe runs within a session.
 /// This is what enables chaining: the output variables of one recipe run are
@@ -18,6 +19,18 @@ pub struct SessionVars {
     pub session_id: String,
     pub variables: std::collections::HashMap<String, serde_json::Value>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Validate a caller-supplied name (variable key, workspace id, blob name)
+/// that becomes part of a file name under `data/`. It must be one plain path
+/// component: non-empty, not `.`/`..`, no separators or NUL. Rejected rather
+/// than rewritten so two distinct names can never map to the same file.
+pub fn file_component(name: &str) -> anyhow::Result<&str> {
+    let bad = name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']);
+    if bad {
+        anyhow::bail!("invalid name {name:?}: must be a single path component");
+    }
+    Ok(name)
 }
 
 #[derive(Clone)]
@@ -37,7 +50,6 @@ impl Persistence {
 
     pub async fn init(&self) -> anyhow::Result<()> {
         fs::create_dir_all(self.data_dir.join("recipes")).await?;
-        fs::create_dir_all(self.data_dir.join("executions")).await?;
         fs::create_dir_all(self.data_dir.join("variables")).await?;
         fs::create_dir_all(self.data_dir.join("schedules")).await?;
         fs::create_dir_all(self.data_dir.join("sessions")).await?;
@@ -110,7 +122,7 @@ impl Persistence {
         let path = self
             .data_dir
             .join("variables")
-            .join(format!("{}.json", var.key));
+            .join(format!("{}.json", file_component(&var.key)?));
         fs::create_dir_all(self.data_dir.join("variables")).await?;
         let json = serde_json::to_string_pretty(var)?;
         fs::write(path, json).await?;
@@ -121,7 +133,7 @@ impl Persistence {
         let path = self
             .data_dir
             .join("variables")
-            .join(format!("{}.json", key));
+            .join(format!("{}.json", file_component(key)?));
         if tokio::fs::try_exists(&path).await.unwrap_or(false) {
             fs::remove_file(path).await?;
             Ok(true)
@@ -165,7 +177,7 @@ impl Persistence {
         let path = self
             .data_dir
             .join("sessions")
-            .join(format!("{}.json", bag.session_id));
+            .join(format!("{}.json", file_component(&bag.session_id)?));
         fs::write(path, serde_json::to_string_pretty(bag)?).await?;
         Ok(())
     }
@@ -174,7 +186,7 @@ impl Persistence {
         let path = self
             .data_dir
             .join("sessions")
-            .join(format!("{}.json", session_id));
+            .join(format!("{}.json", file_component(session_id)?));
         if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
             return Ok(SessionVars {
                 session_id: session_id.to_string(),
@@ -196,10 +208,11 @@ impl Persistence {
         value: &serde_json::Value,
     ) -> anyhow::Result<()> {
         fs::create_dir_all(self.data_dir.join("sessions")).await?;
-        let path = self
-            .data_dir
-            .join("sessions")
-            .join(format!("{ws}.{name}.json"));
+        let path = self.data_dir.join("sessions").join(format!(
+            "{}.{}.json",
+            file_component(ws)?,
+            file_component(name)?
+        ));
         fs::write(path, serde_json::to_string_pretty(value)?).await?;
         Ok(())
     }
@@ -261,31 +274,82 @@ impl Persistence {
         Ok(snapshot)
     }
 
-    pub async fn save_execution(&self, result: &ExecutionResult) -> anyhow::Result<()> {
-        let path = self
-            .data_dir
-            .join("executions")
-            .join(format!("{}.json", result.id));
-        fs::create_dir_all(self.data_dir.join("executions")).await?;
-        let json = serde_json::to_string_pretty(result)?;
-        fs::write(path, json).await?;
+    fn run_dir(&self, id: &Uuid) -> PathBuf {
+        self.data_dir.join("runs").join(id.to_string())
+    }
+
+    /// Write a run's header (`data/runs/{id}/run.json`). Written once, at start.
+    pub async fn save_run_header(&self, header: &RunHeader) -> anyhow::Result<()> {
+        let dir = self.run_dir(&header.id);
+        fs::create_dir_all(&dir).await?;
+        fs::write(dir.join("run.json"), serde_json::to_string_pretty(header)?).await?;
         Ok(())
     }
 
-    pub async fn load_execution(&self, id: &Uuid) -> anyhow::Result<Option<ExecutionResult>> {
-        let path = self
-            .data_dir
-            .join("executions")
-            .join(format!("{}.json", id));
+    pub async fn load_run_header(&self, id: &Uuid) -> anyhow::Result<Option<RunHeader>> {
+        let path = self.run_dir(id).join("run.json");
         if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
             return Ok(None);
         }
-        let content = fs::read_to_string(path).await?;
-        if content.trim().is_empty() {
-            return Ok(None);
+        Ok(Some(serde_json::from_str(
+            &fs::read_to_string(path).await?,
+        )?))
+    }
+
+    /// Append one event to `data/runs/{id}/events.jsonl`.
+    pub async fn append_run_event(&self, event: &RunEvent) -> anyhow::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let mut line = serde_json::to_string(event)?;
+        line.push('\n');
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.run_dir(&event.run_id).join("events.jsonl"))
+            .await?;
+        f.write_all(line.as_bytes()).await?;
+        // tokio writes on a background thread: without the flush the event
+        // may not be on disk (or may land after the next one) when we return,
+        // and a reader could see a finished run without its final event.
+        f.flush().await?;
+        Ok(())
+    }
+
+    /// A run's events with `seq >= since`, in order. A line that doesn't
+    /// parse (a write cut short by a crash) is skipped.
+    pub async fn load_run_events(&self, id: &Uuid, since: u64) -> anyhow::Result<Vec<RunEvent>> {
+        let path = self.run_dir(id).join("events.jsonl");
+        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Ok(Vec::new());
         }
-        let result: ExecutionResult = serde_json::from_str(&content)?;
-        Ok(Some(result))
+        Ok(fs::read_to_string(path)
+            .await?
+            .lines()
+            .filter_map(|l| serde_json::from_str::<RunEvent>(l).ok())
+            .filter(|e| e.seq >= since)
+            .collect())
+    }
+
+    /// Ids of every run with a header on disk.
+    pub async fn list_run_ids(&self) -> anyhow::Result<Vec<Uuid>> {
+        let dir = self.data_dir.join("runs");
+        let mut ids = Vec::new();
+        if !tokio::fs::try_exists(&dir).await.unwrap_or(false) {
+            return Ok(ids);
+        }
+        let mut entries = fs::read_dir(dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if let Some(id) = entry
+                .file_name()
+                .to_str()
+                .and_then(|n| Uuid::parse_str(n).ok())
+                && tokio::fs::try_exists(entry.path().join("run.json"))
+                    .await
+                    .unwrap_or(false)
+            {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
     }
 
     pub async fn save_schedule(&self, schedule: &ScheduledRecipe) -> anyhow::Result<()> {
@@ -339,7 +403,7 @@ impl Persistence {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::variables::{ExecutionStatus, RecipeStep};
+    use crate::variables::RecipeStep;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
     use uuid::Uuid;
@@ -369,7 +433,6 @@ mod tests {
         let p = Persistence::new(tmp.path().to_path_buf());
         p.init().await.unwrap();
         assert!(tmp.path().join("recipes").exists());
-        assert!(tmp.path().join("executions").exists());
         assert!(tmp.path().join("variables").exists());
         assert!(tmp.path().join("schedules").exists());
         assert!(tmp.path().join("sessions").exists());
@@ -446,24 +509,51 @@ mod tests {
         assert!(loaded.variables.is_empty());
     }
 
+    #[test]
+    fn file_component_rejects_traversal() {
+        for bad in ["", ".", "..", "../x", "a/b", "a\\b", "x\0y"] {
+            assert!(file_component(bad).is_err(), "{bad:?} should be rejected");
+        }
+        for ok in ["greeting", "w1", "panes.snapshot", "..hidden", "a b"] {
+            assert_eq!(file_component(ok).unwrap(), ok);
+        }
+    }
+
     #[tokio::test]
-    async fn test_save_load_execution() {
+    async fn test_traversal_names_never_touch_outside_data_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let p = Persistence::new(tmp.path().to_path_buf());
-        let result = ExecutionResult {
+        let data = tmp.path().join("data");
+        let p = Persistence::new(data.clone());
+        p.init().await.unwrap();
+        let now = chrono::Utc::now();
+        let var = VariableStore {
             id: Uuid::new_v4(),
-            recipe_id: Uuid::new_v4(),
-            started_at: chrono::Utc::now(),
-            completed_at: Some(chrono::Utc::now()),
-            status: ExecutionStatus::Completed,
-            results: HashMap::new(),
-            variables: HashMap::new(),
-            error: None,
+            session_id: None,
+            execution_id: None,
+            key: "../../escaped".into(),
+            value: serde_json::json!("x"),
+            created_at: now,
+            updated_at: now,
         };
-        p.save_execution(&result).await.unwrap();
-        let loaded = p.load_execution(&result.id).await.unwrap().unwrap();
-        assert_eq!(loaded.id, result.id);
-        assert_eq!(loaded.status, ExecutionStatus::Completed);
+        assert!(p.save_variable(&var).await.is_err());
+        assert!(!tmp.path().join("escaped.json").exists());
+
+        let victim = tmp.path().join("victim.json");
+        std::fs::write(&victim, "{}").unwrap();
+        assert!(p.delete_variable("../../victim").await.is_err());
+        assert!(victim.exists());
+
+        assert!(p.load_session_vars("../../victim").await.is_err());
+        let bag = SessionVars {
+            session_id: "../escaped".into(),
+            ..Default::default()
+        };
+        assert!(p.save_session_vars(&bag).await.is_err());
+        assert!(
+            p.save_session_blob("../x", "agents", &serde_json::json!({}))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

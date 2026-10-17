@@ -13,14 +13,14 @@ and known gotchas.
 exposes [herdr](https://herdr.dev) — a terminal-native agent multiplexer —
 as MCP tools. It enables AI clients (Claude Desktop, Cursor, Claude Code,
 OpenCode) to control herdr workspaces, tabs, panes, and agents. It also
-includes an HTTP bridge, a Vite+React+Tailwind web playground, a
+includes an HTTP bridge, a Dioxus (Rust → wasm) web playground, a
 sophisticated message-trim (compression) pipeline, and a recipe engine for
 chaining tool calls with variable interpolation.
 
 **License:** AGPL v3
-**Current test suite:** 299 tests across 4 crates (all passing)
-**Architecture:** 4-crate Cargo workspace; both the 4-crate workspace and a
-legacy `src/` monolith coexist in the source tree.
+**Current test suite:** run `cargo test --workspace` (361 passing at the
+Dioxus consolidation)
+**Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---
 
@@ -40,7 +40,7 @@ legacy `src/` monolith coexist in the source tree.
 │  │  herdr-mcp Binary    │  │  Axum HTTP Bridge (opt.)     │ │
 │  │  (main.rs)           │  │  server.rs:start_http()      │ │
 │  │                      │  │  Port configurable            │ │
-│  │  rmcp ServerHandler  │  │  CORS permissive              │ │
+│  │  rmcp ServerHandler  │  │  Same-origin (no CORS)        │ │
 │  │  tool_router macro   │  │  REST: /api/tools/:name       │ │
 │  └──────────┬───────────┘  └──────────┬───────────────────┘ │
 │             │                         │                      │
@@ -48,7 +48,7 @@ legacy `src/` monolith coexist in the source tree.
 │                        ▼                                     │
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │              HerdrMcpServer (server.rs)                  │ │
-│  │  - 49 tool definitions (discovery, lifecycle, read, write, synchronize, a2a, trim, recipes, scheduler, folder-key) │ │
+│  │  - 58 tool definitions (discovery, lifecycle, read, write, synchronize, a2a, trim, recipes, scheduler, folder-key) │ │
 │  │  - Recipe engine with {{ variable }} interpolation      │ │
 │  │  - Outbound trim: apply_outbound_trim()                 │ │
 │  │  - Badge push: push_badge_for_workspace()               │ │
@@ -107,27 +107,35 @@ The binary has 4 subcommands:
 
 ## 3. Workspace & Crate Structure
 
-The project has evolved from a monolith (`src/`) to a **4-crate Cargo
-workspace**. Both the old monolith code and the new crates coexist in the
-source tree.
+All code lives in a Cargo workspace under `crates/`. The legacy `src/`
+monolith and the React site were removed when the Dioxus UI became the only
+web frontend.
 
 ```
 herdr-mcp/
-├── Cargo.toml              # Workspace root (4 members)
+├── Cargo.toml              # Workspace root
 ├── crates/
-│   ├── herdr-mcp-core/     # Config, error types (38 tests)
+│   ├── herdr-mcp-api/      # HTTP wire contract (leaf crate, native + wasm32)
+│   │   └── src/
+│   │       ├── lib.rs      # Re-exports every wire type + ApiClient
+│   │       ├── agents.rs   # AgentHandle, TrimPolicy/TrimDirection, ProxyPolicy
+│   │       ├── recipe.rs   # Recipe, RecipeStep, ExecutionResult, templates, recipe requests
+│   │       ├── trim.rs     # TrimStatusResponse, PaneStatus, DiagnoseReport
+│   │       ├── variables.rs # VariableStore, PlaygroundSnapshot, variable/tool envelopes
+│   │       └── client.rs   # Typed ApiClient + ApiError
+│   ├── herdr-mcp-core/     # Config, error types
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports Config, CliOverrides, Error
 │   │       ├── config.rs   # Full config system: TOML + env + CLI
 │   │       └── error.rs    # anyhow-based error context
-│   ├── herdr-mcp-trim/     # Message-trim pipeline + TUI dashboard (169 tests)
+│   ├── herdr-mcp-trim/     # Message-trim pipeline + TUI dashboard
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports all public types
 │   │       ├── pfc1.rs     # PFC1 phonetic compressor
 │   │       ├── caveman.rs  # Caveman style compressor
 │   │       ├── code_regions.rs  # Code detection engine
 │   │       ├── pipeline.rs # Composable stage pipeline
-│   │       ├── policy.rs   # TrimPolicy + TrimDirection
+│   │       ├── policy.rs   # TrimPolicyExt (stage parsing); policy data re-exported from api
 │   │       ├── runner.rs   # PipelineRunner with persistence
 │   │       ├── stats.rs    # TrimStats per workspace
 │   │       ├── eval.rs     # trim_eval + trim_bench
@@ -138,13 +146,8 @@ herdr-mcp/
 │   │           ├── http.rs     # HTTP client for bridge communication
 │   │           ├── nav.rs      # NavigationFrame + FrameFocus
 │   │           ├── theme.rs    # Color palette and styles
-│   │           └── tabs/       # 5 tabbed panels
-│   │               ├── overview.rs
-│   │               ├── playground.rs
-│   │               ├── trim.rs
-│   │               ├── variables.rs
-│   │               └── settings.rs
-│   ├── herdr-mcp-server/   # MCP server, tools, HTTP bridge (82 tests)
+│   │           └── tabs/       # Tabbed panels (overview, playground, trim, variables, settings, proxy)
+│   ├── herdr-mcp-server/   # MCP server, tools, HTTP bridge
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports HerdrMcpServer, Persistence, etc.
 │   │       ├── server.rs   # Tool definitions + HTTP handlers + recipe engine
@@ -152,29 +155,19 @@ herdr-mcp/
 │   │       ├── persistence.rs  # File-based storage
 │   │       ├── scheduler.rs    # Cron-based recipe scheduling
 │   │       ├── templates.rs    # Bundled recipe templates
-│   │       └── variables.rs    # Recipe, RecipeStep, ExecutionResult types
-│   └── herdr-mcp-cli/      # Binary entrypoint (10 tests)
-│       ├── src/main.rs     # CLI dispatch (serve/trim/dashboard/folder-key)
-│       └── tests/          # Integration tests
-└── src/                    # Legacy monolith (coexists with crates)
-    ├── main.rs             # Original binary entrypoint
-    ├── server.rs           # Original monolith server (2763 lines)
-    ├── herdr_client.rs     # Event subscriber + registry
-    ├── persistence.rs      # File-based storage
-    ├── scheduler.rs        # Cron scheduler
-    ├── templates.rs        # Bundled templates
-    ├── variables.rs        # Recipe types
-    ├── trim/               # Trim subsystem (mirrored in crates/herdr-mcp-trim)
-    ├── recipes/            # TypeScript recipe types for frontend
-    ├── components/         # React frontend components (18 files)
-    ├── main.tsx            # React entrypoint
-    ├── App.tsx             # HashRouter: /, /docs, /playground, /trim, /variables
-    └── index.css           # Tailwind CSS
+│   │       └── variables.rs    # ScheduledRecipe + variable extraction (wire types from api)
+│   ├── herdr-mcp-proxy/    # HTTPS intercepting proxy (CA, TLS, per-pane policy)
+│   ├── herdr-mcp-ui/       # Dioxus 0.7 web UI (see §11)
+│   └── herdr-mcp-cli/      # Binaries
+│       ├── src/bin/herdr-mcp.rs  # Daemon: serve (MCP stdio + HTTP)
+│       ├── src/bin/herdr-trim.rs # Local tools: trim / dashboard / folder-key
+│       ├── src/common.rs         # Shared tracing, config, serve_core
+│       └── tests/                # Integration tests
 ```
 
 ---
 
-## 4. MCP Tool Reference (51 tools total)
+## 4. MCP Tool Reference (58 tools total)
 
 ### 4.1 Discovery Tools (7)
 
@@ -196,7 +189,7 @@ herdr-mcp/
 | `create_tab` | `workspace_id?`, `label?`, `cwd?` | Create a new tab |
 | `split_pane` | `pane_id?`, `label?`, `direction?`, `cwd?`, `no_focus?` | Split a pane right or down |
 | `close_pane` | `pane_id?`, `label?` | Close a pane |
-| `start_agent` | `name`, `args`, `cwd?`, `workspace_id?`, `tab_id?`, `split?` | Start an agent (appends `--` before agent name) |
+| `herdr_api` | `method`, `params?`, `timeout_ms?` | Any herdr socket API method; returns herdr's response |
 
 ### 4.3 Read Tools (2)
 
@@ -287,6 +280,15 @@ herdr-mcp/
 | `clipboard_set` | `text` | Write text to system clipboard |
 | `clipboard_get` | — | Read text from system clipboard |
 
+### 4.13 Proxy Tools (4)
+
+| Tool | Parameters | Description |
+|---|---|---|
+| `proxy_startup` | `port?`, `bind_addr?` | Start the HTTPS intercepting proxy listener |
+| `proxy_diagnose` | — | CA status, TLS config, default and per-pane policies |
+| `proxy_policy_set` | `target`, `trim_outbound?`, `trim_inbound?`, `stages?` | Set a pane's proxy interception policy |
+| `proxy_policy_get` | `target` | Get a pane's proxy interception policy |
+
 ---
 
 ## 5. HTTP Bridge API
@@ -295,13 +297,13 @@ herdr-mcp/
 
 | Method | Path | Handler | Description |
 |---|---|---|---|---|
-| `GET` | `/` | `index_html_handler` | Serves the single-file web playground (from `dist/index.html`) |
+| `GET` | `/*` | `ServeDir` fallback | Serves the Dioxus web UI from `http.web-dir` (see §5.5) |
 | `GET` | `/api/health` | `health_handler` | Returns `"ok"` |
 | `GET` | `/api/tools` | `list_tools_handler` | Lists all tools with JSON schemas |
 | `POST` | `/api/tools/{name}` | `call_tool_handler` | Dispatch tool by name |
 | `GET` | `/api/agents?workspace_id=` | `agents_handler` | Live pane list from AgentRegistry |
 | `GET` | `/api/workspaces` | `workspaces_handler` | Workspace list via herdr CLI |
-| `POST` | `/api/recipe` | `run_recipe_handler` | Execute multi-step recipe |
+| `POST` | `/api/runs` | `start_run_handler` | Start a run; `?wait=true` waits for the final record |
 
 ### 5.2 Recipe CRUD Routes
 
@@ -312,7 +314,6 @@ herdr-mcp/
 | `GET` | `/api/recipes/{id}` | Get recipe by ID |
 | `PUT` | `/api/recipes/{id}` | Update recipe |
 | `DELETE` | `/api/recipes/{id}` | Delete recipe |
-| `POST` | `/api/recipes/{id}/run` | Run recipe by ID |
 
 ### 5.3 Variable & Execution Routes
 
@@ -322,7 +323,6 @@ herdr-mcp/
 | `POST` | `/api/variables` | Save variable |
 | `GET` | `/api/variables/{key}` | Get variable |
 | `DELETE` | `/api/variables/{key}` | Delete variable |
-| `GET` | `/api/executions/{id}` | Get execution result |
 
 ### 5.4 Trim Routes
 
@@ -335,15 +335,31 @@ herdr-mcp/
 
 ### 5.5 Frontend Serving
 
-The HTTP bridge serves the single-file frontend at `GET /`:
+The bridge serves the Dioxus bundle with `tower_http::services::ServeDir`:
 
-- `dist/index.html` (412 KB) is cached as `Arc<Vec<u8>>` at router construction
-- `GET /` + any unmatched path returns it via `.fallback()`
-- Missing `dist/index.html` logs a `tracing::warn!` hint
-- `/api/*` endpoints still work alongside the SPA fallback
+- Directory: `http.web-dir` (TOML) / `HERDR_MCP_WEB_DIR` (env); unset →
+  `HttpConfig::resolved_web_dir()` = `<workspace>/target/dx/herdr-mcp-ui/release/web/public`
+  (the `dx bundle --platform web --release` output)
+- Any path that isn't an `/api/*` route or a file falls back to `index.html`,
+  so Dioxus router deep links (`/playground`, `/trim`, …) load the app
+- A missing `index.html` logs a `tracing::warn!` with the build command;
+  `/api/*` keeps working
+- No CORS layer: the UI is same-origin with the API (and `dx serve` proxies
+  `/api` server-side via `Dioxus.toml [web.proxy]`)
+- Binds `http.bind-addr` (default `127.0.0.1`)
 
-This makes the web playground available at `http://localhost:7676/` without
-a separate dev server in production.
+### 5.6 Wire Contract
+
+Every request/response type on these routes is defined once in
+`crates/herdr-mcp-api` and re-exported by the server; nothing redefines it.
+Rust clients (web UI, TUI) use `herdr_mcp_api::ApiClient`, which requires an
+absolute base URL, treats `201`/`204` empty bodies as `Ok(())`, and returns
+`ApiError::Status { status, body }` for non-2xx responses.
+`server::tests::http_contract_roundtrip_with_api_client` runs that client
+against the real router, so a server/client drift fails `cargo test`.
+
+To change a shape: edit the type in `herdr-mcp-api`, use it in the handler,
+and extend the contract test.
 
 ---
 
@@ -374,7 +390,7 @@ Variables use `{{ path }}` syntax with dot/bracket navigation:
 ### 6.2 Recipe Lifecycle
 
 ```
-1. HTTP POST /api/recipe or MCP tool dispatch
+1. HTTP POST /api/runs (or the scheduler)
 2. Seed accumulated from agent registry (for session_id workspace)
 3. For each step:
    a. resolve_variables() in params from accumulated
@@ -669,54 +685,38 @@ Cron-based recipe scheduling using the `cron` crate:
 
 ---
 
-## 11. Frontend (Vite + React 19 + Tailwind CSS 4)
+## 11. Web UI (Dioxus 0.7)
 
 ### 11.1 Build System
 
-- **Vite 7** with `vite-plugin-singlefile` → all JS/CSS inlined into `dist/index.html`
-- **Tailwind CSS 4** via `@tailwindcss/vite` plugin (not v3)
-- **TypeScript 5.9** strict mode (`noUnusedLocals`/`noUnusedParameters`)
-- Dev proxy: `/api` → `http://localhost:8080`
+- Crate `crates/herdr-mcp-ui`, `dioxus = "0.7"` (features `web`, `router`),
+  compiled to `wasm32-unknown-unknown` by the `dx` CLI
+- `dx serve` — dev server with hot reload; proxies `/api` to
+  `http://localhost:7676/` (`Dioxus.toml [web.proxy]`)
+- `dx bundle --platform web --release` — production build served by the bridge (§5.5)
+- Styles: `assets/app.css` (plain CSS, no Node toolchain)
 
-### 11.2 Routes (HashRouter)
+### 11.2 Routes
 
 | Route | Component | Description |
 |---|---|---|
-| `/` | Hero + Architecture + Tools + Install | Landing page |
-| `/docs` | Documentation | API/tool documentation |
-| `/playground` | Playground | Interactive tool console + recipe builder |
-| `/trim` | TrimDashboard | Live trim savings dashboard (polls `/api/trim/status` every 5s) |
-| `/variables` | VariablesPage | Variable store management |
+| `/` | `Home` | Landing page |
+| `/docs` | `Docs` | Documentation |
+| `/overview` | `Overview` | Live agents from `GET /api/agents` |
+| `/playground` | `Playground` | Tool runner (schema-driven form) + recipe builder/library |
+| `/trim` | `Trim` | Trim savings, per-pane bars, active policies, diagnose/summary |
+| `/variables` | `Variables` | User variables (CRUD/import) + auto variables |
+| `/settings` | `Settings` | Runtime config + clipboard round-trip test |
 
-### 11.3 Key Components (18 total)
+### 11.3 Talking to the Bridge
 
-| Component | Purpose |
-|---|---|
-| `Hero.tsx` | Hero section with tagline |
-| `Architecture.tsx` | Architecture diagram/section |
-| `Tools.tsx` | Tool catalog display |
-| `Install.tsx` | Installation instructions |
-| `Playground.tsx` | Tab container: Tool Runner + Recipe Builder |
-| `ToolRunner.tsx` | Individual tool invocation UI |
-| `DynamicForm.tsx` | Auto-generated forms from JSON schemas |
-| `RecipeBuilder.tsx` | Recipe step editor with drag-and-drop |
-| `RecipeLibrary.tsx` | Recipe list sidebar |
-| `RecipeStep.tsx` | Single recipe step editor |
-| `ResponseViewer.tsx` | JSON response display |
-| `TrimDashboard.tsx` | Live trim savings dashboard with bars |
-| `VariablePanel.tsx` | Variable inspector |
-| `VariablesPage.tsx` | Variables page layout |
-| `VariableStore.tsx` | React context for variable management |
-| `Footer.tsx` | Page footer |
-| `Logo.tsx` | SVG logo |
-| `Documentation.tsx` | Documentation page |
-
-### 11.4 Dependencies
-
-- React 19, react-dom 19
-- react-router-dom 7
-- @dnd-kit/core 6, @dnd-kit/sortable 10 (recipe step drag-and-drop)
-- clsx, tailwind-merge
+- `App` builds one `ApiClient` from `window.location.origin` and provides it
+  as `Signal<ApiClient>` context; components call `use_api()` and clone it
+  into async tasks
+- No server functions and no cached server state: every view resolves from
+  `/api/*` on demand
+- `src/vars.rs` holds the client-side `{{var}}` preview substitution (the
+  server re-resolves on run)
 
 ---
 
@@ -729,7 +729,7 @@ Cron-based recipe scheduling using the `cron` crate:
 | `rmcp` | 1.7 (server, transport-io, macros) | MCP protocol implementation |
 | `tokio` | 1 (full) | Async runtime |
 | `axum` | 0.8 | HTTP framework |
-| `tower-http` | 0.6 (cors) | CORS middleware |
+| `tower-http` | 0.6 (fs) | Static file serving for the web UI |
 | `clap` | 4 (derive) | CLI argument parsing |
 | `serde` / `serde_json` | 1 | Serialization |
 | `schemars` | 1 | JSON Schema generation for MCP tools |
@@ -756,20 +756,13 @@ Cron-based recipe scheduling using the `cron` crate:
 | `assert_cmd` | 2 | CLI integration testing |
 | `predicates` | 3 | Assertion predicates |
 
-### 12.3 Website
+### 12.3 Web UI
 
-| Package | Version | Purpose |
+| Crate | Version | Purpose |
 |---|---|---|
-| `react` | ^19.2.6 | UI framework |
-| `react-dom` | ^19.2.6 | DOM rendering |
-| `react-router-dom` | ^7 | Client-side routing |
-| `@dnd-kit/core` + `@dnd-kit/sortable` | ^6 / ^10 | Drag-and-drop |
-| `clsx` | ^2.1.1 | Conditional classnames |
-| `tailwind-merge` | ^3.4.0 | Tailwind class deduplication |
-| `tailwindcss` | 4.1.17 | CSS framework (v4) |
-| `vite` | 7.3.2 | Build tool |
-| `typescript` | 5.9.3 | Type checking |
-| `vite-plugin-singlefile` | 2.3.0 | Single-file output |
+| `dioxus` | 0.7 (web, router) | UI framework (Rust → wasm) |
+| `web-sys` | 0.3 (Window, Location) | Page origin for the API base URL |
+| `reqwest` | 0.12 (json) | HTTP client inside `herdr-mcp-api` (fetch on wasm) |
 
 ---
 
@@ -778,25 +771,24 @@ Cron-based recipe scheduling using the `cron` crate:
 ### 13.1 Build Commands
 
 ```bash
-# Rust binary
-cargo build --release                    # → target/release/herdr-mcp
+# Rust binaries
+cargo build --release                    # → target/release/{herdr-mcp,herdr-trim}
 
-# Website (single HTML file)
-npm install && npm run build            # → dist/index.html
+# Web UI
+cd crates/herdr-mcp-ui && dx bundle --platform web --release
+                                         # → target/dx/herdr-mcp-ui/release/web/public
 
-# Development server (Rust + Vite with hot reload)
-cargo run --release -- serve --http-only           # Terminal 1 (port 7676)
-npm run dev                                    # Terminal 2 (port 5173)
+# Development (Rust bridge + Dioxus hot reload)
+cargo run --release --bin herdr-mcp -- serve --http-only   # Terminal 1 (port 7676)
+cd crates/herdr-mcp-ui && dx serve                          # Terminal 2 (proxies /api)
 
 # Tests
-cargo test --workspace                   # 299 tests
-cargo test -p herdr-mcp-trim --lib      # 169 tests (trim + TUI)
-cargo test -p herdr-mcp-server --lib    # 82 tests (server)
-cargo test -p herdr-mcp-core --lib      # 38 tests (config)
-cargo test -p herdr-mcp-cli             # 10 tests (CLI integration)
+cargo test --workspace
+cargo test -p herdr-mcp-server http_contract   # API wire-contract round-trip
 
 # Lint + format
 cargo clippy --all-targets -- -D warnings
+cargo clippy -p herdr-mcp-api -p herdr-mcp-ui --target wasm32-unknown-unknown -- -D warnings
 cargo fmt --all -- --check
 ```
 
@@ -826,7 +818,8 @@ herdr-mcp folder-key decompress ./my-folder "compressed text"
 | `HERDR_MCP_DATA_DIR` | `./data` | Data directory |
 | `HERDR_MCP_HTTP_PORT` | — | HTTP port override |
 | `HERDR_MCP_HTTP_ONLY` | — | HTTP-only mode |
-| `HERDR_MCP_HTTP_BIND` | `0.0.0.0` | HTTP bind address |
+| `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
+| `HERDR_MCP_WEB_DIR` | in-repo `dx bundle` output | Built web UI directory |
 | `HERDR_MCP_CONFIG` | — | Config file path |
 | `HERDR_MCP_TOOL_TIMEOUT` | — | Tool call timeout (seconds) |
 | `HERDR_MCP_MAX_CONCURRENT` | — | Max concurrent tool calls |
@@ -857,13 +850,15 @@ update.
 goes to `stderr`.  
 **Rationale:** Prevents log output from corrupting the MCP protocol stream.
 
-### 14.3 Single-File Website
+### 14.3 One Web UI, One Wire Contract
 
-**Decision:** `vite-plugin-singlefile` inlines all JS/CSS into
-`dist/index.html`.  
-**Rationale:** Simplest deployment — one file serves the entire web UI. No
-external asset management needed.  
-**Trade-off:** Larger single file, no code splitting.
+**Decision:** The Dioxus app is the only web frontend, served by the bridge
+from a static directory; every `/api/*` type lives in `herdr-mcp-api`, shared
+by the server, the web UI and the TUI.  
+**Rationale:** One language and toolchain (no Node), and the
+single-source-of-truth rule applied to the HTTP contract — a shape change is
+one edit, checked by the contract test.  
+**Trade-off:** Building the UI needs the `dx` CLI and the wasm32 target.
 
 ### 14.4 Non-Colliding Compressors
 
@@ -899,13 +894,6 @@ single-server deployment.
 **Decision:** Session variables use herdr workspace ID as scope.  
 **Rationale:** Recipes run within a workspace context; variables should chain
 across runs in the same workspace but not leak between workspaces.
-
-### 14.9 `start_agent` Appends `--`
-
-**Decision:** `start_agent` prepends `--` before the agent name to prevent
-herdr from consuming agent-specific flags.  
-**Rationale:** Prevents argument confusion between herdr's flags and agent
-flags.
 
 ### 14.10 Clipboard Detection & Override
 

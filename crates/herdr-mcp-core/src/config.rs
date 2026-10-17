@@ -74,10 +74,10 @@ impl Default for ProxyConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
-    #[serde(default)]
+    #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
     #[serde(default)]
@@ -110,21 +110,61 @@ pub struct Config {
     pub keybindings: crate::keybindings::Keybindings,
 }
 
-/// Explicit clipboard backend commands for the `clipboard_set` / `clipboard_get`
-/// tools. When both `copy-command` and `paste-command` are set (non-empty) they
-/// override platform auto-detection (e.g. force `xsel` instead of `wl-copy` on
-/// Linux). The `HERDR_MCP_CLIPBOARD_COPY` / `HERDR_MCP_CLIPBOARD_PASTE` env vars
-/// still take precedence over this setting.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ClipboardConfig {
-    /// Command that reads clipboard contents from stdin (copy).
-    #[serde(default)]
-    pub copy_command: Option<String>,
+/// Defined in `herdr-mcp-api` (it is also the `/api/config` wire type).
+pub use herdr_mcp_api::ClipboardConfig;
 
-    /// Command that writes clipboard contents to stdout (paste).
-    #[serde(default)]
-    pub paste_command: Option<String>,
+/// The herdr binary to run: `HERDR_BIN`, else `HERDR_BIN_PATH` (herdr sets
+/// it inside its panes), else `herdr` on `PATH`.
+pub fn herdr_bin() -> String {
+    env::var("HERDR_BIN")
+        .or_else(|_| env::var("HERDR_BIN_PATH"))
+        .unwrap_or_else(|_| "herdr".to_string())
+}
+
+impl Config {
+    /// Make every `herdr` child process talk to the server this config
+    /// resolved (inside a herdr pane: that pane's session; outside: the
+    /// configured / `HERDR_SESSION` / default socket), so CLI calls and the
+    /// socket client never disagree. Exported as `HERDR_SOCKET_PATH`, which
+    /// herdr's own CLI honours.
+    ///
+    /// # Safety
+    /// Mutates the process environment: call before any other thread runs
+    /// (before the async runtime starts).
+    pub unsafe fn export_herdr_socket(&self) {
+        // SAFETY: the caller guarantees no other thread reads the environment.
+        unsafe { env::set_var("HERDR_SOCKET_PATH", self.herdr_socket_path()) };
+    }
+}
+
+/// `~/x` → `$HOME/x`; any other path unchanged.
+fn expand_home(path: &std::path::Path) -> PathBuf {
+    match (path.strip_prefix("~"), env::var_os("HOME")) {
+        (Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => path.to_path_buf(),
+    }
+}
+
+/// Where state lives when nothing else says: `./data`.
+fn default_data_dir() -> PathBuf {
+    PathBuf::from("./data")
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+            http: Default::default(),
+            mcp: Default::default(),
+            herdr: Default::default(),
+            trim: Default::default(),
+            proxy: Default::default(),
+            sandbox: Default::default(),
+            logging: Default::default(),
+            clipboard: Default::default(),
+            keybindings: Default::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -375,6 +415,10 @@ impl Config {
         if let Some(cli) = cli_overrides {
             config = config.apply_cli_overrides(cli);
         }
+
+        // Paths from TOML / env may start with `~/`; nothing else expands it.
+        config.data_dir = expand_home(&config.data_dir);
+        config.herdr.socket_path = config.herdr.socket_path.as_deref().map(expand_home);
 
         // 5. Validate
         config.validate()?;
@@ -684,11 +728,11 @@ pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str)
         String::new()
     };
 
-    // Parse into an editable document; if parsing fails (empty or malformed),
-    // start from a fresh document so Save still works on a broken file.
+    // Parse into an editable document. A file that doesn't parse is an error,
+    // never replaced: rewriting it would drop the user's other settings.
     let mut doc = content
         .parse::<toml_edit::DocumentMut>()
-        .unwrap_or_else(|_| toml_edit::DocumentMut::new());
+        .with_context(|| format!("{} is not valid TOML; fix it first", path.display()))?;
 
     // Ensure the `[clipboard]` table exists.
     if !doc.contains_table("clipboard") {
@@ -895,8 +939,8 @@ mod tests {
         a.data_dir = PathBuf::from("/a");
         b.http.port = Some(1234);
         let merged = a.merge(b);
-        // merge takes `other` wholesale for every field
-        assert_eq!(merged.data_dir, PathBuf::from(""));
+        // merge takes `other` wholesale for every field (its default dir)
+        assert_eq!(merged.data_dir, PathBuf::from("./data"));
         assert_eq!(merged.http.port, Some(1234));
         // untouched field keeps its default
         assert_eq!(merged.logging.level, "info");
@@ -912,6 +956,38 @@ mod tests {
         c = c.apply_cli_overrides(cli);
         assert_eq!(c.http.port, Some(8080));
         assert_eq!(c.logging.level, "info");
+    }
+
+    #[test]
+    fn test_expand_home() {
+        let home = PathBuf::from(env::var_os("HOME").unwrap());
+        assert_eq!(
+            expand_home(std::path::Path::new("~/.config/herdr/herdr.sock")),
+            home.join(".config/herdr/herdr.sock")
+        );
+        assert_eq!(
+            expand_home(std::path::Path::new("./data")),
+            PathBuf::from("./data")
+        );
+        assert_eq!(
+            expand_home(std::path::Path::new("/abs/~x")),
+            PathBuf::from("/abs/~x")
+        );
+    }
+
+    /// `./data` is the default however the config is built, and a layer
+    /// that doesn't name a data dir leaves the one below it alone.
+    #[test]
+    fn test_data_dir_default_survives_layers() {
+        assert_eq!(Config::default().data_dir, PathBuf::from("./data"));
+        let file: Config = toml::from_str("").unwrap();
+        assert_eq!(file.data_dir, PathBuf::from("./data"));
+        let c = Config {
+            data_dir: PathBuf::from("/from/env"),
+            ..Default::default()
+        }
+        .apply_cli_overrides(CliOverrides::default());
+        assert_eq!(c.data_dir, PathBuf::from("/from/env"));
     }
 
     #[test]
@@ -1091,6 +1167,16 @@ mod tests {
         assert_eq!(cfg.clipboard.copy_command.as_deref(), Some("wl-copy"));
         assert_eq!(cfg.clipboard.paste_command.as_deref(), Some("wl-paste"));
         assert!(!content.contains("\"old\""), "old values gone: {content}");
+    }
+
+    #[test]
+    fn test_upsert_clipboard_refuses_malformed_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("herdr-mcp.toml");
+        let broken = "data-dir = \"/keep\"\n[http\nport = 1\n";
+        std::fs::write(&path, broken).unwrap();
+        assert!(upsert_clipboard_in_file(&path, "xsel -i", "xsel").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
     }
 
     #[test]

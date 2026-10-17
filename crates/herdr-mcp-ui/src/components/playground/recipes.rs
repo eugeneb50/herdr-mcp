@@ -6,13 +6,13 @@ use dioxus::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-use super::forms::{DynamicForm, ResponseViewer};
-use super::runner::{ToolInfo, tool_list};
+use super::forms::{DynamicForm, ResponseViewer, build_params};
+use super::runner::{ToolInfo, schema_parts, tool_list};
 use crate::client::use_api;
 use crate::vars::substitute;
 use herdr_mcp_api::{
-    CreateRecipeRequest, Recipe, RecipeRequest, RecipeStep, RecipeTemplate, UpdateRecipeRequest,
-    Uuid,
+    CreateRecipeRequest, InstantiateTemplateRequest, Recipe, RecipeStep, RecipeTemplate,
+    StartRunRequest, UpdateRecipeRequest, Uuid,
 };
 
 #[derive(Clone, PartialEq)]
@@ -51,16 +51,19 @@ fn step_from_api(i: usize, s: &RecipeStep) -> Step {
     }
 }
 
-fn step_to_api(s: &Step) -> RecipeStep {
-    let params: serde_json::Map<String, Value> = s
-        .params
+/// A step as the server runs it: params typed per the tool's schema
+/// (`{{…}}` placeholders stay strings until the run resolves them).
+fn step_to_api(s: &Step, tools: &[ToolInfo]) -> RecipeStep {
+    let schema = tools
         .iter()
-        .map(|(k, v)| (k.clone(), Value::String(v.clone())))
-        .collect();
+        .find(|t| t.name == s.tool)
+        .map(|t| t.schema.clone())
+        .unwrap_or(Value::Null);
+    let (props, _) = schema_parts(&schema);
     RecipeStep {
         id: s.id.clone(),
         tool: s.tool.clone(),
-        params: Value::Object(params),
+        params: build_params(&props, &s.params, str::to_string),
         description: Some(s.description.clone()),
     }
 }
@@ -132,25 +135,27 @@ pub fn RecipeBuilder(
             loading.set(true);
             error.set(None);
             results.set(None);
-            // Both shapes are shown raw in the ResponseViewer.
-            let saved = *saved_id.read();
-            let res = match saved {
-                Some(id) => client
-                    .run_recipe_by_id(id)
-                    .await
-                    .map(|r| serde_json::to_value(r).unwrap_or_default()),
-                None => {
-                    let req = RecipeRequest {
-                        name: Some(name.read().clone()),
-                        session_id: None,
-                        steps: steps.read().iter().map(step_to_api).collect(),
-                    };
-                    client
-                        .run_recipe(&req)
-                        .await
-                        .map(|r| serde_json::to_value(r).unwrap_or_default())
-                }
+            let req = match *saved_id.read() {
+                Some(id) => StartRunRequest {
+                    recipe_id: Some(id),
+                    ..Default::default()
+                },
+                None => StartRunRequest {
+                    name: Some(name.read().clone()),
+                    steps: Some(
+                        steps
+                            .read()
+                            .iter()
+                            .map(|s| step_to_api(s, &tools.read()))
+                            .collect(),
+                    ),
+                    ..Default::default()
+                },
             };
+            let res = client
+                .run_and_wait(&req)
+                .await
+                .map(|r| serde_json::to_value(r).unwrap_or_default());
             match res {
                 Err(e) => error.set(Some(format!("Request failed: {e}"))),
                 Ok(data) => results.set(Some(data)),
@@ -172,7 +177,11 @@ pub fn RecipeBuilder(
                 return;
             }
             save_error.set(None);
-            let payload: Vec<RecipeStep> = steps.read().iter().map(step_to_api).collect();
+            let payload: Vec<RecipeStep> = steps
+                .read()
+                .iter()
+                .map(|s| step_to_api(s, &tools.read()))
+                .collect();
             let saved = *saved_id.read();
             let res = match saved {
                 Some(id) => {
@@ -311,7 +320,52 @@ pub fn RecipeBuilder(
             div { class: "alert alert-error", "{e}" }
         }
         if let Some(data) = results.read().as_ref() {
-            ResponseViewer { data: data.clone() }
+            RunResults {
+                data: data.clone(),
+                order: steps.read().iter().map(|s| s.id.clone()).collect(),
+            }
+        }
+    }
+}
+
+/// A finished run (`RunRecord`): its status, then each step's result in
+/// step order.
+#[component]
+fn RunResults(data: Value, order: Vec<String>) -> Element {
+    let status = data
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("?")
+        .to_string();
+    let error = data
+        .get("error")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let results = data.get("results").cloned().unwrap_or(Value::Null);
+    let ran: Vec<(usize, String, Value)> = order
+        .iter()
+        .enumerate()
+        .filter_map(|(i, id)| Some((i + 1, id.clone(), results.get(id)?.clone())))
+        .collect();
+    let ok = status == "completed";
+    rsx! {
+        div { class: "card",
+            div { class: "response-head",
+                span { class: "response-title", "Run" }
+                span { class: if ok { "pill" } else { "pill pill-error" }, "{status}" }
+            }
+            if let Some(e) = error {
+                div { class: "alert alert-error", "{e}" }
+            }
+            for (n, id, result) in ran {
+                div { key: "{id}",
+                    div { class: "form-label", "#{n} {id}" }
+                    match result.get("error").and_then(Value::as_str) {
+                        Some(e) => rsx! { div { class: "alert alert-error", "{e}" } },
+                        None => rsx! { ResponseViewer { data: result.clone() } },
+                    }
+                }
+            }
         }
     }
 }
@@ -427,6 +481,8 @@ fn StepCard(
 pub fn RecipeLibrary(on_select: EventHandler<(String, Vec<Step>)>, refresh_key: u32) -> Element {
     let mut templates: Signal<Vec<RecipeTemplate>> = use_signal(Vec::new);
     let mut saved: Signal<Vec<Recipe>> = use_signal(Vec::new);
+    // Template whose variables are being filled in.
+    let mut filling: Signal<Option<RecipeTemplate>> = use_signal(|| None);
     let client = use_api();
 
     use_effect(move || {
@@ -460,15 +516,25 @@ pub fn RecipeLibrary(on_select: EventHandler<(String, Vec<Step>)>, refresh_key: 
             h3 { class: "card-title", "Recipe Library" }
             if !templates.read().is_empty() {
                 div { class: "var-group-title", "Templates" }
+                if let Some(tpl) = filling.read().clone() {
+                    TemplateForm {
+                        key: "{tpl.id}",
+                        template: tpl,
+                        on_load: move |(name, steps): (String, Vec<RecipeStep>)| {
+                            filling.set(None);
+                            pick((name, steps));
+                        },
+                        on_cancel: move |_| filling.set(None),
+                    }
+                }
                 for tpl in templates.read().iter().cloned() {
                     {
                         let label = tpl.name.clone();
                         let desc = tpl.description.clone();
-                        let picked = (tpl.name.clone(), tpl.steps.clone());
                         rsx! {
                             button {
                                 class: "lib-item",
-                                onclick: move |_| pick(picked.clone()),
+                                onclick: move |_| filling.set(Some(tpl.clone())),
                                 div { class: "lib-name", "{label}" }
                                 div { class: "lib-desc", "{desc}" }
                             }
@@ -505,4 +571,133 @@ pub fn RecipeLibrary(on_select: EventHandler<(String, Vec<Step>)>, refresh_key: 
             }
         }
     }
+}
+
+/// Variables of a template, filled in before it loads into the builder.
+/// The server does the substitution (`/api/templates/{id}/instantiate`);
+/// pane fields suggest the live pane ids.
+#[component]
+fn TemplateForm(
+    template: RecipeTemplate,
+    on_load: EventHandler<(String, Vec<RecipeStep>)>,
+    on_cancel: EventHandler<()>,
+) -> Element {
+    let client = use_api();
+    let mut values: Signal<HashMap<String, String>> = use_signal(|| {
+        template
+            .variables
+            .iter()
+            .map(|v| {
+                let default = v.default_value.as_ref().map(crate::vars::display_value);
+                (v.name.clone(), default.unwrap_or_default())
+            })
+            .collect()
+    });
+    let mut error: Signal<Option<String>> = use_signal(|| None);
+    let panes = use_resource(move || {
+        let client = client();
+        async move { live_panes(&client).await }
+    });
+    let missing = template.variables.iter().any(|v| {
+        v.required
+            && values
+                .read()
+                .get(&v.name)
+                .is_none_or(|s| s.trim().is_empty())
+    });
+    let id = template.id.clone();
+    let name = template.name.clone();
+    let load = move |_| {
+        let client = client();
+        let (id, name) = (id.clone(), name.clone());
+        let variables = values
+            .read()
+            .iter()
+            .filter(|(_, v)| !v.trim().is_empty())
+            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+            .collect();
+        spawn(async move {
+            let req = InstantiateTemplateRequest {
+                variables,
+                name: Some(name),
+            };
+            match client.instantiate_template(&id, &req).await {
+                Ok(recipe) => on_load.call((recipe.name, recipe.steps)),
+                Err(e) => error.set(Some(format!("Could not fill in template: {e}"))),
+            }
+        });
+    };
+    rsx! {
+        div { class: "card",
+            h3 { class: "card-title", "{template.name}" }
+            p { class: "field-desc", "{template.description}" }
+            datalist { id: "live-panes",
+                for (pane, label) in panes.read().clone().unwrap_or_default() {
+                    option { value: "{pane}", "{label}" }
+                }
+            }
+            for var in template.variables.iter().cloned() {
+                div { key: "{var.name}", class: "field",
+                    label { class: "field-head",
+                        code { class: "mono accent", "{var.name}" }
+                        if var.required {
+                            span { class: "required", "required" }
+                        }
+                    }
+                    p { class: "field-desc", "{var.description}" }
+                    input {
+                        class: "input",
+                        r#type: "text",
+                        list: if var.name.contains("pane") { "live-panes" } else { "" },
+                        value: "{values.read().get(&var.name).cloned().unwrap_or_default()}",
+                        oninput: move |e| {
+                            values.write().insert(var.name.clone(), e.value());
+                        },
+                    }
+                }
+            }
+            if let Some(e) = error.read().as_deref() {
+                div { class: "alert alert-error", "{e}" }
+            }
+            div { class: "btn-row",
+                button {
+                    class: "btn btn-primary",
+                    disabled: missing,
+                    onclick: load,
+                    "Load into builder"
+                }
+                button { class: "btn", onclick: move |_| on_cancel.call(()), "Cancel" }
+            }
+        }
+    }
+}
+
+/// `(pane_id, "label · cwd")` for every pane herdr reports (empty if the
+/// call fails: suggestions are optional).
+async fn live_panes(client: &crate::client::ApiClient) -> Vec<(String, String)> {
+    let Ok(result) = client.call_tool("list_panes", &serde_json::json!({})).await else {
+        return Vec::new();
+    };
+    let text = herdr_mcp_api::tool_text(&result);
+    let Ok(json) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+    json.pointer("/result/panes")
+        .and_then(Value::as_array)
+        .map(|panes| {
+            panes
+                .iter()
+                .filter_map(|p| {
+                    let id = p.get("pane_id")?.as_str()?.to_string();
+                    let label = [p.get("label"), p.get("agent"), p.get("cwd")]
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    Some((id, label))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }

@@ -6,8 +6,8 @@
 //!
 //! Rendered with `ratatui` (Frame/Block/Layout widgets) over a crossterm
 //! backend, following the patterns used by the sibling `herdr` and `zerocode`
-//! dashboards. The dashboard talks to the herdr-mcp HTTP bridge over `reqwest`
-//! (see `http`). It also reads herdr workspace/pane context via the `herdr`
+//! dashboards. The dashboard talks to the herdr-mcp HTTP bridge through the
+//! shared `herdr_mcp_api::ApiClient` (see `http`). It also reads herdr workspace/pane context via the `herdr`
 //! CLI for the sidecar header.
 //!
 //! Entry point: [`run`].
@@ -58,11 +58,9 @@ fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
     }
 }
 
-use crate::stats;
-
 use herdr_mcp_api::{
-    AgentHandle, ApiClient, PlaygroundSnapshot, Recipe, RecipeTemplate, TrimStatusResponse,
-    VariableStore,
+    AgentHandle, ApiClient, ConfigResponse, PlaygroundSnapshot, Recipe, RecipeTemplate,
+    TrimStatusResponse, VariableStore,
 };
 use theme::{accent_style, dim_style, muted_style, title_style};
 
@@ -175,7 +173,7 @@ pub struct HerdrPane {
     pub output: String,
     /// Optional message-trim policy. The Trim tab editor mutates this through
     /// the registry, so the snapshot stays live without polling herdr.
-    pub trim_policy: Option<crate::policy::TrimPolicy>,
+    pub trim_policy: Option<herdr_mcp_api::TrimPolicy>,
     /// Registry-side last-updated epoch seconds (registry authoritative, not the CLI).
     pub updated_at: i64,
 
@@ -273,7 +271,9 @@ pub struct App {
     pub trim_status: Option<TrimStatusResponse>,
     pub recipes: Option<Vec<Recipe>>,
     pub templates: Option<Vec<RecipeTemplate>>,
-    pub trim_stats_file: Option<stats::TrimStats>,
+    /// Bridge runtime config (`GET /api/config`); fetched once per connection
+    /// and replaced by the response of a clipboard Save.
+    pub config: Option<ConfigResponse>,
     /// playground sub-state
     pub playground: PlaygroundState,
     /// trim sub-state
@@ -429,7 +429,7 @@ pub struct TrimState {
     /// Current editing stages (local copy before Apply).
     pub stages: Vec<String>,
     /// Current editing direction (local copy before Apply).
-    pub direction: crate::policy::TrimDirection,
+    pub direction: herdr_mcp_api::TrimDirection,
     /// Whether the stage picker overlay is open.
     pub stage_picker_open: bool,
     /// Selected item in the stage picker overlay.
@@ -470,7 +470,6 @@ pub enum EditField {
 pub struct SettingsState {
     pub http_port: u16,
     pub data_dir: String,
-    pub herdr_socket: String,
     pub selected: usize,
     /// Clipboard backend configuration.
     pub clipboard: ClipboardSettingsState,
@@ -495,8 +494,6 @@ pub struct ClipboardSettingsState {
     pub edit_field: usize,
     /// The TextArea buffer for inline editing of command fields.
     pub edit_area: tui_textarea::TextArea<'static>,
-    /// Resolved config-file path (where Save writes). Empty if unresolvable.
-    pub config_path: String,
     /// Last test outcome message (empty = no test run yet).
     pub test_msg: String,
     /// Last save outcome message (empty = no save yet).
@@ -564,7 +561,7 @@ impl BackendPreset {
     /// Default (copy, paste) commands for this preset. `Custom` returns empty.
     pub fn commands(self) -> (&'static str, &'static str) {
         match self {
-            Self::Xsel => ("xsel -i", "xsel"),
+            Self::Xsel => ("xsel --clipboard --input", "xsel --clipboard --output"),
             Self::Xclip => (
                 "xclip -selection clipboard",
                 "xclip -selection clipboard -o",
@@ -577,6 +574,26 @@ impl BackendPreset {
 }
 
 impl App {
+    /// Store the bridge config and load its clipboard commands into the
+    /// Settings editor (selecting the matching preset, else Custom). When the
+    /// server has no explicit commands (auto-detect) the editor keeps its
+    /// preset defaults.
+    pub fn set_config(&mut self, config: ConfigResponse) {
+        if let (Some(copy), Some(paste)) = (
+            config.clipboard.copy_command.as_deref(),
+            config.clipboard.paste_command.as_deref(),
+        ) {
+            let clip = &mut self.settings.clipboard;
+            clip.preset_index = BackendPreset::ALL
+                .iter()
+                .position(|p| p.commands() == (copy, paste))
+                .unwrap_or(BackendPreset::ALL.len() - 1);
+            clip.copy_cmd = copy.to_string();
+            clip.paste_cmd = paste.to_string();
+        }
+        self.config = Some(config);
+    }
+
     /// Trace a debug line (see `log_debug`) tagged with this app's data dir.
     fn log_debug(&self, msg: impl AsRef<str>) {
         log_debug(&self.opts.data_dir, msg);
@@ -598,7 +615,7 @@ impl App {
             trim_status: None,
             recipes: None,
             templates: None,
-            trim_stats_file: None,
+            config: None,
             playground: PlaygroundState {
                 sub_tab: PlaygroundSub::Runner,
                 tool_index: 0,
@@ -639,7 +656,7 @@ impl App {
                 pane_index: 0,
                 stage_index: 0,
                 stages: Vec::new(),
-                direction: crate::policy::TrimDirection::None,
+                direction: herdr_mcp_api::TrimDirection::None,
                 stage_picker_open: false,
                 stage_picker_index: 0,
                 policy_msg: String::new(),
@@ -661,10 +678,6 @@ impl App {
             settings: SettingsState {
                 http_port,
                 data_dir,
-                herdr_socket: std::env::var("HERDR_SOCKET_PATH").unwrap_or_else(|_| {
-                    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                    format!("{home}/.config/herdr/herdr.sock")
-                }),
                 selected: 0,
                 clipboard: ClipboardSettingsState {
                     preset_index: 0,
@@ -674,9 +687,6 @@ impl App {
                     editing: false,
                     edit_field: 0,
                     edit_area: tui_textarea::TextArea::default(),
-                    config_path: herdr_mcp_core::config_file_or_default()
-                        .display()
-                        .to_string(),
                     test_msg: String::new(),
                     save_msg: String::new(),
                 },
@@ -778,6 +788,11 @@ impl App {
             if let Ok(v) = http.list_templates().await {
                 self.templates = Some(v);
             }
+            if self.config.is_none()
+                && let Ok(c) = http.config().await
+            {
+                self.set_config(c);
+            }
             // Restore last-used playground values once per session so tab
             // navigation and restarts keep the user's context.
             if !self.playground_restored {
@@ -785,25 +800,6 @@ impl App {
             }
             if !ok {
                 self.bridge_connected = false;
-            }
-        }
-        // Always read the file-based trim stats as a fallback.
-        let sessions = self.opts.data_dir.join("sessions");
-        if let Ok(mut entries) = tokio::fs::read_dir(&sessions).await {
-            let mut first_ws: Option<String> = None;
-            while let Ok(Some(e)) = entries.next_entry().await {
-                let fname = e.file_name().to_string_lossy().to_string();
-                if fname.ends_with(".trim_stats.json") {
-                    let ws = fname.trim_end_matches(".trim_stats.json").to_string();
-                    if first_ws.is_none() {
-                        first_ws = Some(ws.clone());
-                    }
-                    if let Some(ref w) = first_ws {
-                        self.trim_stats_file =
-                            Some(stats::load_stats(&self.opts.data_dir, w).await);
-                    }
-                    break;
-                }
             }
         }
     }
@@ -975,8 +971,15 @@ impl App {
                     self.log_debug(msg);
                 }
             }
-            // 3. Diagnostic fallback — ask herdr directly.
-            if let Ok(raw) = herdr_cli(&["pane", "list"]).await
+            // 3. Fallback — herdr's own pane list, through the bridge.
+            let listed = match &self.http {
+                Some(http) => http
+                    .call_tool("list_panes", &serde_json::json!({}))
+                    .await
+                    .ok(),
+                None => None,
+            };
+            if let Some(raw) = listed.map(|r| herdr_mcp_api::tool_text(&r))
                 && let Ok(v) = serde_json::from_str::<Value>(&raw)
             {
                 self.herdr.pane_id = v
@@ -1164,7 +1167,7 @@ impl App {
                 match row {
                     0 => Some(self.settings.http_port.to_string()),
                     1 => Some(self.settings.data_dir.clone()),
-                    2 => Some(self.settings.herdr_socket.clone()),
+                    2 => self.config.as_ref().map(|c| c.herdr_socket.clone()),
                     _ => None,
                 }
             }
@@ -1348,7 +1351,11 @@ impl App {
     }
 
     async fn paste_to_pane(&mut self) {
-        let text = match self.http.clone() {
+        let Some(http) = self.http.clone() else {
+            self.status_msg = "bridge not connected".into();
+            return;
+        };
+        let text = match Some(http.clone()) {
             Some(http) => match http.clipboard_get().await {
                 Ok(t) => t,
                 Err(e) => {
@@ -1368,7 +1375,8 @@ impl App {
                 return;
             }
         };
-        match herdr_cli(&["pane", "send-text", &pane_id, &text]).await {
+        let params = serde_json::json!({ "pane_id": pane_id, "text": text });
+        match http.call_tool("send_text", &params).await {
             Ok(_) => self.status_msg = format!("sent {} chars to pane {pane_id}", text.len()),
             Err(e) => self.status_msg = format!("send-text failed: {e}"),
         }
@@ -1877,7 +1885,7 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 for (i, r) in app.clipboard_preset_rects.iter().enumerate() {
                     if m.row == r.y && m.column >= r.x && m.column < r.x + r.width {
                         app.settings.clipboard.preset_index = i;
-                        let p = crate::tui::BackendPreset::ALL[i];
+                        let p = crate::BackendPreset::ALL[i];
                         app.settings.clipboard.copy_cmd = p.commands().0.to_string();
                         app.settings.clipboard.paste_cmd = p.commands().1.to_string();
                         app.settings.clipboard.field_focus = 0;
@@ -2031,7 +2039,7 @@ pub fn parse_tool_schema(tool: &Value) -> Vec<ToolField> {
 
     let mut fields = Vec::new();
     for (name, spec) in props {
-        let typ = spec.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        let typ = herdr_mcp_api::schema_type(spec);
         let enum_variants = spec.get("enum").and_then(|e| e.as_array()).map(|a| {
             a.iter()
                 .filter_map(|v| v.as_str().map(str::to_string))
@@ -2085,21 +2093,6 @@ fn parse_variables(vars: &[VariableStore]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Best-effort synchronous herdr CLI invocation shared by the sidecar refresh.
-async fn herdr_cli(args: &[&str]) -> Result<String> {
-    use tokio::process::Command;
-    let bin = std::env::var("HERDR_BIN").unwrap_or_else(|_| "herdr".to_string());
-    let out = Command::new(&bin)
-        .args(args)
-        .output()
-        .await
-        .with_context(|| format!("running {bin} {}", args.join(" ")))?;
-    if !out.status.success() {
-        anyhow::bail!("herdr {} failed", args.join(" "));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
 /// Truncate a string to `max` display cells (char count, not grapheme width).
 pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
@@ -2127,7 +2120,7 @@ mod tests {
                 "type": "object",
                 "properties": {
                     "workspace_id": { "type": "string", "title": "Workspace", "description": "ws id" },
-                    "limit": { "type": "integer", "default": 20 },
+                    "limit": { "type": ["integer", "null"], "default": 20 },
                     "enabled": { "type": "boolean", "default": true },
                     "mode": { "type": "string", "enum": ["fast", "slow"] }
                 },
@@ -2182,6 +2175,39 @@ mod tests {
             enum_variants: None,
             description: None,
         }
+    }
+
+    #[test]
+    fn set_config_loads_clipboard_commands_into_editor() {
+        let cfg = |copy: Option<&str>, paste: Option<&str>| ConfigResponse {
+            data_dir: "d".into(),
+            herdr_socket: "s".into(),
+            herdr_bin: "herdr".into(),
+            clipboard: herdr_mcp_api::ClipboardConfig {
+                copy_command: copy.map(Into::into),
+                paste_command: paste.map(Into::into),
+            },
+            config_path: "herdr-mcp.toml".into(),
+        };
+        let mut app = test_app();
+
+        app.set_config(cfg(Some("wl-copy"), Some("wl-paste")));
+        let clip = &app.settings.clipboard;
+        assert_eq!(BackendPreset::ALL[clip.preset_index], BackendPreset::WlCopy);
+        assert_eq!(
+            (clip.copy_cmd.as_str(), clip.paste_cmd.as_str()),
+            ("wl-copy", "wl-paste")
+        );
+
+        app.set_config(cfg(Some("my-copy"), Some("my-paste")));
+        let clip = &app.settings.clipboard;
+        assert_eq!(BackendPreset::ALL[clip.preset_index], BackendPreset::Custom);
+        assert_eq!(clip.copy_cmd, "my-copy");
+
+        // Auto-detect (no explicit commands) leaves the editor as it was.
+        app.set_config(cfg(None, None));
+        assert_eq!(app.settings.clipboard.copy_cmd, "my-copy");
+        assert!(app.config.is_some());
     }
 
     fn test_app() -> App {
@@ -2335,7 +2361,7 @@ mod tests {
         assert!(app.trim.policy_msg.is_empty());
         assert!(matches!(
             app.trim.direction,
-            crate::policy::TrimDirection::None
+            herdr_mcp_api::TrimDirection::None
         ));
     }
 

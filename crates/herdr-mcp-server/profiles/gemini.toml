@@ -1,0 +1,4 @@
+id = "gemini"
+name = "Gemini CLI"
+kind = "gemini"
+notes = "Driven natively by herdr (agent start --kind gemini)."

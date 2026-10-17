@@ -18,7 +18,7 @@ pub struct Recipe {
     pub category: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecipeStep {
     pub id: String,
     pub tool: String,
@@ -26,28 +26,7 @@ pub struct RecipeStep {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ExecutionStatus {
-    Pending,
-    Running,
-    Completed,
-    Failed,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExecutionResult {
-    pub id: Uuid,
-    pub recipe_id: Uuid,
-    pub started_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub status: ExecutionStatus,
-    pub results: HashMap<String, serde_json::Value>,
-    pub variables: HashMap<String, serde_json::Value>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecipeTemplate {
     pub id: String,
     pub name: String,
@@ -57,7 +36,7 @@ pub struct RecipeTemplate {
     pub steps: Vec<RecipeStep>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TemplateVariable {
     pub name: String,
     pub description: String,
@@ -67,27 +46,15 @@ pub struct TemplateVariable {
     pub required: bool,
 }
 
-/// `POST /api/recipe` body — run an ad-hoc recipe.
+/// `POST /api/templates/{id}/instantiate` body: values for the template's
+/// variables (missing ones take their defaults) and an optional name. The
+/// response is the filled-in [`Recipe`], not saved.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RecipeRequest {
+pub struct InstantiateTemplateRequest {
+    #[serde(default)]
+    pub variables: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub name: Option<String>,
-    /// herdr workspace id (e.g. "w1"). Variables are scoped to this workspace so
-    /// recipes can chain across its panes/tabs.
-    #[serde(default)]
-    pub session_id: Option<String>,
-    pub steps: Vec<RecipeStep>,
-}
-
-/// `POST /api/recipe` response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RecipeResponse {
-    pub results: HashMap<String, serde_json::Value>,
-    pub status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub failed_step: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
 }
 
 /// `POST /api/recipes` body.
@@ -110,10 +77,4 @@ pub struct UpdateRecipeRequest {
     pub description: Option<String>,
     pub steps: Option<Vec<RecipeStep>>,
     pub variables: Option<HashMap<String, serde_json::Value>>,
-}
-
-/// `GET /api/recipes/{id}/export` response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExportScriptResponse {
-    pub script: String,
 }

@@ -7,6 +7,8 @@ edition = "2024"
 rmcp = { workspace = true, features = ["server", "transport-io", "macros"] }
 tokio = { workspace = true, features = ["full"] }
 axum = { workspace = true }
+async-stream = "0.3"
+futures-util = { version = "0.3", default-features = false }
 tower-http = { workspace = true, features = ["fs"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -18,6 +20,7 @@ chrono = { workspace = true, features = ["serde"] }
 cron = { workspace = true }
 dashmap = { workspace = true }
 regex = { workspace = true }
+toml = { workspace = true }
 lazy_static = { workspace = true }
 
 herdr-mcp-trim = { path = "../herdr-mcp-trim" }

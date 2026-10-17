@@ -52,7 +52,7 @@ pub async fn serve_core(
 
     let herdr_client = build_herdr_client(
         &data_dir,
-        config.herdr.socket_path.clone(),
+        config.herdr_socket_path(),
         config.herdr.reconnect_attempts,
         config.herdr.reconnect_backoff_ms,
     );
@@ -145,17 +145,10 @@ pub async fn run_serve_headless(config: &Config) -> Result<()> {
 
 pub fn build_herdr_client(
     data_dir: &std::path::Path,
-    herdr_socket: Option<std::path::PathBuf>,
+    socket_path: std::path::PathBuf,
     reconnect_attempts: u32,
     reconnect_backoff_ms: u64,
 ) -> std::sync::Arc<HerdrClient> {
-    // The socket path is already resolved by Config::herdr_socket_path() which
-    // includes env override (HERDR_SOCKET_PATH) and HERDR_SESSION fallback.
-    // No need to re-check env here.
-    let socket_path = herdr_socket.unwrap_or_else(|| {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        std::path::PathBuf::from(home).join(".config/herdr/herdr.sock")
-    });
     let persistence = Persistence::new(data_dir.to_path_buf());
     let client = HerdrClient::new(
         std::sync::Arc::new(persistence),

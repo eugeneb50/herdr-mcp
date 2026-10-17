@@ -1,7 +1,7 @@
 # herdr-mcp — project memory (resume context)
 
 # TUI clipboard + right-click context menu (implemented)
-# Crate: herdr-mcp-trim (crates/herdr-mcp-trim/src/tui/*)
+# Crate: herdr-mcp-tui (crates/herdr-mcp-tui/src/*)
 #
 # Dependency note: tui-textarea 0.6/0.7 require crossterm 0.28 + ratatui 0.29,
 # but the workspace uses crossterm 0.29 + ratatui 0.30. Use the compatible fork

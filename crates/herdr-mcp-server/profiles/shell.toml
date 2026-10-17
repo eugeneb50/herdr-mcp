@@ -1,0 +1,6 @@
+id = "shell"
+name = "Shell / any REPL"
+command = "bash"
+quiet_ms = 1500
+ready_regex = '[$#>] ?$'
+notes = "Generic template for any line-oriented REPL: copy to data/profiles/<id>.toml and change command, args and ready_regex."

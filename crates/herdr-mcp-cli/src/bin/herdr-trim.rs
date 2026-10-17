@@ -10,7 +10,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use herdr_mcp_core::{CliOverrides, Config};
-use herdr_mcp_trim::{dashboard, folder_key as fk, pipeline, runner::PipelineRunner};
+use herdr_mcp_trim::{folder_key as fk, pipeline, runner::PipelineRunner};
 
 #[allow(dead_code)]
 #[path = "../common.rs"]
@@ -41,14 +41,12 @@ enum Command {
 
     /// Open the dashboard (bridge-backed UI) for trim savings.
     Dashboard {
-        #[arg(long, default_value = "./data")]
-        data_dir: std::path::PathBuf,
+        /// Data directory (default `./data`, `HERDR_MCP_DATA_DIR`, herdmcp.toml).
+        #[arg(long)]
+        data_dir: Option<std::path::PathBuf>,
         /// HTTP bridge port the dashboard talks to (playground/recipe builder).
         #[arg(long, default_value_t = 7676)]
         http_port: u16,
-        /// Run the legacy trim-only dashboard instead of the kitchen-sink TUI.
-        #[arg(long)]
-        legacy: bool,
     },
 
     /// Manage per-folder PFC1 phonetic keys (scan, list, decompress).
@@ -88,12 +86,41 @@ enum FolderKeyAction {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
     common::init_tracing()?;
+    if let Command::Dashboard {
+        data_dir,
+        http_port,
+    } = &args.command
+    {
+        // Run the dashboard on top of the serve stack in-process.
+        // The HTTP bridge + herdr event subscriber come up headless
+        // (MCP stdio disabled), then the TUI runs on the main task and
+        // reads pane state from the live AgentRegistry via the bridge.
+        let config = Config::load(Some(CliOverrides {
+            data_dir: data_dir.clone(),
+            http_port: Some(*http_port),
+            http_only: Some(true),
+            ..Default::default()
+        }))?;
+        // SAFETY: single-threaded here; the runtime starts below.
+        unsafe { config.export_herdr_socket() };
+        let http_port = *http_port;
+        return tokio::runtime::Runtime::new()?.block_on(async move {
+            common::run_serve_headless(&config).await?;
+            let opts = herdr_mcp_tui::DashboardOptions {
+                data_dir: config.data_dir.clone(),
+                http_port,
+            };
+            herdr_mcp_tui::run(opts).await
+        });
+    }
+    tokio::runtime::Runtime::new()?.block_on(run(args.command))
+}
 
-    match args.command {
+async fn run(command: Command) -> Result<()> {
+    match command {
         Command::Trim {
             stage,
             decompress,
@@ -101,36 +128,7 @@ async fn main() -> Result<()> {
             file,
             text,
         } => run_trim(stage, decompress, &data_dir, file, text).await,
-        Command::Dashboard {
-            data_dir,
-            http_port,
-            legacy,
-        } => {
-            if legacy {
-                dashboard::run(&data_dir).await
-            } else {
-                // Run the dashboard on top of the serve stack in-process.
-                // The HTTP bridge + herdr event subscriber come up headless
-                // (MCP stdio disabled), then the TUI runs on the main task and
-                // reads pane state from the live AgentRegistry via the bridge.
-                let config = Config::load(Some(CliOverrides {
-                    data_dir: Some(data_dir.clone()),
-                    http_port: Some(http_port),
-                    http_only: Some(true),
-                    http_bind: None,
-                    herdr_socket: None,
-                    log_level: None,
-                    trim_stages: Vec::new(),
-                    proxy_port: None,
-                }))?;
-                common::run_serve_headless(&config).await?;
-                let opts = herdr_mcp_trim::tui::DashboardOptions {
-                    data_dir,
-                    http_port,
-                };
-                herdr_mcp_trim::tui::run(opts).await
-            }
-        }
+        Command::Dashboard { .. } => unreachable!("handled in main"),
         Command::FolderKey { action } => run_folder_key(action).await,
     }
 }

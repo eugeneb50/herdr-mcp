@@ -10,6 +10,7 @@ serde = { workspace = true, features = ["derive"] }
 toml = { workspace = true }
 toml_edit = { workspace = true }
 dirs = { workspace = true }
+herdr-mcp-api = { path = "../herdr-mcp-api" }
 
 [dev-dependencies]
 pretty_assertions = { workspace = true }

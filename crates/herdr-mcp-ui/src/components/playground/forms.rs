@@ -6,9 +6,42 @@ use dioxus::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-/// Convert a raw string field to a JSON value per schema type.
+use herdr_mcp_api::schema_type;
+
+/// Tool arguments from raw form values: each `resolve`d (variable
+/// substitution) and converted per its schema type. Blank fields are left
+/// out, so optional params fall back to their defaults.
+pub fn build_params(
+    properties: &HashMap<String, Value>,
+    values: &HashMap<String, String>,
+    resolve: impl Fn(&str) -> String,
+) -> Value {
+    let mut map = serde_json::Map::new();
+    for (k, raw) in values {
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let stype = properties.get(k).map(schema_type).unwrap_or("string");
+        map.insert(k.clone(), convert_param(stype, &resolve(raw)));
+    }
+    Value::Object(map)
+}
+
+/// Convert a raw string field to a JSON value per schema type. Arrays take
+/// JSON (`["Enter"]`) or a comma list (`Enter, ctrl+c`).
 pub fn convert_param(schema_type: &str, raw: &str) -> Value {
     match schema_type {
+        "array" => serde_json::from_str::<Value>(raw)
+            .ok()
+            .filter(Value::is_array)
+            .unwrap_or_else(|| {
+                raw.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| Value::String(s.to_string()))
+                    .collect()
+            }),
+        "object" => serde_json::from_str(raw).unwrap_or(Value::String(raw.to_string())),
         "boolean" => Value::Bool(matches!(raw, "true" | "1" | "yes")),
         "integer" | "number" => raw
             .trim()
@@ -44,10 +77,20 @@ pub fn DynamicForm(
                 {
                     let values = values.clone();
                     let prop = properties.get(&key).cloned().unwrap_or(Value::Null);
-                    let ptype = prop.get("type").and_then(|t| t.as_str()).unwrap_or("string");
+                    let ptype = schema_type(&prop);
+                    let choices: Vec<String> = prop
+                        .get("enum")
+                        .and_then(Value::as_array)
+                        .map(|e| e.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                        .unwrap_or_default();
                     let desc = prop.get("description").and_then(|d| d.as_str()).unwrap_or("");
                     let is_required = required.contains(&key);
                     let val = values.get(&key).cloned().unwrap_or_default();
+                    // A boolean left alone shows (and toggles from) its default.
+                    let on = match val.as_str() {
+                        "" => prop.get("default") == Some(&Value::Bool(true)),
+                        v => v == "true",
+                    };
                     let resolved = preview.get(&key).cloned().unwrap_or_default();
                     let show_resolved = !resolved.is_empty() && resolved != val;
                     rsx! {
@@ -62,20 +105,34 @@ pub fn DynamicForm(
                             if !desc.is_empty() {
                                 p { class: "field-desc", "{desc}" }
                             }
-                            if ptype == "boolean" {
+                            if !choices.is_empty() {
+                                select {
+                                    class: "input",
+                                    onchange: {
+                                        let key = key.clone();
+                                        move |e: Event<FormData>| {
+                                            let mut next = values.clone();
+                                            next.insert(key.clone(), e.value());
+                                            on_change.call(next);
+                                        }
+                                    },
+                                    option { value: "", selected: val.is_empty(),
+                                        if is_required { "— choose —" } else { "(default)" }
+                                    }
+                                    for c in choices {
+                                        option { value: "{c}", selected: val == c, "{c}" }
+                                    }
+                                }
+                            } else if ptype == "boolean" {
                                 label { class: "check-row",
                                     input {
                                         r#type: "checkbox",
-                                        checked: val == "true",
+                                        checked: on,
                                         onchange: {
                                             let key = key.clone();
-                                            let cur = val.clone();
                                             move |_| {
                                                 let mut next = values.clone();
-                                                next.insert(
-                                                    key.clone(),
-                                                    if cur == "true" { "false".to_string() } else { "true".to_string() },
-                                                );
+                                                next.insert(key.clone(), (!on).to_string());
                                                 on_change.call(next);
                                             }
                                         },
@@ -148,10 +205,7 @@ pub fn ResponseViewer(data: Value) -> Element {
         .and_then(|c| c.as_array())
         .cloned()
         .unwrap_or_default();
-    let is_error = data
-        .get("is_error")
-        .and_then(|e| e.as_bool())
-        .unwrap_or(false);
+    let is_error = herdr_mcp_api::tool_is_error(&data);
 
     rsx! {
         div { class: "response",
@@ -220,6 +274,45 @@ mod tests {
         assert_eq!(
             convert_param("string", "{{pane.x}}"),
             Value::String("{{pane.x}}".into())
+        );
+        assert_eq!(
+            convert_param("array", "Enter, ctrl+c"),
+            serde_json::json!(["Enter", "ctrl+c"])
+        );
+        assert_eq!(
+            convert_param("array", r#"["a,b"]"#),
+            serde_json::json!(["a,b"])
+        );
+    }
+
+    /// Optional params (`Option<u32>`, `Option<bool>`) arrive as
+    /// `["integer","null"]`; they must still be sent typed, and blanks dropped.
+    #[test]
+    fn build_params_types_optional_fields_and_skips_blanks() {
+        let schema = serde_json::json!({
+            "lines": { "type": ["integer", "null"] },
+            "check": { "type": ["boolean", "null"] },
+            "keys": { "type": "array", "items": { "type": "string" } },
+            "pane_id": { "type": ["string", "null"] },
+            "command": { "type": "string" }
+        });
+        let props: HashMap<String, Value> = serde_json::from_value(schema).unwrap();
+        let values: HashMap<String, String> = [
+            ("lines", "5"),
+            ("check", "true"),
+            ("keys", "Enter"),
+            ("pane_id", "  "),
+            ("command", "echo {{x}}"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let params = build_params(&props, &values, |raw| raw.replace("{{x}}", "hi"));
+        assert_eq!(
+            params,
+            serde_json::json!({
+                "lines": 5, "check": true, "keys": ["Enter"], "command": "echo hi"
+            })
         );
     }
 }

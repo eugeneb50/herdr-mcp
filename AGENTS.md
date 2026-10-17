@@ -95,13 +95,13 @@ herdr-mcp serve
 herdr-mcp serve --http 7676 --http-only
 
 # Kitchen-sink TUI dashboard (VS Code-style tabs, mouse+keyboard)
-herdr-mcp dashboard
+herdr-trim dashboard
 
 # Legacy trim-only dashboard
-herdr-mcp dashboard --legacy
+herdr-trim dashboard --legacy
 
 # Message trim CLI
-herdr-mcp trim "text to compress"
+herdr-trim trim "text to compress"
 ```
 
 ## Project Snapshot
@@ -122,7 +122,7 @@ organized as a Cargo workspace under `crates/`.
 
 Key subsystems:
 
-- **MCP tool layer** — 49 tool definitions across discovery, lifecycle,
+- **MCP tool layer** — 58 tool definitions across discovery, lifecycle,
   read, write, synchronize, a2a primitives, message-trim, recipe templates,
   scheduler, and folder-key categories.
 - **HTTP bridge** — Axum server mirroring the MCP tools as REST endpoints;
@@ -135,7 +135,7 @@ Key subsystems:
   socket; label resolution by pane_id → role → label.
 - **Persistence** — file-based JSON under `data/` (recipes, schedules,
   variables, trim stats, PFC1 memory).
-- **TUI dashboard** — `crates/herdr-mcp-trim/src/tui/` with VS Code-style
+- **TUI dashboard** — `crates/herdr-mcp-tui/` with VS Code-style
   tabbed interface (Overview, Playground, Trim, Variables, Settings), mouse
   + keyboard navigation, herdr sidecar context awareness.
 
@@ -147,8 +147,9 @@ Every workspace crate carries a stability tier.
 |-------|------|-------|
 | `herdr-mcp-api` | Experimental | HTTP bridge wire contract: every `/api/*` type + typed `ApiClient`. Leaf crate, must build for `wasm32-unknown-unknown`. |
 | `herdr-mcp-core` | Beta | Config system (`TOML + env + CLI`), error types. Stable schema. |
-| `herdr-mcp-trim` | Experimental | Message-trim compressors (caveman, pfc1), pipeline, policy, stats, folder keys, dashboard. |
-| `herdr-mcp-server` | Experimental | MCP server, 49 tools, HTTP bridge, recipe engine, event subscriber, scheduler. |
+| `herdr-mcp-trim` | Experimental | Message-trim compressors (caveman, pfc1), pipeline, policy, stats, folder keys. |
+| `herdr-mcp-tui` | Experimental | Terminal dashboard (kitchen-sink + legacy). Bridge client only — no server deps. |
+| `herdr-mcp-server` | Experimental | MCP server, 58 tools, HTTP bridge, recipe engine, event subscriber, scheduler. |
 | `herdr-mcp-cli` | Experimental | Binary entrypoint (`serve`/`trim`/`dashboard`/`folder-key`) + integration tests. |
 
 **Tiers**: Beta = breaking changes permitted in MINOR with changelog notes.
@@ -159,7 +160,8 @@ through deliberate team decision.
 
 - `crates/herdr-mcp-api/` — single definition of every `/api/*` request/response type (`agents.rs`, `recipe.rs`, `trim.rs`, `variables.rs`) + typed `ApiClient` (`client.rs`). Server/trim/proxy re-export these; web UI and TUI call the bridge through `ApiClient`. No tokio, no `herdr-mcp-*` deps.
 - `crates/herdr-mcp-core/` — `config.rs` (full config system), `error.rs` (anyhow-based error context), `lib.rs`
-- `crates/herdr-mcp-trim/` — `pfc1.rs`, `caveman.rs`, `code_regions.rs`, `pipeline.rs`, `policy.rs`, `runner.rs`, `stats.rs`, `eval.rs`, `dashboard.rs`, `folder_key.rs`, `tui/` (kitchen-sink dashboard)
+- `crates/herdr-mcp-trim/` — `pfc1.rs`, `caveman.rs`, `code_regions.rs`, `pipeline.rs`, `policy.rs`, `runner.rs`, `stats.rs`, `eval.rs`, `folder_key.rs`
+- `crates/herdr-mcp-tui/` — kitchen-sink TUI dashboard (`lib.rs` app loop, `tabs/`, `nav.rs`, `theme.rs`, `http.rs` bridge discovery) + `legacy.rs` trim-only ANSI dashboard; talks to the bridge through `herdr-mcp-api::ApiClient`
 - `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers + recipe engine), `herdr_client.rs`, `persistence.rs`, `scheduler.rs`, `templates.rs`, `variables.rs`, `lib.rs`
 - `crates/herdr-mcp-cli/` — `src/bin/herdr-mcp.rs` (serve), `src/bin/herdr-trim.rs` (trim/dashboard/folder-key), `tests/` (integration)
 - `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); served by the HTTP bridge from `http.web-dir`
@@ -213,8 +215,9 @@ When uncertain, classify as higher risk.
 - **Lossy vs. lossless split** — style compression is inherently lossy; dictionary compression must be reversible for a2a comms.
 - **File-based persistence** — simple, inspectable, no DB dependency. Adequate for single-server deployment.
 - **Workspace-scoped variables** — session variables use herdr workspace ID as scope; they chain across runs in the same workspace but don't leak between workspaces.
-- **`start_agent` appends `--`** — prevents herdr from consuming agent-specific flags.
-- **Default command is `serve`** — running `herdr-mcp` with no arguments starts MCP stdio + HTTP on port 8080, enabling both AI client integration and web playground access out of the box.
+- **herdr from inside or outside a pane** — socket: `--herdr-socket` > `HERDR_SOCKET_PATH` (herdr sets it in panes) > config file > `HERDR_SESSION` > default; binary: `HERDR_BIN` > `HERDR_BIN_PATH` > `herdr`. The resolved socket is exported to child `herdr` processes so CLI calls and the socket client hit the same server.
+- **Every herdr method** — `herdr_api` + `GET /api/herdr/schema`; the playground's herdr API tab is generated from the installed herdr's schema, never hand-listed.
+- **Default command is `serve`** — running `herdr-mcp` with no arguments starts MCP stdio + HTTP on port 7676 (bound to `127.0.0.1`), enabling both AI client integration and web playground access out of the box.
 - **Kitchen-sink TUI** — the `dashboard` subcommand launches a VS Code-style tabbed terminal interface with mouse + keyboard navigation, consolidating the playground, trim dashboard, variables, and settings into a single herdr sidecar pane.
 
 ## Skills
