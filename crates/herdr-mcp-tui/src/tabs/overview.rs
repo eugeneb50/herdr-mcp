@@ -48,7 +48,8 @@ fn render_intro(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         detail_line("net saved", &fmt_bytes(net), 12),
         detail_line("msgs trimmed", &msgs.to_string(), 12),
         detail_line("tools", &tool_count.to_string(), 12),
-        detail_line("panes tracked", &app.herdr.pane_count.to_string(), 12),
+        detail_line("session", app.herdr.session_name(), 12),
+        detail_line("panes", &app.herdr.panes.len().to_string(), 12),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -70,11 +71,21 @@ fn render_tabs_guide(frame: &mut ratatui::Frame, area: Rect) {
 
 fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let pane_count = app.herdr.panes.len();
-    let title = if pane_count == 0 {
-        " Panes "
+    let others = app
+        .herdr
+        .sessions
+        .iter()
+        .filter(|s| s.running && !s.current)
+        .count();
+    let switch = if others > 0 {
+        " · s: next session"
     } else {
-        &format!(" Panes ({}) ", pane_count)
+        ""
     };
+    let title = &format!(
+        " Panes — {} ({pane_count}){switch} ",
+        app.herdr.session_name()
+    );
     let block = if app.overview.focused_frame == 0 {
         focused_panel_block(title)
     } else {
@@ -88,7 +99,7 @@ fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         let mut lines = vec![
             Line::from("No herdr panes detected."),
             Line::from(""),
-            Line::from("Pane list comes from the live AgentRegistry (HTTP bridge /api/agents)."),
+            Line::from("Pane list comes from herdr through the bridge (/api/herdr/panes)."),
         ];
         if let Some(err) = &app.herdr.last_error {
             lines.push(Line::from(format!("Last refresh error: {err}")));
@@ -97,9 +108,8 @@ fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         return;
     }
 
-    let focused_pane_id = app.herdr.pane_id.as_deref();
-
     let header = Row::new(vec![
+        Cell::from("Tab"),
         Cell::from("Label"),
         Cell::from("Agent"),
         Cell::from("Status"),
@@ -114,7 +124,7 @@ fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let clamped = app.overview.pane_index.min(pane_count - 1);
 
     let rows = app.herdr.panes.iter().enumerate().map(|(i, pane)| {
-        let is_focused = Some(pane.pane_id.as_str()) == focused_pane_id;
+        let is_focused = pane.focused;
         let status_color = match pane.status.as_str() {
             "working" => Color::Green,
             "idle" => Color::DarkGray,
@@ -134,6 +144,7 @@ fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
             Style::default()
         };
         Row::new(vec![
+            Cell::from(pane.tab_id.clone()).style(row_style),
             Cell::from(label).style(row_style),
             Cell::from(pane.agent.clone().unwrap_or_default()).style(row_style),
             Cell::from(pane.status.clone()).style(Style::default().fg(status_color).add_modifier(
@@ -148,6 +159,7 @@ fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     });
 
     let widths = [
+        Constraint::Length(14),
         Constraint::Length(20),
         Constraint::Length(12),
         Constraint::Length(10),
@@ -185,6 +197,7 @@ fn render_pane_detail(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let lines = vec![
         detail_line("pane_id", &pane.pane_id, 10),
+        detail_line("tab", &pane.tab_id, 10),
         detail_line("label", &pane.label, 10),
         detail_line("agent", pane.agent.as_deref().unwrap_or("—"), 10),
         detail_line("status", &pane.status, 10),
@@ -232,6 +245,12 @@ pub async fn handle_key(app: &mut App, code: KeyCode, _mods: KeyModifiers) -> Re
             if pane_count > 0 {
                 app.overview.pane_index = (app.overview.pane_index + 5).min(pane_count - 1);
             }
+            Ok(true)
+        }
+        KeyCode::Char('s') => {
+            app.herdr.cycle_session();
+            app.overview.pane_index = 0;
+            app.refresh_herdr().await;
             Ok(true)
         }
         // Tab/Shift+Tab consumed (no-op for single-frame tab).
@@ -283,10 +302,10 @@ mod tests {
                 updated_at: 0,
                 cwd: format!("/tmp/pane-{i}"),
                 focused: i == 0,
-                tab_id: None,
+                workspace_id: "ws".into(),
+                tab_id: "ws:t1".into(),
             })
             .collect();
-        app.herdr.pane_count = count;
         app
     }
 

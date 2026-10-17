@@ -19,7 +19,9 @@ pub mod variables;
 pub use agents::{AgentHandle, AgentsResponse, TrimDirection, TrimPolicy};
 pub use client::{ApiClient, ApiError, schema_type, tool_is_error, tool_payload, tool_text};
 pub use config::{ClipboardConfig, ConfigResponse};
-pub use herdr::{HerdrEvent, RecipeTrigger};
+pub use herdr::{
+    HerdrEvent, HerdrPane, HerdrSession, PaneFilter, PanesResponse, RecipeTrigger, SessionsResponse,
+};
 pub use profile::AgentProfile;
 pub use recipe::{
     CreateRecipeRequest, InstantiateTemplateRequest, Recipe, RecipeStep, RecipeTemplate,

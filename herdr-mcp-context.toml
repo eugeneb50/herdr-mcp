@@ -216,3 +216,30 @@
 #   HERDR_MCP_* env vars, the --tools stub, ~/.herdr-mcp.toml fallback.
 #   deny_unknown_fields: old configs naming those sections now fail to load.
 #   54 tools, 7 crates, 337 tests.
+
+# Sessions + panes everywhere (feat/sessions-panes, stacked on #32, 2026-10-17)
+#
+# - herdr owns panes and sessions. herdr-mcp-api: HerdrPane, HerdrSession,
+#   PaneFilter (tool params AND /api/herdr/panes query — one definition),
+#   PanesResponse, SessionsResponse; ApiClient::list_panes/list_sessions.
+# - server/src/panes.rs is the ONLY pane fetch: panes(&PaneFilter),
+#   sessions(), herdr_in(session, args). Used by resolve_pane_id(_in),
+#   agents::anchor_pane, trim_dashboard_open, auto variables, the event
+#   subscriber, list_panes. Removed the `id`-vs-`pane_id` fallback: herdr 0.9
+#   PaneInfo has a required `pane_id`.
+# - Another session = run herdr with HERDR_SOCKET_PATH=<that session's
+#   socket_path> (herdr_cli_at). Unknown/stopped session -> error (HTTP 502).
+#   HerdrSession.current = socket matches our HERDR_SOCKET_PATH (computed per
+#   request, canonicalized).
+# - `session` only on Discovery + Read tools (user's choice); writes, runs and
+#   triggers stay on the server's own session. TUI/web refuse writes
+#   (paste-to-pane, trim policy) while viewing another session.
+# - list_panes now returns {"panes": [...]} (no herdr envelope); template
+#   a2a-pane-inventory stores {{ panes.panes }}.
+# - TUI: HerdrContext = sessions + selected session + panes (herdr's list
+#   joined with registry handles by pane id); focused()/workspace() derived.
+#   Fixed: workspace id was read from "id" (herdr sends "workspace_id"), so it
+#   was always None; pane list showed only registry agents. Playground
+#   persistence key stays "default" (what it always resolved to; shared with
+#   the web playground). `s` on Overview cycles sessions.
+# - 55 tools, 340 tests.

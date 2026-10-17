@@ -541,23 +541,25 @@ fn render_env_and_sidecar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     lines.push(Line::from(""));
     lines.push(Line::from("Sidecar profiler:"));
-    match &app.herdr.workspace {
-        Some(ws) => lines.push(row(
-            app.settings.selected == 9,
-            "workspace".into(),
-            ws.clone(),
-        )),
-        None => lines.push(row(
-            app.settings.selected == 9,
-            "workspace".into(),
-            "(unknown — not inside herdr?)".into(),
-        )),
-    }
+    lines.push(row(
+        app.settings.selected == 9,
+        "workspace".into(),
+        app.herdr
+            .workspace()
+            .unwrap_or("(unknown — no focused pane)")
+            .into(),
+    ));
+    lines.push(raw_row(format!(
+        "  session:   {}",
+        app.herdr.session_name()
+    )));
     lines.push(raw_row(format!(
         "  pane:      {}",
-        app.herdr.pane_id.as_deref().unwrap_or("(unknown)")
+        app.herdr
+            .focused()
+            .map_or("(unknown)", |p| p.pane_id.as_str())
     )));
-    lines.push(raw_row(format!("  panes:     {}", app.herdr.pane_count)));
+    lines.push(raw_row(format!("  panes:     {}", app.herdr.panes.len())));
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

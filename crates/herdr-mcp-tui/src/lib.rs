@@ -133,35 +133,91 @@ impl ToolField {
     }
 }
 
-/// Herdr sidecar context resolved from the `herdr` CLI.
+/// What the dashboard shows of herdr, refreshed from the bridge.
 #[derive(Default, Clone)]
 pub struct HerdrContext {
-    pub workspace: Option<String>,
-    pub pane_id: Option<String>,
-    pub pane_count: usize,
-    /// Full pane list from the live `AgentRegistry` (read via the HTTP bridge).
+    /// Every named herdr session (`GET /api/herdr/sessions`).
+    pub sessions: Vec<herdr_mcp_api::HerdrSession>,
+    /// Session shown, by name; `None` = the bridge's own (`current`). Only
+    /// that one is written to (paste-to-pane, trim policies).
+    pub session: Option<String>,
+    /// The shown session's panes, in herdr's order.
     pub panes: Vec<HerdrPane>,
     /// Last error surfaced by `refresh_herdr`, surfaced in the footer / log so
     /// "no panes detected" is no longer a silent failure.
     pub last_error: Option<String>,
 }
 
-/// A single herdr pane, presumptively from the live `AgentRegistry`. The
-/// `cwd`/`focused` fields stay optional because the registry snapshot doesn't
-/// carry them; when the TUI shell-outs to `herdr pane list` as the diagnostic
-/// fallback (`refresh_herdr_panes_fallback` below), it fills them in.
-///
-/// Source of truth: the `AgentRegistry` snapshot served at `GET /api/agents`.
-/// The `herdr pane list` CLI is a diagnostic fallback only.
+impl HerdrContext {
+    /// herdr's focused pane in the shown session.
+    pub fn focused(&self) -> Option<&HerdrPane> {
+        self.panes.iter().find(|p| p.focused)
+    }
+
+    /// The focused pane's workspace.
+    pub fn workspace(&self) -> Option<&str> {
+        self.focused().map(|p| p.workspace_id.as_str())
+    }
+
+    /// Name of the shown session, for headers.
+    pub fn session_name(&self) -> &str {
+        match &self.session {
+            Some(name) => name,
+            None => self
+                .sessions
+                .iter()
+                .find(|s| s.current)
+                .map_or("this server's", |s| s.name.as_str()),
+        }
+    }
+
+    /// Show the next running session (the bridge's own, then the others).
+    pub fn cycle_session(&mut self) {
+        let others: Vec<&str> = self
+            .sessions
+            .iter()
+            .filter(|s| s.running && !s.current)
+            .map(|s| s.name.as_str())
+            .collect();
+        let at = self
+            .session
+            .as_deref()
+            .and_then(|name| others.iter().position(|o| *o == name));
+        self.session = match at {
+            None => others.first(),
+            Some(i) => others.get(i + 1),
+        }
+        .map(|s| s.to_string());
+    }
+
+    /// `Err` with a status message when the shown session isn't the bridge's.
+    pub fn writable(&self) -> Result<(), String> {
+        match &self.session {
+            None => Ok(()),
+            Some(name) => Err(format!(
+                "viewing session '{name}': press s on Overview to return to this server's"
+            )),
+        }
+    }
+}
+
+/// One pane as the dashboard shows it: herdr's pane, plus the registry's
+/// record for it (role, captured output, trim policy) when the bridge has
+/// one. Built on every refresh, never kept apart from those two sources.
 #[derive(Clone, Debug, Default)]
 pub struct HerdrPane {
     pub pane_id: String,
-    /// Human-assigned label (`herdr pane rename`). From the registry: same source as AgentHandle.label.
+    pub workspace_id: String,
+    pub tab_id: String,
+    /// Human-assigned label (`herdr pane rename`).
     pub label: String,
-    /// Agent binary name (e.g. "opencode"). Optional — idle panes may have none.
+    /// Detected agent (e.g. "opencode"); `None` for a plain shell.
     pub agent: Option<String>,
-    /// Lifecycle status from the registry event stream (idle/working/blocked/done/unknown).
+    /// herdr's agent status (idle/working/blocked/done/unknown).
     pub status: String,
+    pub cwd: String,
+    /// Whether the pane has focus in herdr.
+    pub focused: bool,
     /// Human-assigned role used for `{{role.output}}` a2a interpolation (e.g. "agentA").
     pub role: String,
     /// Pane output captured at last idle — the agent's work product.
@@ -169,32 +225,28 @@ pub struct HerdrPane {
     /// Optional message-trim policy. The Trim tab editor mutates this through
     /// the registry, so the snapshot stays live without polling herdr.
     pub trim_policy: Option<herdr_mcp_api::TrimPolicy>,
-    /// Registry-side last-updated epoch seconds (registry authoritative, not the CLI).
+    /// Registry-side last-updated epoch seconds.
     pub updated_at: i64,
-
-    // ── Diagnostic fallback fields (only populated by herdr CLI passthrough) ──
-    /// Pane cwd (CLI-only — registry doesn't track this).
-    pub cwd: String,
-    /// Whether the pane currently has focus in herdr (CLI-only).
-    pub focused: bool,
-    /// Tab id the pane belongs to (CLI-only).
-    pub tab_id: Option<String>,
 }
 
-/// Registry handle → TUI pane view (CLI-only fields stay at their defaults).
-impl From<AgentHandle> for HerdrPane {
-    fn from(h: AgentHandle) -> Self {
+impl HerdrPane {
+    fn join(pane: herdr_mcp_api::HerdrPane, handle: Option<AgentHandle>) -> Self {
+        let (role, output, trim_policy, updated_at) = handle.map_or_else(Default::default, |h| {
+            (h.role, h.output, h.trim_policy, h.updated_at)
+        });
         Self {
-            pane_id: h.pane_id,
-            label: h.label,
-            agent: Some(h.agent).filter(|a| !a.is_empty()),
-            status: h.status,
-            role: h.role,
-            output: h.output,
-            trim_policy: h.trim_policy,
-            updated_at: h.updated_at,
-            tab_id: Some(h.tab_id).filter(|t| !t.is_empty()),
-            ..Default::default()
+            pane_id: pane.pane_id,
+            workspace_id: pane.workspace_id,
+            tab_id: pane.tab_id,
+            label: pane.label.unwrap_or_default(),
+            agent: pane.agent,
+            status: pane.agent_status,
+            cwd: pane.cwd.unwrap_or_default(),
+            focused: pane.focused,
+            role,
+            output,
+            trim_policy,
+            updated_at,
         }
     }
 }
@@ -793,14 +845,10 @@ impl App {
         }
     }
 
-    /// Workspace key for playground persistence. Resolves from the live herdr
-    /// context on demand — never stored (SOT: herdr workspace list).
+    /// Key for playground persistence: `default`, shared with the web
+    /// playground (one set of last-used values, whichever pane has focus).
     pub fn playground_workspace(&self) -> String {
-        self.herdr
-            .workspace
-            .clone()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "default".to_string())
+        "default".to_string()
     }
 
     /// Restore last-used playground values from `GET /api/playground`.
@@ -879,123 +927,65 @@ impl App {
         }
     }
 
-    /// Resolve current herdr workspace/pane context.
-    ///
-    /// Workspace id comes from `herdr workspace list` (CLI passthrough via the
-    /// HTTP bridge). The pane list is the canonical `AgentRegistry` snapshot
-    /// served at `GET /api/agents` — the single source of truth, kept live by
-    /// the herdr Unix-socket subscriber. If the registry is empty (e.g. the
-    /// subscriber hasn't populated yet, or the bridge isn't reachable), we fall
-    /// back to `herdr pane list` as a diagnostic, so "no panes detected" always
-    /// has a recovery path and a surfaced error.
+    /// Refresh sessions and the shown session's panes. herdr's pane list is
+    /// what exists; the registry (`GET /api/agents`, this server's session
+    /// only) adds role, output and trim policy by pane id.
     async fn refresh_herdr(&mut self) {
-        // 1. Workspace id (best-effort CLI passthrough).
         self.herdr.last_error = None;
-        if let Some(http) = &self.http {
-            match http.list_workspaces().await {
-                Ok(v) => {
-                    self.herdr.workspace = v
-                        .get("result")
-                        .and_then(|r| r.get("workspaces"))
-                        .and_then(|w| w.get(0))
-                        .and_then(|w| w.get("id"))
-                        .and_then(|i| i.as_str())
-                        .map(str::to_string);
-                }
-                Err(e) => {
-                    let msg = format!("list_workspaces failed: {e}");
-                    self.herdr.last_error = Some(msg.clone());
-                    self.log_debug(msg);
-                }
-            }
-            // 2. Canonical pane list from the live AgentRegistry.
-            match http.list_agents(self.herdr.workspace.as_deref()).await {
-                Ok(agents) => {
-                    self.herdr.panes = agents.into_iter().map(HerdrPane::from).collect();
-                    self.herdr.pane_count = self.herdr.panes.len();
-                    self.herdr.pane_id = self.herdr.panes.first().map(|p| p.pane_id.clone());
-                    return;
-                }
-                Err(e) => {
-                    let msg = format!("list_agents failed: {e}");
-                    self.herdr.last_error = Some(msg.clone());
-                    self.log_debug(msg);
-                }
-            }
-            // 3. Fallback — herdr's own pane list, through the bridge.
-            let listed = match &self.http {
-                Some(http) => http
-                    .call_tool("list_panes", &serde_json::json!({}))
-                    .await
-                    .ok(),
-                None => None,
-            };
-            if let Some(raw) = listed.map(|r| herdr_mcp_api::tool_text(&r))
-                && let Ok(v) = serde_json::from_str::<Value>(&raw)
-            {
-                self.herdr.pane_id = v
-                    .pointer("/result/panes/0/pane_id")
-                    .or_else(|| v.pointer("/result/panes/0/id"))
-                    .and_then(|i| i.as_str())
-                    .map(str::to_string);
-                if let Some(panes) = v
-                    .get("result")
-                    .and_then(|r| r.get("panes"))
-                    .and_then(|p| p.as_array())
-                {
-                    self.herdr.panes = panes
-                        .iter()
-                        .filter_map(|p| {
-                            Some(HerdrPane {
-                                pane_id: p
-                                    .get("pane_id")
-                                    .or_else(|| p.get("id"))?
-                                    .as_str()?
-                                    .to_string(),
-                                label: p
-                                    .get("label")
-                                    .and_then(|l| l.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                agent: p.get("agent").and_then(|a| a.as_str()).map(str::to_string),
-                                status: p
-                                    .get("agent_status")
-                                    .and_then(|s| s.as_str())
-                                    .unwrap_or("unknown")
-                                    .to_string(),
-                                role: p
-                                    .get("role")
-                                    .and_then(|s| s.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                output: String::new(),
-                                trim_policy: None,
-                                updated_at: 0,
-                                cwd: p
-                                    .get("cwd")
-                                    .and_then(|c| c.as_str())
-                                    .unwrap_or("")
-                                    .to_string(),
-                                focused: p
-                                    .get("focused")
-                                    .and_then(|f| f.as_bool())
-                                    .unwrap_or(false),
-                                tab_id: p
-                                    .get("tab_id")
-                                    .and_then(|t| t.as_str())
-                                    .map(str::to_string),
-                            })
-                        })
-                        .collect();
-                    self.herdr.pane_count = self.herdr.panes.len();
-                } else {
-                    self.herdr.pane_count = 0;
-                }
+        let Some(http) = self.http.clone() else {
+            self.herdr.panes.clear();
+            return;
+        };
+        match http.list_sessions().await {
+            Ok(sessions) => self.herdr.sessions = sessions,
+            Err(e) => self.note_herdr_error(format!("list_sessions failed: {e}")),
+        }
+        // A shown session that stopped or went away: back to our own.
+        if let Some(name) = &self.herdr.session
+            && !self
+                .herdr
+                .sessions
+                .iter()
+                .any(|s| &s.name == name && s.running)
+        {
+            self.herdr.session = None;
+        }
+        let filter = herdr_mcp_api::PaneFilter {
+            session: self.herdr.session.clone(),
+            ..Default::default()
+        };
+        let panes = match http.list_panes(&filter).await {
+            Ok(panes) => panes,
+            Err(e) => {
+                self.herdr.panes.clear();
+                self.note_herdr_error(format!("list_panes failed: {e}"));
                 return;
             }
-        }
-        // 4. No HTTP bridge available — nothing to show.
-        self.herdr.pane_count = 0;
+        };
+        let mut handles: std::collections::HashMap<String, AgentHandle> =
+            if self.herdr.session.is_none() {
+                match http.list_agents(None).await {
+                    Ok(agents) => agents.into_iter().map(|h| (h.pane_id.clone(), h)).collect(),
+                    Err(e) => {
+                        self.note_herdr_error(format!("list_agents failed: {e}"));
+                        Default::default()
+                    }
+                }
+            } else {
+                Default::default()
+            };
+        self.herdr.panes = panes
+            .into_iter()
+            .map(|p| {
+                let handle = handles.remove(&p.pane_id);
+                HerdrPane::join(p, handle)
+            })
+            .collect();
+    }
+
+    fn note_herdr_error(&mut self, msg: String) {
+        self.log_debug(msg.clone());
+        self.herdr.last_error = Some(msg);
     }
 
     /// The active editable `TextArea` (live editor) for the current tab/field.
@@ -1312,8 +1302,12 @@ impl App {
                 return;
             }
         };
-        let pane_id = match &self.herdr.pane_id {
-            Some(p) => p.clone(),
+        if let Err(msg) = self.herdr.writable() {
+            self.status_msg = msg;
+            return;
+        }
+        let pane_id = match self.herdr.focused() {
+            Some(p) => p.pane_id.clone(),
             None => {
                 self.status_msg = "no focused herdr pane".into();
                 return;
@@ -1531,14 +1525,18 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Span::styled("herdr-mcp", title_style()),
         Span::styled(" — dashboard", muted_style()),
     ];
-    if let Some(ws) = &app.herdr.workspace {
-        spans.push(Span::styled(format!("   workspace: {ws}"), muted_style()));
-    }
-    if let Some(p) = &app.herdr.pane_id {
-        spans.push(Span::styled(format!("   pane: {p}"), muted_style()));
+    spans.push(Span::styled(
+        format!("   session: {}", app.herdr.session_name()),
+        muted_style(),
+    ));
+    if let Some(p) = app.herdr.focused() {
+        spans.push(Span::styled(
+            format!("   workspace: {}   pane: {}", p.workspace_id, p.pane_id),
+            muted_style(),
+        ));
     }
     spans.push(Span::styled(
-        format!("   {} panes", app.herdr.pane_count),
+        format!("   {} panes", app.herdr.panes.len()),
         muted_style(),
     ));
     let header = Paragraph::new(Line::from(spans));
@@ -2293,28 +2291,62 @@ mod tests {
     }
 
     #[test]
-    fn herdr_pane_from_agent_handle() {
+    fn herdr_pane_joins_registry_by_pane() {
+        let pane: herdr_mcp_api::HerdrPane = serde_json::from_value(serde_json::json!({
+            "pane_id": "w123:p1", "workspace_id": "w123", "tab_id": "w123:t1",
+            "label": "test-pane", "agent": "hermes", "agent_status": "idle",
+            "focused": true, "cwd": "/w"
+        }))
+        .unwrap();
         let handle: AgentHandle = serde_json::from_value(serde_json::json!({
-            "pane_id": "w123:p1",
-            "workspace_id": "w123",
-            "tab_id": "w123:t1",
-            "label": "test-pane",
-            "agent": "hermes",
-            "status": "idle"
+            "pane_id": "w123:p1", "workspace_id": "w123", "role": "reviewer",
+            "output": "done", "status": "working"
         }))
         .unwrap();
-        let pane = HerdrPane::from(handle);
-        assert_eq!(pane.pane_id, "w123:p1");
-        assert_eq!(pane.label, "test-pane");
-        assert_eq!(pane.agent.as_deref(), Some("hermes"));
-        assert_eq!(pane.status, "idle");
-        assert_eq!(pane.tab_id.as_deref(), Some("w123:t1"));
-        assert!(!pane.focused, "focus is CLI-only");
+        let joined = HerdrPane::join(pane.clone(), Some(handle));
+        assert_eq!(joined.label, "test-pane");
+        assert_eq!(joined.status, "idle", "herdr's status wins");
+        assert_eq!(joined.role, "reviewer");
+        assert_eq!(joined.output, "done");
+        assert!(joined.focused);
+        // A plain shell pane the registry doesn't know still shows.
+        let bare = HerdrPane::join(pane, None);
+        assert_eq!(bare.role, "");
+        assert_eq!(bare.tab_id, "w123:t1");
+    }
 
-        let idle: AgentHandle = serde_json::from_value(serde_json::json!({
-            "pane_id": "p2", "workspace_id": "w1"
-        }))
-        .unwrap();
-        assert_eq!(HerdrPane::from(idle).agent, None);
+    #[test]
+    fn sessions_cycle_through_running_others() {
+        let s = |name: &str, running: bool, current: bool| herdr_mcp_api::HerdrSession {
+            name: name.into(),
+            default: false,
+            running,
+            connection_error: None,
+            socket_path: String::new(),
+            session_dir: String::new(),
+            current,
+        };
+        let mut ctx = HerdrContext {
+            sessions: vec![
+                s("default", true, true),
+                s("work", true, false),
+                s("old", false, false),
+                s("lab", true, false),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(ctx.session_name(), "default");
+        assert!(ctx.writable().is_ok());
+        ctx.cycle_session();
+        assert_eq!(ctx.session.as_deref(), Some("work"));
+        assert!(ctx.writable().is_err());
+        ctx.cycle_session();
+        assert_eq!(
+            ctx.session.as_deref(),
+            Some("lab"),
+            "stopped sessions are skipped"
+        );
+        ctx.cycle_session();
+        assert_eq!(ctx.session, None, "wraps back to the bridge's own");
     }
 }

@@ -25,15 +25,17 @@ use herdr_mcp_trim::stats;
 pub struct ListTabsParams {
     /// Filter by workspace ID (e.g., "1").
     pub workspace_id: Option<String>,
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
-/// Parameters for listing panes.
+/// Parameters for tools that only pick a herdr session.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 #[serde(deny_unknown_fields)]
-pub struct ListPanesParams {
-    /// Filter by workspace ID (e.g., "1").
-    pub workspace_id: Option<String>,
+pub struct SessionParams {
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
 /// Parameters for getting a specific pane by ID or label.
@@ -45,6 +47,8 @@ pub struct GetPaneParams {
     pub pane_id: Option<String>,
     /// Pane label (alternative to pane_id).
     pub label: Option<String>,
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
 /// Parameters for getting details about a specific agent.
@@ -54,6 +58,8 @@ pub struct GetPaneParams {
 pub struct GetAgentParams {
     /// Agent target: terminal ID, agent name, or pane ID.
     pub target: String,
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
 /// Parameters for creating a new workspace.
@@ -123,6 +129,8 @@ pub struct ReadPaneParams {
     pub source: Option<String>,
     /// Number of lines to read.
     pub lines: Option<u32>,
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
 /// Parameters for reading text output from an agent.
@@ -136,6 +144,8 @@ pub struct ReadAgentParams {
     pub source: Option<String>,
     /// Number of lines to read.
     pub lines: Option<u32>,
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
 /// Parameters for sending text to a pane.
@@ -908,47 +918,64 @@ impl HerdrMcpServer {
         Ok(CallToolResult::success(vec![content]))
     }
 
-    #[tool(meta = category("Discovery"), description = "List all workspaces in the current session")]
-    async fn list_workspaces(&self) -> Result<CallToolResult, McpError> {
-        run_herdr_json(&["workspace", "list"]).await
+    #[tool(meta = category("Discovery"), description = "List every named herdr session: name, running, default, socket. Pass a name as `session` to the Discovery and Read tools to look inside it.")]
+    async fn list_sessions(&self) -> Result<CallToolResult, McpError> {
+        let sessions = crate::panes::sessions().await?;
+        json_result(&herdr_mcp_api::SessionsResponse { sessions })
+    }
+
+    #[tool(meta = category("Discovery"), description = "List all workspaces in a herdr session (default: this server's)")]
+    async fn list_workspaces(
+        &self,
+        Parameters(SessionParams { session }): Parameters<SessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        herdr_json_in(session.as_deref(), &["workspace", "list"]).await
     }
 
     #[tool(meta = category("Discovery"), description = "List tabs, optionally filtered by workspace_id (e.g. '1')")]
     async fn list_tabs(
         &self,
-        Parameters(ListTabsParams { workspace_id }): Parameters<ListTabsParams>,
+        Parameters(ListTabsParams {
+            workspace_id,
+            session,
+        }): Parameters<ListTabsParams>,
     ) -> Result<CallToolResult, McpError> {
         let mut args = vec!["tab", "list"];
         if let Some(ref wid) = workspace_id {
             args.extend(["--workspace", wid]);
         }
-        run_herdr_json(&args).await
+        herdr_json_in(session.as_deref(), &args).await
     }
 
-    #[tool(meta = category("Discovery"), description = "List panes, optionally filtered by workspace_id (e.g. '1')")]
+    #[tool(meta = category("Discovery"), description = "List panes as {panes: [...]}: id, workspace, tab, focus, agent + status, label, cwd. Every filter narrows: session, workspace_id, tab_id, agent_status, focused, label (case-insensitive substring of label or agent).")]
     async fn list_panes(
         &self,
-        Parameters(ListPanesParams { workspace_id }): Parameters<ListPanesParams>,
+        Parameters(filter): Parameters<herdr_mcp_api::PaneFilter>,
     ) -> Result<CallToolResult, McpError> {
-        let mut args = vec!["pane", "list"];
-        if let Some(ref wid) = workspace_id {
-            args.extend(["--workspace", wid]);
-        }
-        run_herdr_json(&args).await
+        let panes = crate::panes::panes(&filter).await?;
+        json_result(&herdr_mcp_api::PanesResponse { panes })
     }
 
-    #[tool(meta = category("Discovery"), description = "List all detected agents in the session")]
-    async fn list_agents(&self) -> Result<CallToolResult, McpError> {
-        run_herdr_json(&["agent", "list"]).await
+    #[tool(meta = category("Discovery"), description = "List all detected agents in a herdr session (default: this server's)")]
+    async fn list_agents(
+        &self,
+        Parameters(SessionParams { session }): Parameters<SessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        herdr_json_in(session.as_deref(), &["agent", "list"]).await
     }
 
     #[tool(meta = category("Discovery"), description = "Get details about a specific pane by pane_id or label")]
     async fn get_pane(
         &self,
-        Parameters(GetPaneParams { pane_id, label }): Parameters<GetPaneParams>,
+        Parameters(GetPaneParams {
+            pane_id,
+            label,
+            session,
+        }): Parameters<GetPaneParams>,
     ) -> Result<CallToolResult, McpError> {
-        let pid = resolve_pane_id(pane_id, label).await?;
-        run_herdr_json(&["pane", "get", &pid]).await
+        let session = session.as_deref();
+        let pid = resolve_pane_id_in(session, pane_id, label).await?;
+        herdr_json_in(session, &["pane", "get", &pid]).await
     }
 
     #[tool(
@@ -957,9 +984,9 @@ impl HerdrMcpServer {
     )]
     async fn get_agent(
         &self,
-        Parameters(GetAgentParams { target }): Parameters<GetAgentParams>,
+        Parameters(GetAgentParams { target, session }): Parameters<GetAgentParams>,
     ) -> Result<CallToolResult, McpError> {
-        run_herdr_json(&["agent", "get", &target]).await
+        herdr_json_in(session.as_deref(), &["agent", "get", &target]).await
     }
 
     // ── Lifecycle ──────────────────────────────────────────────────────
@@ -1058,9 +1085,11 @@ impl HerdrMcpServer {
             label,
             source,
             lines,
+            session,
         }): Parameters<ReadPaneParams>,
     ) -> Result<CallToolResult, McpError> {
-        let pid = resolve_pane_id(pane_id, label).await?;
+        let session = session.as_deref();
+        let pid = resolve_pane_id_in(session, pane_id, label).await?;
         let lines_str = lines.map(|n| n.to_string());
         let mut args = vec!["pane", "read", &pid];
         if let Some(ref src) = source {
@@ -1069,7 +1098,7 @@ impl HerdrMcpServer {
         if let Some(ref n) = lines_str {
             args.extend(["--lines", n]);
         }
-        run_herdr_text(&args).await
+        herdr_text_in(session, &args).await
     }
 
     #[tool(
@@ -1082,6 +1111,7 @@ impl HerdrMcpServer {
             target,
             source,
             lines,
+            session,
         }): Parameters<ReadAgentParams>,
     ) -> Result<CallToolResult, McpError> {
         let lines_str = lines.map(|n| n.to_string());
@@ -1092,7 +1122,7 @@ impl HerdrMcpServer {
         if let Some(ref n) = lines_str {
             args.extend(["--lines", n]);
         }
-        run_herdr_text(&args).await
+        herdr_text_in(session.as_deref(), &args).await
     }
 
     // ── Write ──────────────────────────────────────────────────────────
@@ -1988,16 +2018,13 @@ impl HerdrMcpServer {
         Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         // `pane split` takes a pane, not a workspace: split the focused one.
-        let mut list = vec!["pane", "list"];
-        if let Some(ref w) = workspace_id {
-            list.extend(["--workspace", w]);
-        }
-        let panes: serde_json::Value =
-            serde_json::from_str(&herdr_cli(&list).await?).unwrap_or_default();
-        let target = panes["result"]["panes"]
-            .as_array()
-            .and_then(|p| dashboard_split_target(p, workspace_id.is_some()))
-            .ok_or_else(|| McpError {
+        let filter = herdr_mcp_api::PaneFilter {
+            workspace_id: workspace_id.clone(),
+            ..Default::default()
+        };
+        let panes = crate::panes::panes(&filter).await?;
+        let target =
+            dashboard_split_target(&panes, workspace_id.is_some()).ok_or_else(|| McpError {
                 code: rmcp::model::ErrorCode(-32000),
                 message: "trim: no pane to split for the dashboard".into(),
                 data: None,
@@ -2431,10 +2458,13 @@ pub(crate) fn as_strs(args: &[String]) -> Vec<&str> {
 
 /// Pane `trim_dashboard_open` splits: the focused pane, or — when the list
 /// is one workspace's panes and none of them has focus — its first pane.
-fn dashboard_split_target(panes: &[serde_json::Value], one_workspace: bool) -> Option<String> {
-    let focused = panes.iter().find(|p| p["focused"].as_bool() == Some(true));
+fn dashboard_split_target(
+    panes: &[herdr_mcp_api::HerdrPane],
+    one_workspace: bool,
+) -> Option<String> {
+    let focused = panes.iter().find(|p| p.focused);
     let pane = focused.or(if one_workspace { panes.first() } else { None })?;
-    pane["pane_id"].as_str().map(String::from)
+    Some(pane.pane_id.clone())
 }
 
 /// Submit `text` (+ Enter) to an agent: `agent prompt` (0.9 has no `agent send`).
@@ -2537,7 +2567,12 @@ async fn read_pane_text(pane_id: &str) -> anyhow::Result<String> {
 
 /// Run `herdr` CLI args and return stdout as a JSON-pretty-printed `CallToolResult`.
 async fn run_herdr_json(args: &[&str]) -> Result<CallToolResult, McpError> {
-    let output = herdr_cli(args).await?;
+    herdr_json_in(None, args).await
+}
+
+/// [`run_herdr_json`] in herdr `session` (`None`: this server's).
+async fn herdr_json_in(session: Option<&str>, args: &[&str]) -> Result<CallToolResult, McpError> {
+    let output = crate::panes::herdr_in(session, args).await?;
 
     match serde_json::from_str::<serde_json::Value>(&output) {
         Ok(value) => {
@@ -2555,10 +2590,19 @@ async fn run_herdr_json(args: &[&str]) -> Result<CallToolResult, McpError> {
     }
 }
 
-/// Run `herdr` CLI args and return stdout as plain text.
-async fn run_herdr_text(args: &[&str]) -> Result<CallToolResult, McpError> {
-    let output = herdr_cli(args).await?;
+/// Run `herdr` CLI args in `session` (`None`: this server's) and return
+/// stdout as plain text.
+async fn herdr_text_in(session: Option<&str>, args: &[&str]) -> Result<CallToolResult, McpError> {
+    let output = crate::panes::herdr_in(session, args).await?;
     Ok(CallToolResult::success(vec![Content::text(output)]))
+}
+
+/// A typed value as a tool's JSON result.
+fn json_result(value: &impl Serialize) -> Result<CallToolResult, McpError> {
+    let value = serde_json::to_value(value).map_err(to_mcp_err)?;
+    Ok(CallToolResult::success(vec![
+        Content::json(value).map_err(to_mcp_err)?,
+    ]))
 }
 
 // ── Clipboard helpers ────────────────────────────────────────────────
@@ -2730,18 +2774,24 @@ pub fn spawn_trim_poller(server: std::sync::Arc<HerdrMcpServer>) {
 
 /// Execute the `herdr` CLI binary with the given arguments.
 pub(crate) async fn herdr_cli(args: &[&str]) -> Result<String, McpError> {
+    herdr_cli_at(None, args).await
+}
+
+/// [`herdr_cli`] against another session's API socket (`None`: this
+/// server's own, exported at startup).
+pub(crate) async fn herdr_cli_at(socket: Option<&str>, args: &[&str]) -> Result<String, McpError> {
     tracing::debug!("herdr {}", args.join(" "));
 
     let binary = herdr_mcp_core::herdr_bin();
-    let output = tokio::process::Command::new(binary)
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| McpError {
-            code: rmcp::model::ErrorCode(-32603),
-            message: format!("Failed to execute herdr: {e}").into(),
-            data: None,
-        })?;
+    let mut cmd = tokio::process::Command::new(binary);
+    if let Some(socket) = socket {
+        cmd.env("HERDR_SOCKET_PATH", socket);
+    }
+    let output = cmd.args(args).output().await.map_err(|e| McpError {
+        code: rmcp::model::ErrorCode(-32603),
+        message: format!("Failed to execute herdr: {e}").into(),
+        data: None,
+    })?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -2763,26 +2813,17 @@ pub(crate) async fn herdr_cli(args: &[&str]) -> Result<String, McpError> {
     }
 }
 
-/// Given a parsed `herdr pane list` panes array and a label, find the
-/// matching pane_id. Handles both `pane_id` and `id` JSON keys (herdr CLI
-/// output can use either). Returns `Ok(pane_id)` on exact match, `Err` with
-/// a human-readable diagnostic on no match or ambiguity.
-fn resolve_label_in_panes(panes: &[serde_json::Value], label: &str) -> Result<String, String> {
-    let labels: Vec<String> = panes
+/// The pane whose label is exactly `label`. `Err` is a human-readable
+/// diagnostic on no match (listing the labels there are) or ambiguity.
+fn resolve_label_in_panes(
+    panes: &[herdr_mcp_api::HerdrPane],
+    label: &str,
+) -> Result<String, String> {
+    let labels: Vec<&str> = panes.iter().filter_map(|p| p.label.as_deref()).collect();
+    let matched: Vec<&str> = panes
         .iter()
-        .filter_map(|p| p.get("label").and_then(|l| l.as_str()))
-        .map(|l| l.to_string())
-        .collect();
-
-    let matched: Vec<String> = panes
-        .iter()
-        .filter(|p| p.get("label").and_then(|l| l.as_str()) == Some(label))
-        .filter_map(|p| {
-            p.get("pane_id")
-                .or_else(|| p.get("id"))
-                .and_then(|id| id.as_str())
-        })
-        .map(|id| id.to_string())
+        .filter(|p| p.label.as_deref() == Some(label))
+        .map(|p| p.pane_id.as_str())
         .collect();
 
     match matched.len() {
@@ -2794,38 +2835,37 @@ fn resolve_label_in_panes(panes: &[serde_json::Value], label: &str) -> Result<St
             };
             Err(format!("No pane found with label '{label}'. {available}"))
         }
-        1 => Ok(matched[0].clone()),
+        1 => Ok(matched[0].to_string()),
         _ => Err(format!(
             "Multiple panes found with label '{label}'. Use pane_id instead."
         )),
     }
 }
 
-/// Resolve a pane_id from an optional pane_id or label.
-/// If pane_id is provided, returns it directly.
-/// If label is provided, queries herdr pane list to find the matching pane.
+/// Resolve a pane_id from an optional pane_id or label (looked up in
+/// this server's session).
 async fn resolve_pane_id(
+    pane_id: Option<String>,
+    label: Option<String>,
+) -> Result<String, McpError> {
+    resolve_pane_id_in(None, pane_id, label).await
+}
+
+/// [`resolve_pane_id`] with the label looked up in `session`.
+async fn resolve_pane_id_in(
+    session: Option<&str>,
     pane_id: Option<String>,
     label: Option<String>,
 ) -> Result<String, McpError> {
     match (pane_id, label) {
         (Some(pid), _) => Ok(pid),
         (None, Some(lbl)) => {
-            let output = herdr_cli(&["pane", "list"]).await?;
-            let value: serde_json::Value = serde_json::from_str(&output).map_err(|e| McpError {
-                code: rmcp::model::ErrorCode(-32603),
-                message: format!("Failed to parse pane list: {e}").into(),
-                data: None,
-            })?;
-            let panes = value["result"]["panes"]
-                .as_array()
-                .ok_or_else(|| McpError {
-                    code: rmcp::model::ErrorCode(-32603),
-                    message: "Unexpected pane list format".into(),
-                    data: None,
-                })?;
-
-            resolve_label_in_panes(panes, &lbl).map_err(|msg| McpError {
+            let filter = herdr_mcp_api::PaneFilter {
+                session: session.map(str::to_string),
+                ..Default::default()
+            };
+            let panes = crate::panes::panes(&filter).await?;
+            resolve_label_in_panes(&panes, &lbl).map_err(|msg| McpError {
                 code: rmcp::model::ErrorCode(-32000),
                 message: msg.into(),
                 data: None,
@@ -2918,6 +2958,8 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path, bind: &str) ->
                 .delete(delete_recipe_handler),
         )
         .route("/api/herdr/schema", get(herdr_schema_handler))
+        .route("/api/herdr/sessions", get(herdr_sessions_handler))
+        .route("/api/herdr/panes", get(herdr_panes_handler))
         .route("/api/herdr/events", get(herdr_events_handler))
         .route("/api/templates", get(list_templates_handler))
         .route(
@@ -3310,6 +3352,26 @@ fn json_value_to_string(v: &serde_json::Value) -> String {
 
 async fn list_templates_handler() -> Result<Json<Vec<tmpl::RecipeTemplate>>, (StatusCode, String)> {
     Ok(Json(tmpl::list_templates()))
+}
+
+/// `GET /api/herdr/sessions` — every named herdr session.
+async fn herdr_sessions_handler()
+-> Result<Json<herdr_mcp_api::SessionsResponse>, (StatusCode, String)> {
+    let sessions = crate::panes::sessions().await.map_err(bad_gateway)?;
+    Ok(Json(herdr_mcp_api::SessionsResponse { sessions }))
+}
+
+/// `GET /api/herdr/panes?session=&workspace_id=&tab_id=&agent_status=&focused=&label=`
+/// — herdr's panes, narrowed like `list_panes`.
+async fn herdr_panes_handler(
+    Query(filter): Query<herdr_mcp_api::PaneFilter>,
+) -> Result<Json<herdr_mcp_api::PanesResponse>, (StatusCode, String)> {
+    let panes = crate::panes::panes(&filter).await.map_err(bad_gateway)?;
+    Ok(Json(herdr_mcp_api::PanesResponse { panes }))
+}
+
+fn bad_gateway(e: McpError) -> (StatusCode, String) {
+    (StatusCode::BAD_GATEWAY, e.message.to_string())
 }
 
 /// `GET /api/herdr/schema` — the installed herdr's API schema
@@ -3717,16 +3779,15 @@ async fn auto_variables_handler(
             merged.entry(handle.role.clone()).or_insert(obj);
         }
     }
-    let mut args = vec!["pane", "list"];
-    if let Some(ws) = &ws {
-        args.extend(["--workspace", ws.as_str()]);
-    }
-    match herdr_cli(&args).await {
-        Ok(out) => {
-            let list: serde_json::Value = serde_json::from_str(&out).unwrap_or_default();
-            for pane in list["result"]["panes"].as_array().into_iter().flatten() {
-                if let Some(id) = pane["pane_id"].as_str() {
-                    merged.entry(id.to_string()).or_insert_with(|| pane.clone());
+    let filter = herdr_mcp_api::PaneFilter {
+        workspace_id: ws.clone(),
+        ..Default::default()
+    };
+    match crate::panes::panes(&filter).await {
+        Ok(panes) => {
+            for pane in panes {
+                if let Ok(obj) = serde_json::to_value(&pane) {
+                    merged.entry(pane.pane_id).or_insert(obj);
                 }
             }
         }
@@ -4171,67 +4232,37 @@ mod tests {
 
     // ── resolve_label_in_panes tests ──────────────────────────────────
 
+    fn pane(id: &str, label: Option<&str>) -> herdr_mcp_api::HerdrPane {
+        serde_json::from_value(serde_json::json!({
+            "pane_id": id, "workspace_id": "w1", "tab_id": "w1:t1", "label": label
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn test_resolve_label_matches_pane_id() {
-        let panes = vec![serde_json::json!({
-            "label": "foo",
-            "pane_id": "p1"
-        })];
-        assert_eq!(resolve_label_in_panes(&panes, "foo"), Ok("p1".into()));
-    }
-
-    #[test]
-    fn test_resolve_label_matches_id_field() {
-        let panes = vec![serde_json::json!({
-            "label": "foo",
-            "id": "p1"
-        })];
-        assert_eq!(resolve_label_in_panes(&panes, "foo"), Ok("p1".into()));
-    }
-
-    #[test]
-    fn test_resolve_label_has_both_id_and_pane_id() {
-        let panes = vec![serde_json::json!({
-            "label": "foo",
-            "id": "pX",
-            "pane_id": "p1"
-        })];
+        let panes = [pane("p0", Some("bar")), pane("p1", Some("foo"))];
         assert_eq!(resolve_label_in_panes(&panes, "foo"), Ok("p1".into()));
     }
 
     #[test]
     fn test_resolve_label_no_match() {
-        let panes = vec![serde_json::json!({
-            "label": "bar",
-            "pane_id": "p1"
-        })];
-        let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
+        let err = resolve_label_in_panes(&[pane("p1", Some("bar"))], "foo").unwrap_err();
         assert!(err.contains("available labels: bar"), "{err}");
     }
 
     #[test]
     fn test_resolve_label_duplicate() {
-        let panes = vec![
-            serde_json::json!({ "label": "foo", "pane_id": "p1" }),
-            serde_json::json!({ "label": "foo", "pane_id": "p2" }),
-        ];
+        let panes = [pane("p1", Some("foo")), pane("p2", Some("foo"))];
         let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
         assert!(err.contains("Multiple panes"), "{err}");
     }
 
     #[test]
     fn test_resolve_label_no_labels_at_all() {
-        let panes = vec![serde_json::json!({
-            "pane_id": "p1"
-        })];
-        let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
+        let err = resolve_label_in_panes(&[pane("p1", None)], "foo").unwrap_err();
         assert!(err.contains("no labeled panes found"), "{err}");
-    }
-
-    #[test]
-    fn test_resolve_label_empty_panes() {
-        let panes = vec![];
-        let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
+        let err = resolve_label_in_panes(&[], "foo").unwrap_err();
         assert!(err.contains("no labeled panes found"), "{err}");
     }
 
@@ -4357,7 +4388,13 @@ mod tests {
 
     #[test]
     fn dashboard_splits_the_focused_pane() {
-        let p = |id: &str, focused: bool| serde_json::json!({"pane_id": id, "focused": focused});
+        let p = |id: &str, focused: bool| -> herdr_mcp_api::HerdrPane {
+            let ws = id.split(':').next().unwrap_or_default();
+            serde_json::from_value(serde_json::json!({
+                "pane_id": id, "workspace_id": ws, "tab_id": "t", "focused": focused
+            }))
+            .unwrap()
+        };
         let panes = [p("w1:p1", false), p("w1:p2", true)];
         assert_eq!(
             dashboard_split_target(&panes, false).as_deref(),
@@ -4425,6 +4462,75 @@ mod tests {
         let app = http_router(server, &web_dir, "127.0.0.1");
         tokio::spawn(async move { axum::serve(listener, app).await });
         let api = ApiClient::new(&format!("http://{addr}")).unwrap();
+
+        // A fake herdr (nextest runs each test in its own process, so the
+        // env var stays here). Its pane labels echo the socket it was given.
+        let fake = tmp.path().join("herdr");
+        std::fs::write(
+            &fake,
+            r#"#!/bin/sh
+case "$1 $2" in
+"session list") echo '{"sessions":[{"name":"default","default":true,"running":true,"socket_path":"/s/d.sock","session_dir":"/s/d"},{"name":"work","default":false,"running":true,"socket_path":"/s/w.sock","session_dir":"/s/w"},{"name":"old","default":false,"running":false,"socket_path":"/s/o.sock","session_dir":"/s/o"}]}' ;;
+"pane list") echo "{\"result\":{\"panes\":[{\"pane_id\":\"w1:p1\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\"focused\":true,\"agent_status\":\"idle\",\"agent\":\"claude\",\"label\":\"$HERDR_SOCKET_PATH\"},{\"pane_id\":\"w1:p2\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t2\",\"focused\":false,\"agent_status\":\"unknown\"}]}}" ;;
+*) echo "fake herdr: $*" >&2; exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        // SAFETY: this test owns its process (nextest); nothing else reads env concurrently.
+        unsafe {
+            std::env::set_var("HERDR_BIN", &fake);
+            std::env::set_var("HERDR_SOCKET_PATH", "/s/d.sock");
+        }
+
+        let sessions = api.list_sessions().await.unwrap();
+        assert_eq!(sessions.len(), 3);
+        assert!(sessions[0].default && !sessions[2].running);
+        assert_eq!(sessions.iter().filter(|s| s.current).count(), 1);
+        assert!(sessions[0].current);
+        let all = api.list_panes(&Default::default()).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].label.as_deref(), Some("/s/d.sock"));
+        let filter = |v: serde_json::Value| -> herdr_mcp_api::PaneFilter {
+            serde_json::from_value(v).unwrap()
+        };
+        let idle = api
+            .list_panes(&filter(
+                serde_json::json!({"agent_status": "idle", "focused": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(idle.len(), 1);
+        assert_eq!(idle[0].agent.as_deref(), Some("claude"));
+        assert!(
+            api.list_panes(&filter(serde_json::json!({"tab_id": "w1:t9"})))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let work = api
+            .list_panes(&filter(serde_json::json!({"session": "work"})))
+            .await
+            .unwrap();
+        assert_eq!(work[0].label.as_deref(), Some("/s/w.sock"));
+        for bad in ["old", "nope"] {
+            assert!(matches!(
+                api.list_panes(&filter(serde_json::json!({"session": bad})))
+                    .await,
+                Err(ApiError::Status { status: 502, .. })
+            ));
+        }
+        // The tool returns the same typed list.
+        let tool = api
+            .call_tool("list_panes", &serde_json::json!({"label": "CLAUDE"}))
+            .await
+            .unwrap();
+        let listed: herdr_mcp_api::PanesResponse = herdr_mcp_api::tool_payload(&tool)
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap();
+        assert_eq!(listed.panes.len(), 1);
 
         api.health().await.unwrap();
         let cfg = api.config().await.unwrap();

@@ -293,6 +293,10 @@ async fn handle_stage_picker_key(app: &mut App, code: KeyCode) -> Result<bool> {
 }
 
 async fn get_policy(app: &mut App) {
+    if let Err(msg) = app.herdr.writable() {
+        app.trim.policy_msg = msg;
+        return;
+    }
     let pane_count = app.herdr.panes.len();
     if pane_count > 0 {
         app.trim.pane_index = app.trim.pane_index.min(pane_count.saturating_sub(1));
@@ -354,6 +358,10 @@ async fn get_policy(app: &mut App) {
 }
 
 async fn apply_policy(app: &mut App) {
+    if let Err(msg) = app.herdr.writable() {
+        app.trim.policy_msg = msg;
+        return;
+    }
     let pane_count = app.herdr.panes.len();
     if pane_count > 0 {
         app.trim.pane_index = app.trim.pane_index.min(pane_count.saturating_sub(1));
