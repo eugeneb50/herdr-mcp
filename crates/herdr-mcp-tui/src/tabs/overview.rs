@@ -60,11 +60,11 @@ fn render_tabs_guide(frame: &mut ratatui::Frame, area: Rect) {
     frame.render_widget(block, area);
 
     let lines = vec![
-        Line::from("1 Overview      2 Playground (tool runner + recipe builder)"),
-        Line::from("3 Trim          4 Variables"),
-        Line::from("5 Settings"),
+        Line::from("1 Send (type into a pane)   2 Overview"),
+        Line::from("3 Playground (tool runner + recipe builder)   4 Trim"),
+        Line::from("5 Variables                 6 Settings"),
         Line::from(""),
-        Line::from("Press 1-5 to switch tabs or click the tab strip above."),
+        Line::from("Press Ctrl+1-6 to switch tabs or click the tab strip above."),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

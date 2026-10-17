@@ -250,6 +250,20 @@ impl ApiClient {
         .await
     }
 
+    /// Type `text` into a pane: `send_text`, or `run_command` (text + Enter)
+    /// when `enter`. Addressed by id — the exact pane picked, even if its
+    /// label changed or now names two panes.
+    pub async fn send_to_pane(
+        &self,
+        pane_id: &str,
+        text: &str,
+        enter: bool,
+    ) -> Result<(), ApiError> {
+        let (tool, params) = send_call(pane_id, text, enter);
+        let v = self.call_tool(tool, &params).await?;
+        tool_ok(&v).map(|_| ())
+    }
+
     // ── recipes ────────────────────────────────────────────────────────
 
     /// `GET /api/recipes`.
@@ -520,6 +534,17 @@ pub fn tool_is_error(v: &Value) -> bool {
     v.get("isError").and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// The tool call [`ApiClient::send_to_pane`] makes.
+fn send_call(pane_id: &str, text: &str, enter: bool) -> (&'static str, Value) {
+    if enter {
+        let params = serde_json::json!({ "pane_id": pane_id, "command": text });
+        ("run_command", params)
+    } else {
+        let params = serde_json::json!({ "pane_id": pane_id, "text": text });
+        ("send_text", params)
+    }
+}
+
 /// Map a tool result with `isError: true` to [`ApiError::Tool`].
 fn tool_ok(v: &Value) -> Result<&Value, ApiError> {
     if tool_is_error(v) {
@@ -537,6 +562,24 @@ fn tool_ok(v: &Value) -> Result<&Value, ApiError> {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn send_call_picks_tool() {
+        assert_eq!(
+            send_call("w1:p2", "hi", false),
+            (
+                "send_text",
+                serde_json::json!({"pane_id": "w1:p2", "text": "hi"})
+            )
+        );
+        assert_eq!(
+            send_call("w1:p1", "make", true),
+            (
+                "run_command",
+                serde_json::json!({"pane_id": "w1:p1", "command": "make"})
+            )
+        );
+    }
 
     #[test]
     fn rejects_relative_base() {

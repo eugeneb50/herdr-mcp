@@ -243,3 +243,17 @@
 #   persistence key stays "default" (what it always resolved to; shared with
 #   the web playground). `s` on Overview cycles sessions.
 # - 55 tools, 340 tests.
+
+# Send-to-pane landing (feat/quick-send, stacked on #33, 2026-10-17)
+#
+# - The user's main action is "send text to a pane by label". Web `/` is the
+#   Send page (Home moved to /home); TUI opens on tab 1 Send (tabs Ctrl+1-6).
+# - ApiClient::send_to_pane(pane_id, text, enter): send_text, or run_command
+#   (text + Enter) when enter. Addressed by PANE ID on purpose: a client-side
+#   label-uniqueness check races herdr (the TUI context refreshes every 15 s),
+#   which sent by a label that had just become ambiguous -> server error.
+#   The user still picks by label; the id is the row they picked.
+# - Web remembers the last pane in localStorage (label, then id); "press
+#   Enter after" defaults on. TUI: ↑/↓ pane, type, Enter send, Ctrl+t toggle,
+#   Esc clear; refuses while viewing another session.
+# - 343 tests.

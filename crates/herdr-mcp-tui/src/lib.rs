@@ -66,6 +66,7 @@ use theme::{accent_style, dim_style, muted_style, title_style};
 /// Available tabs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
+    Send,
     Overview,
     Playground,
     Trim,
@@ -74,7 +75,8 @@ pub enum Tab {
 }
 
 impl Tab {
-    const ALL: [Tab; 5] = [
+    const ALL: [Tab; 6] = [
+        Tab::Send,
         Tab::Overview,
         Tab::Playground,
         Tab::Trim,
@@ -84,6 +86,7 @@ impl Tab {
 
     fn label(self) -> &'static str {
         match self {
+            Tab::Send => "Send",
             Tab::Overview => "Overview",
             Tab::Playground => "Playground",
             Tab::Trim => "Trim",
@@ -94,11 +97,12 @@ impl Tab {
 
     fn key(self) -> &'static str {
         match self {
-            Tab::Overview => "1",
-            Tab::Playground => "2",
-            Tab::Trim => "3",
-            Tab::Variables => "4",
-            Tab::Settings => "5",
+            Tab::Send => "1",
+            Tab::Overview => "2",
+            Tab::Playground => "3",
+            Tab::Trim => "4",
+            Tab::Variables => "5",
+            Tab::Settings => "6",
         }
     }
 }
@@ -326,6 +330,7 @@ pub struct App {
     /// trim sub-state
     pub trim: TrimState,
     /// overview sub-state
+    pub send: SendState,
     pub overview: OverviewState,
     /// variables sub-state
     pub variables_state: VariablesState,
@@ -485,6 +490,17 @@ pub struct TrimState {
     pub focused_frame: usize,
 }
 
+/// Send tab state: what the user is typing and where it goes.
+pub struct SendState {
+    /// Selected row of `tabs::send::targets` (labeled panes first).
+    pub pane_index: usize,
+    pub text: TextArea<'static>,
+    /// Send with `run_command` (text + Enter) instead of `send_text`.
+    pub enter: bool,
+    /// Result of the last send.
+    pub msg: String,
+}
+
 /// Overview tab state.
 pub struct OverviewState {
     /// Selected row in the pane table.
@@ -623,7 +639,7 @@ impl App {
         Self {
             opts,
             http,
-            tab: Tab::Overview,
+            tab: Tab::Send,
             herdr: HerdrContext::default(),
             quitting: false,
             status_msg: String::new(),
@@ -678,6 +694,12 @@ impl App {
                 stage_picker_index: 0,
                 policy_msg: String::new(),
                 focused_frame: 0,
+            },
+            send: SendState {
+                pane_index: 0,
+                text: TextArea::default(),
+                enter: true,
+                msg: String::new(),
             },
             overview: OverviewState {
                 pane_index: 0,
@@ -991,6 +1013,7 @@ impl App {
     /// The active editable `TextArea` (live editor) for the current tab/field.
     fn active_textarea_mut(&mut self) -> Option<&mut TextArea<'static>> {
         match self.tab {
+            Tab::Send => Some(&mut self.send.text),
             Tab::Playground if self.playground.editing_field => {
                 Some(&mut self.playground.edit_area)
             }
@@ -1014,6 +1037,7 @@ impl App {
     /// Immutable counterpart of [`App::active_textarea_mut`].
     fn active_textarea_ref(&self) -> Option<&TextArea<'static>> {
         match self.tab {
+            Tab::Send => Some(&self.send.text),
             Tab::Playground if self.playground.editing_field => Some(&self.playground.edit_area),
             Tab::Playground
                 if self.playground.builder_editing_param
@@ -1571,6 +1595,7 @@ fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         return;
     }
     match app.tab {
+        Tab::Send => tabs::send::render(frame, area, app),
         Tab::Overview => tabs::overview::render(frame, area, app),
         Tab::Playground => tabs::playground::render(frame, area, app),
         Tab::Trim => tabs::trim::render(frame, area, app),
@@ -1581,7 +1606,7 @@ fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
 /// Footer with status message + keybindings.
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let bindings = "Ctrl+1-5:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
+    let bindings = "Ctrl+1-6:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
     let mut line = Line::from(vec![Span::styled(bindings, dim_style())]);
     if !app.status_msg.is_empty() {
         line = Line::from(vec![
@@ -1605,6 +1630,7 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
 
     // Editing inputs are handled inside the active tab first.
     let consumed = match app.tab {
+        Tab::Send => tabs::send::handle_key(app, code, mods).await?,
         Tab::Overview => tabs::overview::handle_key(app, code, mods).await?,
         Tab::Playground => tabs::playground::handle_key(app, code, mods).await?,
         Tab::Variables => tabs::variables::handle_key(app, code, mods).await?,
@@ -1644,7 +1670,7 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
             app.refresh().await;
             app.status_msg = "refreshed".to_string();
         }
-        KeyCode::Char(c @ '1'..='5') if mods.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(c @ '1'..='6') if mods.contains(KeyModifiers::CONTROL) => {
             let idx = (c as u8 - b'1') as usize;
             if let Some(t) = Tab::ALL.get(idx).copied() {
                 app.tab = t;
@@ -2181,7 +2207,10 @@ mod tests {
 
     #[test]
     fn selection_or_full_text_none_when_nothing_focused() {
-        let app = test_app();
+        let mut app = test_app();
+        // The Send tab (the default) always has its text box to copy from.
+        assert_eq!(app.selection_or_full_text().as_deref(), Some(""));
+        app.tab = Tab::Overview;
         assert_eq!(app.selection_or_full_text(), None);
     }
 
