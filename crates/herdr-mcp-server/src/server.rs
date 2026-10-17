@@ -1710,7 +1710,7 @@ impl HerdrMcpServer {
 
     // ── Message-trim tools ─────────────────────────────────────────────
     // Two non-colliding compressors (caveman style + pfc1 phonetic) exposed
-    // as MCP tools and usable as recipe steps. See `compressorplan.md`.
+    // as MCP tools and usable as recipe steps. See docs/ARCHITECTURE.md §7.
 
     #[tool(
         meta = category("Trim"),

@@ -184,7 +184,7 @@ herdr-mcp/
 | `get_pane` | `pane_id?`, `label?` | Get pane details by ID or label |
 | `get_agent` | `target` | Get agent details by terminal/name/pane |
 
-### 4.2 Lifecycle Tools (5)
+### 4.2 Lifecycle Tools (4)
 
 | Tool | Parameters | Description |
 |---|---|---|
@@ -192,7 +192,6 @@ herdr-mcp/
 | `create_tab` | `workspace_id?`, `label?`, `cwd?` | Create a new tab |
 | `split_pane` | `pane_id?`, `label?`, `direction?`, `cwd?`, `no_focus?` | Split a pane right or down |
 | `close_pane` | `pane_id?`, `label?` | Close a pane |
-| `herdr_api` | `method`, `params?`, `timeout_ms?` | Any herdr socket API method; returns herdr's response |
 
 ### 4.3 Read Tools (2)
 
@@ -201,13 +200,15 @@ herdr-mcp/
 | `read_pane` | `pane_id?`, `label?`, `source?`, `lines?` | Read pane output (visible/recent/recent-unwrapped) |
 | `read_agent` | `target`, `source?`, `lines?` | Read agent output |
 
-### 4.4 Write Tools (4)
+### 4.4 Write Tools (6)
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `send_text` | `pane_id?`, `label?`, `text` | Send text to pane (no Enter) |
 | `send_keys` | `pane_id?`, `label?`, `keys` | Send key presses |
 | `run_command` | `pane_id?`, `label?`, `command` | Atomic text+Enter |
+| `pane_exec` | `pane_id?`, `label?`, `command`, `timeout_ms?`, `lines?`, `check?` | Run in the pane's shell, wait, return `{exit_code, output}` |
+| `herdr_api` | `method`, `params?`, `timeout_ms?` | Any herdr socket API method; returns herdr's response |
 | `send_agent` | `target`, `text` | Send text to agent stream |
 
 ### 4.5 Synchronize Tools (3)
@@ -218,11 +219,13 @@ herdr-mcp/
 | `wait_pane_agent_status` | `pane_id?`, `label?`, `status`, `timeout_ms?` | Wait for agent status |
 | `wait_agent_status` | `target`, `status`, `timeout_ms?` | Wait for agent status by target |
 
-### 4.6 A2A Primitives (5)
+### 4.6 A2A Primitives (7)
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `agent_spawn` | `role`, `agent`, `args`, `cwd?`, `workspace_id?`, `tab_id?`, `split?`, `needs`, `wait_idle`, `label?` | Spawn agent, register role→pane, wait for deps, capture output |
+| `agent_prompt` | `target`, `text`, `timeout_ms?` | Prompt an agent and wait for its turn to finish; returns its reply |
+| `agent_interrupt` | `target`, `hard` | Stop the agent's turn (profile `interrupt` keys) or quit it (`hard`) |
 | `agent_message` | `target`, `text`, `compress?` | Send message with optional trim; uses per-pane policy if no explicit stages |
 | `agent_read` | `target`, `source?`, `lines?`, `decompress?` | Read + store as work product; auto-decompress PFC1 |
 | `agent_wait` | `target`, `status?`, `timeout_ms?` | Wait for agent by role/pane |
