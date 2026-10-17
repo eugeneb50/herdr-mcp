@@ -12,7 +12,7 @@ tool_count = 51
 [architecture]
 crates = ["herdr-mcp-core", "herdr-mcp-trim", "herdr-mcp-server", "herdr-mcp-cli"]
 note = "The herdr-mcp-folder-key crate was eliminated; folder-key logic lives in herdr-mcp-trim/src/folder_key.rs."
-docs = ["docs/ARCHITECTURE.md (comprehensive reference)", "docs/PRD.md", "AGENTS.md (zeroclaw-style conventions)", "compressorplan.md", "a2a.md", "TEST_PLAN.md"]
+docs = ["docs/ARCHITECTURE.md (comprehensive reference)", "docs/PRD.md", "docs/SWARMS.md", "AGENTS.md"]
 
 [dev_dependencies]
 tempfile = "3"
