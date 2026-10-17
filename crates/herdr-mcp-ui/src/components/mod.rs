@@ -8,6 +8,7 @@ pub mod docs;
 pub mod home;
 pub mod overview;
 pub mod playground;
+pub mod send;
 pub mod settings;
 pub mod trim;
 pub mod variables;
@@ -18,6 +19,7 @@ use docs::Docs;
 use home::Home;
 use overview::Overview;
 use playground::Playground;
+use send::Send;
 use settings::Settings;
 use trim::Trim;
 use variables::Variables;
@@ -27,6 +29,8 @@ use variables::Variables;
 pub enum Route {
     #[layout(Shell)]
         #[route("/")]
+        Send {},
+        #[route("/home")]
         Home {},
         #[route("/docs")]
         Docs {},
@@ -55,6 +59,7 @@ fn Shell() -> Element {
                 }
             }
             nav { class: "nav",
+                Link { class: "nav-link", to: Route::Send {}, "Send" }
                 Link { class: "nav-link", to: Route::Home {}, "Home" }
                 Link { class: "nav-link", to: Route::Docs {}, "Docs" }
                 Link { class: "nav-link", to: Route::Overview {}, "Overview" }

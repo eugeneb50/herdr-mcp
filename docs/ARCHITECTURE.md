@@ -18,7 +18,7 @@ sophisticated message-trim (compression) pipeline, and a recipe engine for
 chaining tool calls with variable interpolation.
 
 **License:** AGPL v3
-**Current test suite:** run `cargo nextest run --workspace` (340 passing)
+**Current test suite:** run `cargo nextest run --workspace` (343 passing)
 **Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---
@@ -559,10 +559,11 @@ Per-folder PFC1 keys for domain-specific compression:
 Full-featured terminal dashboard with VS Code-style tabs, mouse + keyboard
 navigation, running as a herdr sidecar pane:
 
-**5 tabs:**
+**6 tabs** (`Ctrl+1`–`Ctrl+6`; opens on Send):
 | Tab | Content |
 |---|---|
-| Overview | Welcome, workspace stats, pane table with agent/status/role |
+| Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "press Enter after" (`Ctrl+t`); addressed by pane id |
+| Overview | Welcome, stats, pane table (tab/label/agent/status/cwd) for the shown session; `s` cycles sessions |
 | Playground | Tool runner + recipe builder (same as web playground) |
 | Trim | Trim savings dashboard + per-pane policy editor |
 | Variables | Workspace-scoped variable editor |
@@ -573,9 +574,10 @@ navigation, running as a herdr sidecar pane:
   bridge + AgentRegistry + event subscriber come up headless, then the TUI
   takes over the terminal. MCP stdio is auto-disabled (`http_only=true`) so
   the TUI owns stdout.
-- Reads pane data from the **live AgentRegistry** via `GET /api/agents`
-  (canonical), falls back to `herdr pane list` CLI (diagnostic) if the bridge
-  is unavailable.
+- Panes come from herdr via `GET /api/herdr/panes` (the shown session),
+  joined by pane id with the registry (`GET /api/agents`, own session only)
+  for role, captured output and trim policy. Writes (Send, paste-to-pane,
+  trim policies) refuse while another session is shown.
 - **Trim policy editor** — select a pane, add/remove/reorder pipeline stages
   (`caveman:lite/full/ultra`, `pfc1`), set direction, Get/Apply via the
   bridge's tool endpoints.
@@ -707,9 +709,10 @@ Cron-based recipe scheduling using the `cron` crate:
 
 | Route | Component | Description |
 |---|---|---|
-| `/` | `Home` | Landing page |
+| `/` | `Send` | Landing page: type into a pane picked by label (`ApiClient::send_to_pane` → `send_text` / `run_command`, by pane id); remembers the last pane in `localStorage` |
+| `/home` | `Home` | Intro page |
 | `/docs` | `Docs` | Documentation |
-| `/overview` | `Overview` | Live agents from `GET /api/agents` |
+| `/overview` | `Overview` | Pane browser: `GET /api/herdr/panes` with session/status/label filters, grouped by workspace and tab |
 | `/playground` | `Playground` | Tool runner (schema-driven form) + recipe builder/library |
 | `/trim` | `Trim` | Trim savings, per-pane bars, active policies, diagnose/summary |
 | `/variables` | `Variables` | User variables (CRUD/import) + auto variables |

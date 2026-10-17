@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.1.0--dev-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-340%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-343%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-7%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
@@ -38,8 +38,9 @@ cargo build --release
 Requires the `herdr` CLI on `PATH` ([install](https://herdr.dev)), 0.9 or newer.
 
 Running without any subcommand starts the MCP stdio server and the HTTP bridge
-on `127.0.0.1:7676` — open http://localhost:7676/ for the web playground (build
-it first, see [Install & build](#install--build)).
+on `127.0.0.1:7676` — open http://localhost:7676/ for the web UI (build it
+first, see [Install & build](#install--build)). It lands on **Send**: pick a
+pane by label, type, Enter.
 
 ### Other entry points
 
@@ -63,7 +64,8 @@ herdr-trim folder-key    # per-folder PFC1 key management
 - **Live herdr events** — the bridge relays herdr's event stream as SSE (`/api/herdr/events`); the playground shows it live
 - **Cron scheduler** — schedule recipe runs on cron expressions
 - **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: tools, herdr API, recipe builder with triggers, runs, variables, herdr events
-- **TUI dashboard** — VS Code-style tabbed terminal dashboard (mouse + keyboard): overview, playground, trim analytics, variables, settings
+- **Send to a pane** — the web UI and the TUI open on it: pick a pane by label, type, Enter sends (optionally pressing Enter in the pane)
+- **TUI dashboard** — VS Code-style tabbed terminal dashboard (mouse + keyboard): send, overview, playground, trim analytics, variables, settings
 - **Message-trim pipeline** — `caveman` (lossy style) + `pfc1` (lossless Cherokee-syllabary phonetic) compressors for agent-to-agent comms, with per-pane trim policies
 - **Live agent registry** — Unix socket event subscriber tracks panes and agent status in real time; role/label resolution for a2a primitives
 - **Shell-out core** — talks to herdr through its CLI (`tokio::process::Command`, real argv) and socket; no other runtime dependencies
