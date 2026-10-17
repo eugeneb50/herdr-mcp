@@ -22,10 +22,10 @@ assert_cmd = "2"
 predicates = "3"
 
 [run_commands]
-workspace = "cargo test --workspace"
-trim = "cargo test -p herdr-mcp-trim --lib"
-server = "cargo test -p herdr-mcp-server --lib"
-cli = "cargo test -p herdr-mcp-cli"
+workspace = "cargo nextest run --workspace"
+trim = "cargo nextest run -p herdr-mcp-trim --lib"
+server = "cargo nextest run -p herdr-mcp-server --lib"
+cli = "cargo nextest run -p herdr-mcp-cli"
 build = "cargo build --release"
 
 # Persistent runtime configuration (loaded from CWD herdmcp.toml, overridden by CLI args)

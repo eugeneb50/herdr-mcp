@@ -205,3 +205,6 @@
 # - Agent going working -> idle is reported as `done` when unseen, `idle`
 #   when seen: triggers filtering on status need to know which.
 # - serve_core builds ONE HerdrMcpServer (was 3 → schedules fired 3x).
+# - Tests run under `cargo nextest run --workspace` (process per test, so the
+#   env-var-setting tests can't race). No doctests exist; add `cargo test
+#   --doc` to the gates if one is ever written. 400 tests at the plugin PR.
