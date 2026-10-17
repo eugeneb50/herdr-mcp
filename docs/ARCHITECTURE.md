@@ -18,8 +18,8 @@ sophisticated message-trim (compression) pipeline, and a recipe engine for
 chaining tool calls with variable interpolation.
 
 **License:** AGPL v3
-**Current test suite:** run `cargo nextest run --workspace` (400 passing at the
-herdr plugin)
+**Current test suite:** run `cargo nextest run --workspace` (337 passing after the
+dead-code sweep)
 **Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---
@@ -48,7 +48,7 @@ herdr plugin)
 │                        ▼                                     │
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │              HerdrMcpServer (server.rs)                  │ │
-│  │  - 58 tool definitions (discovery, lifecycle, read, write, synchronize, a2a, trim, recipes, scheduler, folder-key) │ │
+│  │  - 54 tool definitions (discovery, lifecycle, read, write, synchronize, a2a, trim, recipes, scheduler, folder-key) │ │
 │  │  - Recipe engine with {{ variable }} interpolation      │ │
 │  │  - Outbound trim: apply_outbound_trim()                 │ │
 │  │  - Badge push: push_badge_for_workspace()               │ │
@@ -118,16 +118,16 @@ herdr-mcp/
 │   ├── herdr-mcp-api/      # HTTP wire contract (leaf crate, native + wasm32)
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports every wire type + ApiClient
-│   │       ├── agents.rs   # AgentHandle, TrimPolicy/TrimDirection, ProxyPolicy
+│   │       ├── agents.rs   # AgentHandle, TrimPolicy/TrimDirection
 │   │       ├── recipe.rs   # Recipe, RecipeStep, ExecutionResult, templates, recipe requests
 │   │       ├── trim.rs     # TrimStatusResponse, PaneStatus, DiagnoseReport
 │   │       ├── variables.rs # VariableStore, PlaygroundSnapshot, variable/tool envelopes
 │   │       └── client.rs   # Typed ApiClient + ApiError
-│   ├── herdr-mcp-core/     # Config, error types
+│   ├── herdr-mcp-core/     # Config
 │   │   └── src/
-│   │       ├── lib.rs      # Re-exports Config, CliOverrides, Error
+│   │       ├── lib.rs      # Re-exports Config, CliOverrides
 │   │       ├── config.rs   # Full config system: TOML + env + CLI
-│   │       └── error.rs    # anyhow-based error context
+│   │       └── session_context.rs # inside-herdr / pane id from herdr's env
 │   ├── herdr-mcp-trim/     # Message-trim pipeline
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports all public types
@@ -144,9 +144,8 @@ herdr-mcp/
 │   │   └── src/
 │   │       ├── lib.rs      # App state, event loop, mouse handling
 │   │       ├── http.rs     # Bridge discovery; every call goes through ApiClient
-│   │       ├── nav.rs      # NavigationFrame + FrameFocus
 │   │       ├── theme.rs    # Color palette and styles
-│   │       └── tabs/       # overview, playground, trim, variables, settings, proxy
+│   │       └── tabs/       # overview, playground, trim, variables, settings
 │   ├── herdr-mcp-server/   # MCP server, tools, HTTP bridge
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports HerdrMcpServer, Persistence, etc.
@@ -159,7 +158,6 @@ herdr-mcp/
 │   │       ├── scheduler.rs    # Cron-based recipe scheduling
 │   │       ├── templates.rs    # Bundled recipe templates
 │   │       └── variables.rs    # ScheduledRecipe + variable extraction (wire types from api)
-│   ├── herdr-mcp-proxy/    # HTTPS intercepting proxy (CA, TLS, per-pane policy)
 │   ├── herdr-mcp-ui/       # Dioxus 0.7 web UI (see §11)
 │   └── herdr-mcp-cli/      # Binaries
 │       ├── src/bin/herdr-mcp.rs  # Daemon: serve (MCP stdio + HTTP)
@@ -170,7 +168,7 @@ herdr-mcp/
 
 ---
 
-## 4. MCP Tool Reference (58 tools total)
+## 4. MCP Tool Reference (54 tools total)
 
 ### 4.1 Discovery Tools (7)
 
@@ -285,15 +283,6 @@ herdr-mcp/
 |---|---|---|
 | `clipboard_set` | `text` | Write text to system clipboard |
 | `clipboard_get` | — | Read text from system clipboard |
-
-### 4.13 Proxy Tools (4)
-
-| Tool | Parameters | Description |
-|---|---|---|
-| `proxy_startup` | `port?`, `bind_addr?` | Start the HTTPS intercepting proxy listener |
-| `proxy_diagnose` | — | CA status, TLS config, default and per-pane policies |
-| `proxy_policy_set` | `target`, `trim_outbound?`, `trim_inbound?`, `stages?` | Set a pane's proxy interception policy |
-| `proxy_policy_get` | `target` | Get a pane's proxy interception policy |
 
 ---
 
@@ -849,15 +838,8 @@ Bind one in herdr's config: `[[keys.command]] key = "prefix+r"`,
 | `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
 | `HERDR_MCP_WEB_DIR` | in-repo `dx bundle` output | Built web UI directory |
 | `HERDR_MCP_CONFIG` | — | Config file path |
-| `HERDR_MCP_TOOL_TIMEOUT` | — | Tool call timeout (seconds) |
-| `HERDR_MCP_MAX_CONCURRENT` | — | Max concurrent tool calls |
-| `HERDR_MCP_HERDR_TIMEOUT` | — | herdr CLI timeout (seconds) |
 | `HERDR_MCP_CLIPBOARD_COPY` | — | Clipboard copy command override |
 | `HERDR_MCP_CLIPBOARD_PASTE` | — | Clipboard paste command override |
-| `HERDR_MCP_LOG_LEVEL` | — | Log level override |
-| `HERDR_MCP_LOG_FORMAT` | — | Log format (full, compact, json) |
-| `HERDR_MCP_PFC1_MAX_SYMBOLS` | 85 | Max PFC1 Cherokee symbols |
-| `HERDR_MCP_PFC1_ENABLE_PHRASES` | — | Enable multi-word PFC1 phrases |
 
 ---
 

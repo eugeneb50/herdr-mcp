@@ -34,15 +34,6 @@ impl PipelineRunner {
         }
     }
 
-    /// Build a runner with an explicit in-memory base key (no persistence).
-    #[allow(dead_code)]
-    pub fn with_base_key(base_key: CompressionKey) -> Self {
-        PipelineRunner {
-            base_key,
-            memory_path: None,
-        }
-    }
-
     /// Run `text` through the given stages. When a PFC1 stage produces a key,
     /// it is merged into persistent memory.
     pub async fn run(&self, text: &str, stages: &[StageSpec]) -> pipeline::PipelineResult {

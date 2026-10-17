@@ -40,14 +40,6 @@ enum Command {
         data_dir: Option<std::path::PathBuf>,
         #[arg(long)]
         herdr_socket: Option<std::path::PathBuf>,
-        /// Auto-start the HTTPS intercepting proxy on this port when set.
-        #[arg(long)]
-        proxy_port: Option<u16>,
-        /// Tool surface: `core`, `extended`, or comma list (e.g. `core,recipes`).
-        /// Currently parsed for forward-compat; tier gating lands with the
-        /// tool-tier change.
-        #[arg(long, default_value = "extended")]
-        tools: String,
     },
     /// herdr plugin: link/unlink it, and the entry points herdr runs.
     Plugin {
@@ -59,7 +51,6 @@ enum Command {
 fn main() -> Result<()> {
     let args = Args::parse();
     common::init_tracing()?;
-    config_tools_note(&args)?;
 
     // Load config with CLI overrides
     if let Some(Command::Plugin { command }) = args.command {
@@ -73,27 +64,17 @@ fn main() -> Result<()> {
             http_only,
             data_dir,
             herdr_socket,
-            proxy_port,
-            ..
         }) => Some(CliOverrides {
             data_dir: data_dir.clone(),
             http_port: *http,
             http_only: Some(*http_only),
-            http_bind: None,
             herdr_socket: herdr_socket.clone(),
-            log_level: None,
-            trim_stages: Vec::new(),
-            proxy_port: *proxy_port,
         }),
         None => Some(CliOverrides {
             data_dir: None,
             http_port: Some(7676),
             http_only: Some(false),
-            http_bind: None,
             herdr_socket: None,
-            log_level: None,
-            trim_stages: Vec::new(),
-            proxy_port: None,
         }),
         Some(Command::Plugin { .. }) => unreachable!("handled above"),
     };
@@ -102,16 +83,4 @@ fn main() -> Result<()> {
     // SAFETY: single-threaded here; the runtime starts below.
     unsafe { config.export_herdr_socket() };
     tokio::runtime::Runtime::new()?.block_on(common::run_serve(&config))
-}
-
-/// Forward-compat stub: `--tools` is accepted and validated, gating follows.
-fn config_tools_note(args: &Args) -> Result<()> {
-    let selection = match &args.command {
-        Some(Command::Serve { tools, .. }) => tools.as_str(),
-        _ => "extended",
-    };
-    if selection != "core" && selection != "extended" && !selection.starts_with("core,") {
-        anyhow::bail!("--tools must be `core`, `extended`, or `core,...` (got `{selection}`)");
-    }
-    Ok(())
 }

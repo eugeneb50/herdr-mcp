@@ -243,8 +243,6 @@ tail), `msg.queued|held|delivered|replied|dropped`, `log`.
   `agent.status` for agents in a run.
 - `GET /api/events?run={id}&since={seq}` — SSE; `since` replays from the
   file, so late joiners and the TUI after reconnect see the full history.
-- Per-agent LLM traffic (tokens, bytes saved) can later come from the
-  existing `herdr-mcp-proxy` interceptor.
 
 ## 9. Interrupts
 

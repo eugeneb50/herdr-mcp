@@ -35,15 +35,6 @@ impl TrimPolicyExt for TrimPolicy {
     }
 }
 
-/// Build a default `OutboundWithAck` policy from a stage list — the common case.
-#[allow(dead_code)]
-pub fn outbound_with_ack(stages: Vec<String>) -> TrimPolicy {
-    TrimPolicy {
-        stages,
-        direction: TrimDirection::OutboundWithAck,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -18,4 +18,3 @@ herdr-mcp-api = { path = "../herdr-mcp-api" }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
 pretty_assertions = { workspace = true }
-rstest = { workspace = true }

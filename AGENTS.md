@@ -102,7 +102,7 @@ Cursor, Claude Code, OpenCode) to control herdr workspaces, tabs, panes, and
 agents. It also ships an HTTP bridge (Axum), a Dioxus web playground, a TUI
 dashboard, a recipe run engine with herdr-event triggers and a cron scheduler,
 a herdr plugin, a message-trim (compression) pipeline, an a2a
-(agent-to-agent) primitive layer, and an HTTPS trim proxy.
+(agent-to-agent) primitive layer.
 
 Core architecture is **shell-out + trait-light**: the server wraps the local
 `herdr` CLI via `tokio::process::Command` with real argv (no shell
@@ -112,9 +112,9 @@ Cargo workspace under `crates/`.
 
 Key subsystems:
 
-- **MCP tool layer** — 58 tools, grouped by `#[tool(meta = category("…"))]`:
+- **MCP tool layer** — 54 tools, grouped by `#[tool(meta = category("…"))]`:
   Discovery, Lifecycle, Read, Write, Synchronize, A2A, Variables, Trim,
-  Templates, Scheduler, Folder Key, Clipboard, Proxy.
+  Templates, Scheduler, Folder Key, Clipboard.
 - **HTTP bridge** — Axum server mirroring the tools as REST endpoints plus
   runs, recipes, variables, profiles, herdr schema and SSE event streams;
   shares the one `HerdrMcpServer` and its tool router.
@@ -139,11 +139,10 @@ Every workspace crate carries a stability tier.
 | Crate | Tier | Notes |
 |-------|------|-------|
 | `herdr-mcp-api` | Experimental | HTTP bridge wire contract: every `/api/*` type + typed `ApiClient`. Leaf crate, must build for `wasm32-unknown-unknown`. |
-| `herdr-mcp-core` | Beta | Config system (`TOML + env + CLI`), error types. Stable schema. |
+| `herdr-mcp-core` | Beta | Config system (`TOML + env + CLI`). Stable schema. |
 | `herdr-mcp-trim` | Experimental | Message-trim compressors (caveman, pfc1), pipeline, policy, stats, folder keys. |
 | `herdr-mcp-tui` | Experimental | Terminal dashboard. Bridge client only — no server deps. |
-| `herdr-mcp-server` | Experimental | MCP server, 58 tools, HTTP bridge, run engine, triggers, event subscriber, scheduler. |
-| `herdr-mcp-proxy` | Experimental | HTTPS intercepting proxy applying per-pane trim policies. |
+| `herdr-mcp-server` | Experimental | MCP server, 54 tools, HTTP bridge, run engine, triggers, event subscriber, scheduler. |
 | `herdr-mcp-ui` | Experimental | Dioxus web UI. Bridge client only, must build for `wasm32-unknown-unknown`. |
 | `herdr-mcp-cli` | Experimental | Binaries (`herdr-mcp`: serve/plugin; `herdr-trim`: trim/dashboard/folder-key) + integration tests. |
 
@@ -153,12 +152,11 @@ through deliberate team decision.
 
 ## Repository Map
 
-- `crates/herdr-mcp-api/` — single definition of every `/api/*` request/response type (`agents.rs`, `config.rs`, `herdr.rs` (herdr events + recipe triggers), `profile.rs`, `recipe.rs`, `run.rs`, `trim.rs`, `variables.rs`) + typed `ApiClient` (`client.rs`). Server/trim/proxy re-export these; web UI and TUI call the bridge through `ApiClient`. No tokio, no `herdr-mcp-*` deps.
-- `crates/herdr-mcp-core/` — `config.rs` (full config system), `error.rs`, `keybindings.rs` (TUI), `session_context.rs`
+- `crates/herdr-mcp-api/` — single definition of every `/api/*` request/response type (`agents.rs`, `config.rs`, `herdr.rs` (herdr events + recipe triggers), `profile.rs`, `recipe.rs`, `run.rs`, `trim.rs`, `variables.rs`) + typed `ApiClient` (`client.rs`). Server/trim re-export these; web UI and TUI call the bridge through `ApiClient`. No tokio, no `herdr-mcp-*` deps.
+- `crates/herdr-mcp-core/` — `config.rs` (full config system: `[http]`, `[herdr]`, `[clipboard]`), `session_context.rs` (inside-herdr / pane id from herdr's env)
 - `crates/herdr-mcp-trim/` — `pfc1.rs`, `caveman.rs`, `code_regions.rs`, `pipeline.rs`, `policy.rs`, `runner.rs`, `stats.rs`, `eval.rs`, `folder_key.rs`
-- `crates/herdr-mcp-tui/` — TUI dashboard (`lib.rs` app loop, `tabs/`, `nav.rs`, `theme.rs`, `http.rs` bridge discovery); talks to the bridge through `herdr-mcp-api::ApiClient`
+- `crates/herdr-mcp-tui/` — TUI dashboard (`lib.rs` app loop, `tabs/`, `theme.rs`, `http.rs` bridge discovery); talks to the bridge through `herdr-mcp-api::ApiClient`
 - `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers), `runs.rs` (run engine), `triggers.rs`, `scheduler.rs`, `herdr_client.rs` (socket client, event subscriber, agent registry), `agents.rs` / `profiles.rs` (agent profiles), `persistence.rs`, `templates.rs`, `variables.rs`
-- `crates/herdr-mcp-proxy/` — `server.rs`, `interceptor.rs`, `tls.rs`, `ca.rs`
 - `crates/herdr-mcp-cli/` — `src/bin/herdr-mcp.rs` (serve, plugin), `src/bin/herdr-trim.rs` (trim/dashboard/folder-key), `src/common.rs` (`serve_core`: the one server instance + background tasks), `src/plugin.rs` (herdr plugin), `tests/cli.rs`
 - `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the tool runner, herdr API, recipe builder and herdr events tabs; served by the HTTP bridge from `http.web-dir`
 - `data/` — runtime persistence (recipes, runs, variables, schedules, sessions, profiles, pfc1 memory, folder keys)

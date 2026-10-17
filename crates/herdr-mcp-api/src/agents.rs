@@ -36,24 +36,6 @@ impl TrimPolicy {
     }
 }
 
-/// Per-pane HTTPS-intercept proxy policy.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProxyPolicy {
-    pub trim_outbound: bool,
-    pub trim_inbound: bool,
-    pub stages: Vec<String>,
-}
-
-impl Default for ProxyPolicy {
-    fn default() -> Self {
-        Self {
-            trim_outbound: false,
-            trim_inbound: false,
-            stages: vec!["caveman:full".into(), "pfc1".into()],
-        }
-    }
-}
-
 /// A registered agent: its pane address plus the last captured work product.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentHandle {
@@ -78,10 +60,6 @@ pub struct AgentHandle {
     /// agent blob, so recipes can opt a pane into compression.
     #[serde(default)]
     pub trim_policy: Option<TrimPolicy>,
-    /// Optional per-pane proxy policy (default off). Controls HTTPS
-    /// interception trim for this pane's LLM traffic.
-    #[serde(default)]
-    pub proxy_policy: Option<ProxyPolicy>,
     #[serde(default)]
     pub updated_at: i64,
 }

@@ -589,48 +589,6 @@ pub struct TrimStatusParams {
 /// Trim wire types, defined once in `herdr-mcp-api`.
 pub use herdr_mcp_api::{DiagnoseReport, PaneStatus, SampleRoundtrip, TrimStatusResponse};
 
-/// Parameters for the `proxy_startup` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct ProxyStartupParams {
-    /// Override the proxy listen port (default from config).
-    #[serde(default)]
-    pub port: Option<u16>,
-    /// Override the bind address (default from config).
-    #[serde(default)]
-    pub bind_addr: Option<String>,
-}
-
-/// Parameters for the `proxy_diagnose` tool (no params).
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct ProxyDiagnoseParams {}
-
-/// Parameters for the `proxy_policy_set` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct ProxyPolicySetParams {
-    /// Target pane id or label.
-    pub target: String,
-    /// Enable outbound (request body) trimming.
-    #[serde(default = "default_true_bool")]
-    pub trim_outbound: bool,
-    /// Enable inbound (response body) trimming.
-    #[serde(default = "default_true_bool")]
-    pub trim_inbound: bool,
-    /// Ordered stage list, e.g. `["caveman:full", "pfc1"]`.
-    #[serde(default)]
-    pub stages: Vec<String>,
-}
-
-/// Parameters for the `proxy_policy_get` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct ProxyPolicyGetParams {
-    /// Target pane id or label.
-    pub target: String,
-}
-
 fn default_true_bool() -> bool {
     true
 }
@@ -1870,16 +1828,13 @@ impl HerdrMcpServer {
             }
         };
 
-        let mut gross = 0usize;
-        let mut net = 0usize;
-        let mut total_in = 0usize;
-        let mut msgs = 0u64;
+        let mut total = stats::TrimStats::default();
         for w in &ws_list {
             let s = stats::load_stats(&self.data_dir, w).await;
-            gross = gross.saturating_add(s.gross_saved_bytes);
-            net = net.saturating_add(s.net_saved_bytes);
-            total_in = total_in.saturating_add(s.total_input_bytes);
-            msgs = msgs.saturating_add(s.messages_trimmed);
+            total.gross_saved_bytes = total.gross_saved_bytes.saturating_add(s.gross_saved_bytes);
+            total.net_saved_bytes = total.net_saved_bytes.saturating_add(s.net_saved_bytes);
+            total.total_input_bytes = total.total_input_bytes.saturating_add(s.total_input_bytes);
+            total.messages_trimmed = total.messages_trimmed.saturating_add(s.messages_trimmed);
             for (pane, ps) in &s.per_pane {
                 let key = format!("{w}:{pane}");
                 let entry = resp.per_pane.entry(key).or_default();
@@ -1898,20 +1853,12 @@ impl HerdrMcpServer {
             }
         }
 
-        resp.gross_saved_bytes = gross;
-        resp.net_saved_bytes = net;
-        resp.total_input_bytes = total_in;
-        resp.messages_trimmed = msgs;
-        resp.workspace_net_pct = if gross > 0 {
-            (net as f64 / gross as f64) * 100.0
-        } else {
-            0.0
-        };
-        resp.workspace_savings_pct = if total_in > 0 {
-            (gross as f64 / total_in as f64) * 100.0
-        } else {
-            0.0
-        };
+        resp.gross_saved_bytes = total.gross_saved_bytes;
+        resp.net_saved_bytes = total.net_saved_bytes;
+        resp.total_input_bytes = total.total_input_bytes;
+        resp.messages_trimmed = total.messages_trimmed;
+        resp.workspace_net_pct = total.workspace_net_pct();
+        resp.workspace_savings_pct = total.savings_pct();
         resp
     }
 
@@ -2387,219 +2334,6 @@ impl HerdrMcpServer {
                 eprintln!("[clipboard] get: FAILED: {e}");
                 Err(e)
             }
-        }
-    }
-
-    // ── Proxy tools ───────────────────────────────────────────────────
-
-    #[tool(
-        meta = category("Proxy"),
-        description = "Start the HTTPS intercepting proxy listener. Returns the \
-            bound address and CA fingerprint. Idempotent — calling startup when \
-            the proxy is already running returns the current status."
-    )]
-    async fn proxy_startup(
-        &self,
-        Parameters(params): Parameters<ProxyStartupParams>,
-    ) -> Result<CallToolResult, McpError> {
-        use herdr_mcp_core::Config;
-
-        let cfg = Config::default();
-        let port = params.port.unwrap_or(cfg.proxy.port.unwrap_or(8443));
-        let bind = params
-            .bind_addr
-            .unwrap_or_else(|| cfg.proxy.bind_addr.unwrap_or_else(|| "127.0.0.1".into()));
-        let target_hosts = cfg.proxy.target_hosts.clone();
-        let validity = cfg.proxy.ca_validity_days;
-        let data_dir = self.data_dir.clone();
-
-        // Spawn the proxy listener as a background task.
-        let addr = format!("{bind}:{port}");
-        let ca_dir = data_dir.join("proxy");
-
-        // Load or create the CA to report its fingerprint.
-        let ca =
-            herdr_mcp_proxy::CaManager::load_or_create(&ca_dir, validity).map_err(to_mcp_err)?;
-        let fp = {
-            let der = ca.ca_cert_der();
-            // Simple hex fingerprint from first 32 bytes (enough for diagnostics).
-            let take = der.len().min(32);
-            der[..take]
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        };
-
-        let policy = herdr_mcp_proxy::ProxyPolicy {
-            trim_outbound: cfg.proxy.trim_outbound,
-            trim_inbound: cfg.proxy.trim_inbound,
-            stages: cfg.proxy.trim_stages.clone(),
-        };
-
-        let data_dir_clone = data_dir.clone();
-        let hosts_clone = target_hosts.clone();
-        tokio::spawn(async move {
-            if let Err(e) = herdr_mcp_proxy::run_proxy_listener(
-                port,
-                &bind,
-                &data_dir_clone,
-                hosts_clone,
-                policy,
-            )
-            .await
-            {
-                tracing::error!("proxy listener exited: {e}");
-            }
-        });
-
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "status": "started",
-                "bind": addr,
-                "ca_fingerprint": fp,
-                "target_hosts": target_hosts,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(
-        meta = category("Proxy"),
-        description = "Diagnose the intercepting proxy: CA status, TLS config \
-            health, active policies, and connectivity. Returns a structured \
-            health report."
-    )]
-    async fn proxy_diagnose(
-        &self,
-        Parameters(_): Parameters<ProxyDiagnoseParams>,
-    ) -> Result<CallToolResult, McpError> {
-        use herdr_mcp_core::Config;
-
-        let cfg = Config::default();
-        let ca_dir = self.data_dir.join("proxy");
-        let ca_exists = ca_dir.join("ca.crt").exists();
-        let cert_exists = ca_dir.join("ca.key").exists();
-
-        let ca_status = if ca_exists && cert_exists {
-            let ca =
-                herdr_mcp_proxy::CaManager::load_or_create(&ca_dir, cfg.proxy.ca_validity_days)
-                    .map_err(to_mcp_err)?;
-            let fp = {
-                let der = ca.ca_cert_der();
-                let take = der.len().min(32);
-                der[..take]
-                    .iter()
-                    .map(|b| format!("{b:02x}"))
-                    .collect::<String>()
-            };
-            serde_json::json!({
-                "exists": true,
-                "fingerprint": fp,
-                "target_hosts": cfg.proxy.target_hosts,
-            })
-        } else {
-            serde_json::json!({
-                "exists": false,
-                "message": "CA not initialized — run proxy_startup first",
-            })
-        };
-
-        // Collect active per-pane policies from the registry.
-        let all_handles = self.registry.inner_snapshot().await;
-        let mut active = Vec::new();
-        for h in &all_handles {
-            if let Some(ref pp) = h.proxy_policy {
-                active.push(serde_json::json!({
-                    "pane_id": h.pane_id,
-                    "label": h.label,
-                    "trim_outbound": pp.trim_outbound,
-                    "trim_inbound": pp.trim_inbound,
-                    "stages": pp.stages,
-                }));
-            }
-        }
-
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "ca": ca_status,
-                "default_config": {
-                    "port": cfg.proxy.port,
-                    "bind_addr": cfg.proxy.bind_addr,
-                    "trim_outbound": cfg.proxy.trim_outbound,
-                    "trim_inbound": cfg.proxy.trim_inbound,
-                    "trim_stages": cfg.proxy.trim_stages,
-                },
-                "active_pane_policies": active,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(meta = category("Proxy"), description = "Set the per-pane proxy interception policy. Controls \
-            whether outbound request bodies and inbound response bodies are \
-            trimmed for this pane's LLM traffic.")]
-    async fn proxy_policy_set(
-        &self,
-        Parameters(params): Parameters<ProxyPolicySetParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let pane_id = resolve_pane_id(None, Some(params.target.clone())).await?;
-
-        let stages = if params.stages.is_empty() {
-            vec!["caveman:full".into(), "pfc1".into()]
-        } else {
-            params.stages
-        };
-
-        let policy = herdr_mcp_proxy::ProxyPolicy {
-            trim_outbound: params.trim_outbound,
-            trim_inbound: params.trim_inbound,
-            stages,
-        };
-
-        self.registry
-            .set_proxy_policy(&pane_id, Some(policy.clone()))
-            .await;
-
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "pane_id": pane_id,
-                "trim_outbound": policy.trim_outbound,
-                "trim_inbound": policy.trim_inbound,
-                "stages": policy.stages,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(
-        meta = category("Proxy"),
-        description = "Get the per-pane proxy interception policy for a given \
-            pane or label."
-    )]
-    async fn proxy_policy_get(
-        &self,
-        Parameters(params): Parameters<ProxyPolicyGetParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let pane_id = resolve_pane_id(None, Some(params.target.clone())).await?;
-
-        match self.registry.get_proxy_policy(&pane_id).await {
-            Some(policy) => Ok(CallToolResult::success(vec![
-                Content::json(serde_json::json!({
-                    "pane_id": pane_id,
-                    "trim_outbound": policy.trim_outbound,
-                    "trim_inbound": policy.trim_inbound,
-                    "stages": policy.stages,
-                }))
-                .map_err(to_mcp_err)?,
-            ])),
-            None => Ok(CallToolResult::success(vec![
-                Content::json(serde_json::json!({
-                    "pane_id": pane_id,
-                    "policy": null,
-                    "message": "No proxy policy set for this pane",
-                }))
-                .map_err(to_mcp_err)?,
-            ])),
         }
     }
 }
@@ -4473,141 +4207,6 @@ mod tests {
         // With no env and no config, detection falls through to platform auto-detect.
         // On a real system this returns a tool or an error — but it must not panic.
         let _ = detect_clipboard(&cfg);
-    }
-
-    // ── Proxy integration tests ─────────────────────────────────────────────
-
-    /// Build a test server with temp data_dir.
-    async fn make_proxy_test_server() -> (HerdrMcpServer, tempfile::TempDir) {
-        let tmp = tempfile::tempdir().unwrap();
-        let pers = Persistence::new(tmp.path().join("data"));
-        let pers_arc = std::sync::Arc::new(pers);
-        let registry = AgentRegistry::new(pers_arc);
-        let server = HerdrMcpServer::new(Persistence::new(tmp.path().join("data")), registry);
-        (server, tmp)
-    }
-
-    /// Extract the JSON payload from a successful CallToolResult.
-    fn call_tool_json(result: CallToolResult) -> serde_json::Value {
-        let mut text = String::new();
-        for c in &result.content {
-            if let Some(tc) = c.as_text() {
-                text.push_str(&tc.text);
-            }
-        }
-        serde_json::from_str(&text).expect("content should be valid JSON")
-    }
-
-    #[tokio::test]
-    async fn test_proxy_policy_set_then_get() {
-        let (server, _tmp) = make_proxy_test_server().await;
-        server.registry.upsert("p1", "w1", "", "claude", "").await;
-        let policy = herdr_mcp_proxy::ProxyPolicy {
-            trim_outbound: true,
-            trim_inbound: false,
-            stages: vec!["caveman:full".into()],
-        };
-        server
-            .registry
-            .set_proxy_policy("p1", Some(policy.clone()))
-            .await;
-        let got = server.registry.get_proxy_policy("p1").await.unwrap();
-        assert!(got.trim_outbound);
-        assert!(!got.trim_inbound);
-        assert_eq!(got.stages, vec!["caveman:full"]);
-    }
-
-    #[tokio::test]
-    async fn test_proxy_policy_clear() {
-        let (server, _tmp) = make_proxy_test_server().await;
-        server.registry.upsert("p1", "w1", "", "", "").await;
-        let policy = herdr_mcp_proxy::ProxyPolicy {
-            trim_outbound: true,
-            trim_inbound: true,
-            stages: vec!["pfc1".into()],
-        };
-        server.registry.set_proxy_policy("p1", Some(policy)).await;
-        assert!(server.registry.get_proxy_policy("p1").await.is_some());
-        server.registry.set_proxy_policy("p1", None).await;
-        assert!(server.registry.get_proxy_policy("p1").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_proxy_diagnose_ca_not_initialized() {
-        let (server, _tmp) = make_proxy_test_server().await;
-        let result = server
-            .proxy_diagnose(Parameters(ProxyDiagnoseParams {}))
-            .await
-            .unwrap();
-        let json = call_tool_json(result);
-        assert_eq!(json["ca"]["exists"], serde_json::json!(false));
-    }
-
-    #[tokio::test]
-    async fn test_proxy_diagnose_includes_active_policies() {
-        let (server, _tmp) = make_proxy_test_server().await;
-        server.registry.upsert("p1", "w1", "", "claude", "").await;
-        let pp = herdr_mcp_proxy::ProxyPolicy {
-            trim_outbound: true,
-            trim_inbound: false,
-            stages: vec!["caveman:full".into(), "pfc1".into()],
-        };
-        server.registry.set_proxy_policy("p1", Some(pp)).await;
-        let result = server
-            .proxy_diagnose(Parameters(ProxyDiagnoseParams {}))
-            .await
-            .unwrap();
-        let json = call_tool_json(result);
-        let policies = json["active_pane_policies"].as_array().unwrap();
-        assert_eq!(policies.len(), 1);
-        assert_eq!(policies[0]["pane_id"], "p1");
-        assert_eq!(policies[0]["trim_outbound"], serde_json::json!(true));
-    }
-
-    #[tokio::test]
-    async fn test_proxy_startup_initializes_ca() {
-        let (server, tmp) = make_proxy_test_server().await;
-        let result = server
-            .proxy_startup(Parameters(ProxyStartupParams {
-                port: Some(0),
-                bind_addr: Some("127.0.0.1".into()),
-            }))
-            .await
-            .unwrap();
-        let json = call_tool_json(result);
-        assert_eq!(json["status"], serde_json::json!("started"));
-        assert!(!json["ca_fingerprint"].as_str().unwrap().is_empty());
-        assert!(json["bind"].as_str().unwrap().contains("127.0.0.1"));
-        // Allow the spawned listener task to do its work.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        // CA files should now be on disk.
-        let ca_dir = tmp.path().join("data/proxy");
-        assert!(ca_dir.join("ca.crt").exists());
-        assert!(ca_dir.join("ca.key").exists());
-    }
-
-    #[tokio::test]
-    async fn test_proxy_diagnose_after_startup() {
-        let (server, _tmp) = make_proxy_test_server().await;
-        let _ = server
-            .proxy_startup(Parameters(ProxyStartupParams {
-                port: Some(0),
-                bind_addr: Some("127.0.0.1".into()),
-            }))
-            .await
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let result = server
-            .proxy_diagnose(Parameters(ProxyDiagnoseParams {}))
-            .await
-            .unwrap();
-        let json = call_tool_json(result);
-        assert_eq!(json["ca"]["exists"], serde_json::json!(true));
-        assert!(!json["ca"]["fingerprint"].as_str().unwrap().is_empty());
-        // default target_hosts from Config::default()
-        let hosts = json["ca"]["target_hosts"].as_array().unwrap();
-        assert!(!hosts.is_empty());
     }
 
     /// Contract test: the shared `herdr_mcp_api::ApiClient` (used by the web

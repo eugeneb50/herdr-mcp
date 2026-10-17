@@ -235,45 +235,6 @@ impl ApiClient {
         .await
     }
 
-    /// `proxy_diagnose` tool — CA status, defaults, per-pane policies.
-    pub async fn proxy_diagnose(&self) -> Result<Value, ApiError> {
-        self.call_tool("proxy_diagnose", &serde_json::json!({}))
-            .await
-    }
-
-    /// `proxy_startup` tool; `port` overrides the configured listen port.
-    pub async fn proxy_startup(&self, port: Option<u16>) -> Result<Value, ApiError> {
-        let params = match port {
-            Some(p) => serde_json::json!({ "port": p }),
-            None => serde_json::json!({}),
-        };
-        self.call_tool("proxy_startup", &params).await
-    }
-
-    /// `proxy_policy_get` tool for a pane id / label.
-    pub async fn proxy_policy_get(&self, target: &str) -> Result<Value, ApiError> {
-        self.call_tool("proxy_policy_get", &serde_json::json!({ "target": target }))
-            .await
-    }
-
-    /// `proxy_policy_set` tool.
-    pub async fn proxy_policy_set(
-        &self,
-        target: &str,
-        policy: &ProxyPolicy,
-    ) -> Result<Value, ApiError> {
-        self.call_tool(
-            "proxy_policy_set",
-            &serde_json::json!({
-                "target": target,
-                "trim_outbound": policy.trim_outbound,
-                "trim_inbound": policy.trim_inbound,
-                "stages": policy.stages,
-            }),
-        )
-        .await
-    }
-
     // ── recipes ────────────────────────────────────────────────────────
 
     /// `GET /api/recipes`.

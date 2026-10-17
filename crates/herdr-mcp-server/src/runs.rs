@@ -1,5 +1,5 @@
-//! Background recipe runs: the one executor behind `/api/runs`,
-//! `POST /api/recipe`, `POST /api/recipes/{id}/run` and the scheduler.
+//! Background recipe runs: the one executor behind `/api/runs`, the
+//! scheduler, recipe triggers and the plugin's recipe picker.
 //!
 //! A run is stored as an immutable [`RunHeader`] (`data/runs/{id}/run.json`:
 //! what ran, with which starting variables) plus an append-only event log

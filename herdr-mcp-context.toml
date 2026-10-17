@@ -207,4 +207,12 @@
 # - serve_core builds ONE HerdrMcpServer (was 3 → schedules fired 3x).
 # - Tests run under `cargo nextest run --workspace` (process per test, so the
 #   env-var-setting tests can't race). No doctests exist; add `cargo test
-#   --doc` to the gates if one is ever written. 400 tests at the plugin PR.
+#   --doc` to the gates if one is ever written.
+# - Dead-code sweep (2026-10-17): removed the HTTPS proxy (crate, 4 tools,
+#   --proxy-port, [proxy], TUI tab, per-pane proxy_policy) — its listener
+#   accepted and dropped connections and bound :8443 on every serve. Also
+#   removed config sections nothing read ([mcp], [trim], [sandbox],
+#   [logging], [keybindings], herdr.connect-timeout-secs) and their
+#   HERDR_MCP_* env vars, the --tools stub, ~/.herdr-mcp.toml fallback.
+#   deny_unknown_fields: old configs naming those sections now fail to load.
+#   54 tools, 7 crates, 337 tests.

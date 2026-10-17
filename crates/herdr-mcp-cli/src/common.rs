@@ -4,7 +4,7 @@
 //! (`serve_core`), the MCP stdio server (`run_serve`), and the headless stack
 //! used under dashboards (`run_serve_headless`). Both bins delegate here —
 //! neither duplicates construction. (Kept in the CLI crate rather than moved
-//! into `herdr-mcp-server` so the server crate gains no proxy/trim CLI deps.)
+//! into `herdr-mcp-server` so the server crate gains no CLI deps.)
 //
 // NOTE: included by two bins that each use a subset (`herdr-mcp` never calls
 // `run_serve_headless`, `herdr-trim` never calls `run_serve`). Each bin marks
@@ -81,37 +81,6 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
                 tracing::error!("HTTP server failed: {e}");
             }
         });
-    }
-
-    // Auto-start the HTTPS intercepting proxy if `--proxy-port` was set.
-    if let Some(proxy_port) = config.proxy.port {
-        let data_dir = persistence.data_dir().to_path_buf();
-        let bind = config
-            .proxy
-            .bind_addr
-            .clone()
-            .unwrap_or_else(|| "127.0.0.1".into());
-        let target_hosts = config.proxy.target_hosts.clone();
-        let policy = herdr_mcp_proxy::ProxyPolicy {
-            trim_outbound: config.proxy.trim_outbound,
-            trim_inbound: config.proxy.trim_inbound,
-            stages: config.proxy.trim_stages.clone(),
-        };
-        let bind_for_log = bind.clone();
-        tokio::spawn(async move {
-            if let Err(e) = herdr_mcp_proxy::run_proxy_listener(
-                proxy_port,
-                &bind,
-                &data_dir,
-                target_hosts,
-                policy,
-            )
-            .await
-            {
-                tracing::error!("proxy listener exited: {e}");
-            }
-        });
-        tracing::info!("Proxy listener auto-started on {bind_for_log}:{proxy_port}");
     }
 
     Ok(server)
