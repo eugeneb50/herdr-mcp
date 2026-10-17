@@ -216,3 +216,22 @@
 #   HERDR_MCP_* env vars, the --tools stub, ~/.herdr-mcp.toml fallback.
 #   deny_unknown_fields: old configs naming those sections now fail to load.
 #   54 tools, 7 crates, 337 tests.
+
+# Spec facts the tests rely on (moved from herdmcp.toml, 2026-10-17)
+#
+# - extract_variables always prefixes keys with `result.`
+#   ({"result":"hello"} -> "result.result") and ignores arrays.
+# - resolve_variables leaves unknown {{ path }} placeholders unchanged.
+# - Config::merge takes `other` wholesale for every field.
+# - TrimPolicy::parse_stages defaults emit_header = true;
+#   parse_stages_with(false/true) sets it.
+# - CompressionKey = HashMap<String,String> (Cherokee symbol -> term),
+#   85 symbols (U+13A0..=U+13FF).
+# - stats.rs: savings_pct() = gross/total_input; workspace_net_pct() = net/gross.
+# - resolve_label_in_panes / resolve_pane_id accept both `pane_id` and `id`
+#   keys (herdr pane list returns either). resolve_target_pane goes through
+#   AgentRegistry::resolve.
+# - Gotcha: build_folder_key writes its output INTO the scanned folder, so a
+#   second scan re-ingests it -> two separate builds differ (HashMap order).
+#   One persisted key is stable (test_load_folder_key_roundtrip); never
+#   assert two builds are equal.
