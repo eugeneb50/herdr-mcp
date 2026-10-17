@@ -424,6 +424,7 @@ mod tests {
             updated_at: chrono::Utc::now(),
             is_template: false,
             category: None,
+            triggers: Vec::new(),
         }
     }
 

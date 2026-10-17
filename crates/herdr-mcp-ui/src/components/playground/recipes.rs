@@ -12,8 +12,18 @@ use crate::client::use_api;
 use crate::vars::substitute;
 use herdr_mcp_api::{
     CreateRecipeRequest, InstantiateTemplateRequest, Recipe, RecipeStep, RecipeTemplate,
-    StartRunRequest, UpdateRecipeRequest, Uuid,
+    RecipeTrigger, StartRunRequest, UpdateRecipeRequest, Uuid,
 };
+
+/// What the library hands the builder: a saved recipe (with its id, so
+/// saving updates it) or a filled-in template (new).
+#[derive(Clone, PartialEq, Default)]
+pub struct Loaded {
+    pub id: Option<Uuid>,
+    pub name: String,
+    pub steps: Vec<Step>,
+    pub triggers: Vec<RecipeTrigger>,
+}
 
 #[derive(Clone, PartialEq)]
 pub struct Step {
@@ -77,19 +87,16 @@ fn steps_from_api(steps: &[RecipeStep]) -> Vec<Step> {
 }
 
 #[component]
-pub fn RecipeBuilder(
-    initial_name: String,
-    initial_steps: Vec<Step>,
-    on_saved: EventHandler<()>,
-) -> Element {
+pub fn RecipeBuilder(initial: Loaded, on_saved: EventHandler<()>) -> Element {
     let mut tools: Signal<Vec<ToolInfo>> = use_signal(Vec::new);
-    let mut name: Signal<String> = use_signal(|| initial_name.clone());
-    let mut steps: Signal<Vec<Step>> = use_signal(|| initial_steps.clone());
+    let mut name: Signal<String> = use_signal(|| initial.name.clone());
+    let mut steps: Signal<Vec<Step>> = use_signal(|| initial.steps.clone());
+    let mut triggers: Signal<Vec<RecipeTrigger>> = use_signal(|| initial.triggers.clone());
     let mut results: Signal<Option<Value>> = use_signal(|| None);
     let mut loading: Signal<bool> = use_signal(|| false);
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut save_error: Signal<Option<String>> = use_signal(|| None);
-    let mut saved_id: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut saved_id: Signal<Option<Uuid>> = use_signal(|| initial.id);
     let client = use_api();
     let mut picker_open: Signal<bool> = use_signal(|| false);
 
@@ -175,6 +182,7 @@ pub fn RecipeBuilder(
                     let req = UpdateRecipeRequest {
                         name: Some(n),
                         steps: Some(payload),
+                        triggers: Some(triggers.read().clone()),
                         ..Default::default()
                     };
                     client.update_recipe(id, &req).await
@@ -186,6 +194,7 @@ pub fn RecipeBuilder(
                         steps: payload,
                         variables: HashMap::new(),
                         category: None,
+                        triggers: triggers.read().clone(),
                     };
                     client.create_recipe(&req).await
                 }
@@ -242,6 +251,10 @@ pub fn RecipeBuilder(
                     }
                 },
             }
+        }
+        TriggerEditor {
+            triggers: triggers.read().clone(),
+            on_change: move |next| triggers.set(next),
         }
         div { class: "btn-row",
             button {
@@ -460,7 +473,7 @@ fn StepCard(
 }
 
 #[component]
-pub fn RecipeLibrary(on_select: EventHandler<(String, Vec<Step>)>, refresh_key: u32) -> Element {
+pub fn RecipeLibrary(on_select: EventHandler<Loaded>, refresh_key: u32) -> Element {
     let mut templates: Signal<Vec<RecipeTemplate>> = use_signal(Vec::new);
     let mut saved: Signal<Vec<Recipe>> = use_signal(Vec::new);
     // Template whose variables are being filled in.
@@ -481,7 +494,11 @@ pub fn RecipeLibrary(on_select: EventHandler<(String, Vec<Step>)>, refresh_key: 
     });
 
     let pick = move |(name, steps): (String, Vec<RecipeStep>)| {
-        on_select.call((name, steps_from_api(&steps)));
+        on_select.call(Loaded {
+            name,
+            steps: steps_from_api(&steps),
+            ..Default::default()
+        });
     };
 
     let delete = move |id: Uuid| {
@@ -533,14 +550,23 @@ pub fn RecipeLibrary(on_select: EventHandler<(String, Vec<Step>)>, refresh_key: 
                     let id = recipe.id;
                     let label = recipe.name.clone();
                     let desc = recipe.description.clone().unwrap_or_default();
-                    let picked = (recipe.name.clone(), recipe.steps.clone());
+                    let picked = Loaded {
+                        id: Some(recipe.id),
+                        name: recipe.name.clone(),
+                        steps: steps_from_api(&recipe.steps),
+                        triggers: recipe.triggers.clone(),
+                    };
+                    let triggered = recipe.triggers.len();
                     rsx! {
                         div { class: "lib-row",
                             button {
                                 class: "lib-item lib-item-flex",
-                                onclick: move |_| pick(picked.clone()),
+                                onclick: move |_| on_select.call(picked.clone()),
                                 div { class: "lib-name", "{label}" }
                                 div { class: "lib-desc", "{desc}" }
+                                if triggered > 0 {
+                                    span { class: "pill", "⚡ {triggered} trigger(s)" }
+                                }
                             }
                             button {
                                 class: "link-btn link-danger",
@@ -682,4 +708,150 @@ async fn live_panes(client: &crate::client::ApiClient) -> Vec<(String, String)> 
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// `when` as the editor shows it: `agent_status=done, pane.tab_id=w1:t1`.
+fn when_text(when: &serde_json::Map<String, Value>) -> String {
+    when.iter()
+        .map(|(k, v)| format!("{k}={}", crate::vars::display_value(v)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Inverse of [`when_text`]: values that parse as JSON (`true`, `3`) stay
+/// typed, anything else is a string.
+fn parse_when(text: &str) -> serde_json::Map<String, Value> {
+    text.split(',')
+        .filter_map(|pair| {
+            let (k, v) = pair.split_once('=')?;
+            let v = v.trim();
+            let value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.to_string()));
+            Some((k.trim().to_string(), value))
+        })
+        .filter(|(k, _)| !k.is_empty())
+        .collect()
+}
+
+/// herdr events a trigger can name: every subscription type in the
+/// installed herdr's schema.
+fn event_names(schema: &Value) -> Vec<String> {
+    schema
+        .pointer("/schemas/request/$defs/Subscription/oneOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.pointer("/properties/type/const")?.as_str())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The recipe's triggers: herdr events that start a run of it (once saved).
+#[component]
+fn TriggerEditor(
+    triggers: Vec<RecipeTrigger>,
+    on_change: EventHandler<Vec<RecipeTrigger>>,
+) -> Element {
+    let client = use_api();
+    let names = use_resource(move || {
+        let client = client();
+        async move {
+            client
+                .herdr_schema()
+                .await
+                .map(|s| event_names(&s))
+                .unwrap_or_default()
+        }
+    });
+    rsx! {
+        div { class: "card",
+            div { class: "var-group-title", "Triggers" }
+            p { class: "field-desc",
+                "Run this recipe when herdr emits an event (see the herdr Events tab). Steps read the event as "
+                code { "{{{{herdr.pane_id}}}}" }
+                " etc. Filters are "
+                code { "path=value" }
+                " pairs on the event data."
+            }
+            datalist { id: "herdr-events",
+                for n in names.read().clone().unwrap_or_default() {
+                    option { value: "{n}" }
+                }
+            }
+            for (i, t) in triggers.iter().cloned().enumerate() {
+                div { key: "{i}", class: "btn-row",
+                    input {
+                        class: "input",
+                        r#type: "text",
+                        list: "herdr-events",
+                        placeholder: "pane.agent_status_changed",
+                        value: "{t.on}",
+                        oninput: {
+                            let triggers = triggers.clone();
+                            move |e: FormEvent| {
+                                let mut next = triggers.clone();
+                                next[i].on = e.value();
+                                on_change.call(next);
+                            }
+                        },
+                    }
+                    input {
+                        class: "input",
+                        r#type: "text",
+                        placeholder: "agent_status=done",
+                        value: "{when_text(&t.when)}",
+                        onchange: {
+                            let triggers = triggers.clone();
+                            move |e: FormEvent| {
+                                let mut next = triggers.clone();
+                                next[i].when = parse_when(&e.value());
+                                on_change.call(next);
+                            }
+                        },
+                    }
+                    button {
+                        class: "link-btn link-danger",
+                        onclick: {
+                            let triggers = triggers.clone();
+                            move |_| {
+                                let mut next = triggers.clone();
+                                next.remove(i);
+                                on_change.call(next);
+                            }
+                        },
+                        "✕"
+                    }
+                }
+            }
+            button {
+                class: "btn",
+                onclick: {
+                    let triggers = triggers.clone();
+                    move |_| {
+                        let mut next = triggers.clone();
+                        next.push(RecipeTrigger {
+                            on: "pane.agent_status_changed".into(),
+                            when: serde_json::Map::new(),
+                        });
+                        on_change.call(next);
+                    }
+                },
+                "+ Add Trigger"
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn when_round_trips_through_text() {
+        let when = parse_when("agent_status=done, pane.tab_id = w1:t1, focused=true");
+        assert_eq!(when["agent_status"], "done");
+        assert_eq!(when["pane.tab_id"], "w1:t1");
+        assert_eq!(when["focused"], true);
+        assert_eq!(parse_when(&when_text(&when)), when);
+        assert!(parse_when("").is_empty());
+    }
 }

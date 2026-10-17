@@ -485,6 +485,7 @@ pub fn instantiate(
         updated_at: now,
         is_template: false,
         category: Some(template.category.clone()),
+        triggers: Vec::new(),
     })
 }
 

@@ -937,6 +937,7 @@ async fn builder_save(app: &mut App) {
             steps,
             variables: Default::default(),
             category: None,
+            triggers: Vec::new(),
         };
         http.create_recipe(&req).await
     };

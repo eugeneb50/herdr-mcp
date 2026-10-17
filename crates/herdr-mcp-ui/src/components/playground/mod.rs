@@ -1,5 +1,6 @@
 //! Playground: tool runner + recipe builder tabs. Port of `Playground`.
 
+pub mod events;
 pub mod forms;
 pub mod herdr_api;
 pub mod recipes;
@@ -7,15 +8,15 @@ pub mod runner;
 
 use dioxus::prelude::*;
 
+use events::HerdrEvents;
 use herdr_api::HerdrApi;
-use recipes::{RecipeBuilder, RecipeLibrary, Step};
+use recipes::{Loaded, RecipeBuilder, RecipeLibrary};
 use runner::ToolRunner;
 
 #[component]
 pub fn Playground() -> Element {
     let mut tab: Signal<&str> = use_signal(|| "runner");
-    let mut current_name: Signal<String> = use_signal(String::new);
-    let mut current_steps: Signal<Vec<Step>> = use_signal(Vec::new);
+    let mut current: Signal<Loaded> = use_signal(Loaded::default);
     let mut refresh_key: Signal<u32> = use_signal(|| 0);
     // Bumped on every library pick: the builder is re-created from the pick.
     let mut loads: Signal<u32> = use_signal(|| 0);
@@ -44,19 +45,25 @@ pub fn Playground() -> Element {
                 onclick: move |_| tab.set("builder"),
                 "Recipe Builder"
             }
+            button {
+                class: if *tab.read() == "events" { "tab tab-active" } else { "tab" },
+                onclick: move |_| tab.set("events"),
+                "herdr Events"
+            }
         }
         if *tab.read() == "runner" {
             ToolRunner {}
         } else if *tab.read() == "herdr" {
             HerdrApi {}
+        } else if *tab.read() == "events" {
+            HerdrEvents {}
         } else {
             div { class: "builder-grid",
                 div {
                     RecipeLibrary {
                         refresh_key: *refresh_key.read(),
-                        on_select: move |(name, steps): (String, Vec<Step>)| {
-                            current_name.set(name);
-                            current_steps.set(steps);
+                        on_select: move |loaded: Loaded| {
+                            current.set(loaded);
                             loads += 1;
                         },
                     }
@@ -67,8 +74,7 @@ pub fn Playground() -> Element {
                     for load in std::iter::once(*loads.read()) {
                         RecipeBuilder {
                             key: "{load}",
-                            initial_name: current_name.read().clone(),
-                            initial_steps: current_steps.read().clone(),
+                            initial: current.read().clone(),
                             on_saved: move |_| refresh_key += 1,
                         }
                     }

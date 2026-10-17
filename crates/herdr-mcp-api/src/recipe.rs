@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+use crate::RecipeTrigger;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recipe {
     pub id: Uuid,
@@ -16,6 +18,9 @@ pub struct Recipe {
     pub updated_at: DateTime<Utc>,
     pub is_template: bool,
     pub category: Option<String>,
+    /// herdr events that start a run of this recipe.
+    #[serde(default)]
+    pub triggers: Vec<RecipeTrigger>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -68,6 +73,8 @@ pub struct CreateRecipeRequest {
     pub variables: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub category: Option<String>,
+    #[serde(default)]
+    pub triggers: Vec<RecipeTrigger>,
 }
 
 /// `PUT /api/recipes/{id}` body — every field optional (partial update).
@@ -77,4 +84,5 @@ pub struct UpdateRecipeRequest {
     pub description: Option<String>,
     pub steps: Option<Vec<RecipeStep>>,
     pub variables: Option<HashMap<String, serde_json::Value>>,
+    pub triggers: Option<Vec<RecipeTrigger>>,
 }
