@@ -12,7 +12,6 @@ futures-util = { version = "0.3", default-features = false }
 tower-http = { workspace = true, features = ["fs"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
@@ -21,12 +20,10 @@ cron = { workspace = true }
 dashmap = { workspace = true }
 regex = { workspace = true }
 toml = { workspace = true }
-lazy_static = { workspace = true }
 
 herdr-mcp-trim = { path = "../herdr-mcp-trim" }
 herdr-mcp-api = { path = "../herdr-mcp-api" }
 herdr-mcp-core = { path = "../herdr-mcp-core" }
-herdr-mcp-proxy = { path = "../herdr-mcp-proxy" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

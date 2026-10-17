@@ -1,6 +1,6 @@
 //! Shared colour palette + style helpers for the herdr-mcp TUI.
 //!
-//! Mirrors the emerald/neutral palette from the legacy web UI and the
+//! Emerald/neutral palette, with the
 //! `panel_block` / `detail_line` patterns borrowed from zerocode's
 //! `theme.rs` (bordered panels + label/value rows).
 
@@ -17,7 +17,6 @@ pub const MUTED: Color = Color::Rgb(163, 163, 163);
 /// Amber for warnings.
 pub const AMBER: Color = Color::Rgb(245, 158, 11);
 /// Red for errors.
-pub const RED: Color = Color::Rgb(239, 68, 68);
 /// Selection background (slate).
 pub const SELECT_BG: Color = Color::Rgb(30, 41, 59);
 
@@ -43,10 +42,6 @@ pub fn body_style() -> Style {
 
 pub fn warn_style() -> Style {
     Style::default().fg(AMBER)
-}
-
-pub fn error_style() -> Style {
-    Style::default().fg(RED)
 }
 
 pub fn selected_style() -> Style {

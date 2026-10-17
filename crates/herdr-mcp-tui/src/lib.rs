@@ -13,7 +13,6 @@
 //! Entry point: [`run`].
 
 pub mod http;
-pub mod nav;
 pub mod tabs;
 pub mod theme;
 
@@ -64,7 +63,7 @@ use herdr_mcp_api::{
 };
 use theme::{accent_style, dim_style, muted_style, title_style};
 
-/// Available tabs, mirroring the legacy web app routes.
+/// Available tabs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
     Overview,
@@ -72,17 +71,15 @@ pub enum Tab {
     Trim,
     Variables,
     Settings,
-    Proxy,
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [
+    const ALL: [Tab; 5] = [
         Tab::Overview,
         Tab::Playground,
         Tab::Trim,
         Tab::Variables,
         Tab::Settings,
-        Tab::Proxy,
     ];
 
     fn label(self) -> &'static str {
@@ -92,7 +89,6 @@ impl Tab {
             Tab::Trim => "Trim",
             Tab::Variables => "Variables",
             Tab::Settings => "Settings",
-            Tab::Proxy => "Proxy",
         }
     }
 
@@ -103,7 +99,6 @@ impl Tab {
             Tab::Trim => "3",
             Tab::Variables => "4",
             Tab::Settings => "5",
-            Tab::Proxy => "6",
         }
     }
 }
@@ -284,8 +279,6 @@ pub struct App {
     pub variables_state: VariablesState,
     /// settings sub-state
     pub settings: SettingsState,
-    /// proxy sub-state
-    pub proxy: ProxyState,
     /// whether the HTTP bridge is currently reachable
     pub bridge_connected: bool,
     /// layout hit-areas captured during draw for mouse handling
@@ -500,34 +493,6 @@ pub struct ClipboardSettingsState {
     pub save_msg: String,
 }
 
-/// Proxy tab state.
-pub struct ProxyState {
-    /// Last diagnose response from the bridge.
-    pub diagnose: Option<Value>,
-    /// Last startup response (bind addr, ca fingerprint).
-    pub startup_result: Option<Value>,
-    /// Selected pane index in the active policies list.
-    pub pane_index: usize,
-    /// Selected stage index in the policy editor.
-    pub stage_index: usize,
-    /// Editing mode for the policy editor.
-    pub editing: bool,
-    /// Local copy of trim_outbound for the selected pane policy.
-    pub trim_outbound: bool,
-    /// Local copy of trim_inbound for the selected pane policy.
-    pub trim_inbound: bool,
-    /// Local copy of stages for the selected pane policy.
-    pub stages: Vec<String>,
-    /// Stage picker overlay open.
-    pub stage_picker_open: bool,
-    /// Selected item in the stage picker.
-    pub stage_picker_index: usize,
-    /// Last operation result message.
-    pub policy_msg: String,
-    /// Which frame has keyboard focus (0=diagnose, 1=pane list, 2=editor).
-    pub focused_frame: usize,
-}
-
 /// Clipboard backend presets offered in the Settings radio.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BackendPreset {
@@ -690,20 +655,6 @@ impl App {
                     test_msg: String::new(),
                     save_msg: String::new(),
                 },
-                focused_frame: 0,
-            },
-            proxy: ProxyState {
-                diagnose: None,
-                startup_result: None,
-                pane_index: 0,
-                stage_index: 0,
-                editing: false,
-                trim_outbound: false,
-                trim_inbound: false,
-                stages: Vec::new(),
-                stage_picker_open: false,
-                stage_picker_index: 0,
-                policy_msg: String::new(),
                 focused_frame: 0,
             },
             bridge_connected: false,
@@ -1181,13 +1132,6 @@ impl App {
             {
                 Some(self.settings.clipboard.paste_cmd.clone())
             }
-            Tab::Proxy if self.proxy.focused_frame == 1 => {
-                let pane = self.herdr.panes.get(self.proxy.pane_index)?;
-                Some(pane.pane_id.clone())
-            }
-            Tab::Proxy if self.proxy.focused_frame == 2 => {
-                self.proxy.stages.get(self.proxy.stage_index).cloned()
-            }
             _ => None,
         }
     }
@@ -1628,10 +1572,6 @@ fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         tabs::settings::render(frame, area, app);
         return;
     }
-    if app.tab == Tab::Proxy {
-        tabs::proxy::render(frame, area, app);
-        return;
-    }
     match app.tab {
         Tab::Overview => tabs::overview::render(frame, area, app),
         Tab::Playground => tabs::playground::render(frame, area, app),
@@ -1643,7 +1583,7 @@ fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
 /// Footer with status message + keybindings.
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let bindings = "Ctrl+1-6:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
+    let bindings = "Ctrl+1-5:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
     let mut line = Line::from(vec![Span::styled(bindings, dim_style())]);
     if !app.status_msg.is_empty() {
         line = Line::from(vec![
@@ -1672,7 +1612,6 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
         Tab::Variables => tabs::variables::handle_key(app, code, mods).await?,
         Tab::Settings => tabs::settings::handle_key(app, code, mods).await?,
         Tab::Trim => tabs::trim::handle_key(app, code, mods).await?,
-        Tab::Proxy => tabs::proxy::handle_key(app, code, mods).await?,
     };
     if consumed {
         return Ok(());
@@ -1707,7 +1646,7 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
             app.refresh().await;
             app.status_msg = "refreshed".to_string();
         }
-        KeyCode::Char(c @ '1'..='6') if mods.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(c @ '1'..='5') if mods.contains(KeyModifiers::CONTROL) => {
             let idx = (c as u8 - b'1') as usize;
             if let Some(t) = Tab::ALL.get(idx).copied() {
                 app.tab = t;
@@ -1957,18 +1896,6 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                     && app.trim.stage_index + 1 < app.trim.stages.len() =>
             {
                 app.trim.stage_index += 1;
-            }
-            Tab::Proxy
-                if app.proxy.focused_frame == 1
-                    && app.proxy.pane_index + 1 < app.herdr.panes.len() =>
-            {
-                app.proxy.pane_index += 1;
-            }
-            Tab::Proxy
-                if app.proxy.focused_frame == 2
-                    && app.proxy.stage_index + 1 < app.proxy.stages.len() =>
-            {
-                app.proxy.stage_index += 1;
             }
             _ => {}
         },

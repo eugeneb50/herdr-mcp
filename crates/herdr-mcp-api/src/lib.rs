@@ -1,8 +1,7 @@
 //! herdr-mcp-api — the wire contract of the herdr-mcp HTTP bridge (`/api/*`).
 //!
 //! Single source of truth for every type that crosses the bridge. The server
-//! (`herdr-mcp-server`), trim (`herdr-mcp-trim`) and proxy (`herdr-mcp-proxy`)
-//! crates re-export these instead of defining their own; the web UI and the
+//! (`herdr-mcp-server`) and trim (`herdr-mcp-trim`) crates re-export these instead of defining their own; the web UI and the
 //! TUI talk to the bridge through [`ApiClient`].
 //!
 //! Leaf crate: compiles for native and `wasm32-unknown-unknown`.
@@ -17,7 +16,7 @@ pub mod run;
 pub mod trim;
 pub mod variables;
 
-pub use agents::{AgentHandle, AgentsResponse, ProxyPolicy, TrimDirection, TrimPolicy};
+pub use agents::{AgentHandle, AgentsResponse, TrimDirection, TrimPolicy};
 pub use client::{ApiClient, ApiError, schema_type, tool_is_error, tool_payload, tool_text};
 pub use config::{ClipboardConfig, ConfigResponse};
 pub use herdr::{HerdrEvent, RecipeTrigger};

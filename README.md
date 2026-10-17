@@ -1,8 +1,8 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.1.0--dev-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-400%20passing-22c55e)](https://github.com/herdr-mcp)
-[![Crates](https://img.shields.io/badge/workspace-8%20crates-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-337%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Crates](https://img.shields.io/badge/workspace-7%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
 
@@ -21,7 +21,7 @@ MCP (Model Context Protocol) server written in Rust that exposes [herdr](https:/
   - [HTTP API](#http-api)
   - [Recipe format](#recipe-format)
   - [Environment](#environment)
-- [Tools (58)](#tools-58)
+- [Tools (54)](#tools-54)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
@@ -56,7 +56,7 @@ herdr-trim folder-key    # per-folder PFC1 key management
 ## Features
 
 - **MCP mode** — plug into any MCP client (Claude Desktop, Cursor, Claude Code, Continue, OpenCode) to control herdr workspaces, tabs, panes and agents
-- **58 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, message-trim, recipe templates, scheduler, folder keys, clipboard and proxy; `herdr_api` reaches every method the installed herdr exposes
+- **54 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, message-trim, recipe templates, scheduler, folder keys and clipboard; `herdr_api` reaches every method the installed herdr exposes
 - **herdr plugin** — `herdr-mcp plugin link` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
 - **Recipe engine** — chain tool calls with variable interpolation (`{{ stepId.result.path }}`); runs are tracked (`/api/runs`) with per-step events, pause/resume/cancel
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
@@ -126,10 +126,9 @@ own schema.
 herdr-mcp/
 ├── crates/
 │   ├── herdr-mcp-api/       # HTTP wire contract: every /api/* type + typed ApiClient (native + wasm)
-│   ├── herdr-mcp-core/      # Config system (TOML + env + CLI), error types
+│   ├── herdr-mcp-core/      # Config system (TOML + env + CLI)
 │   ├── herdr-mcp-trim/      # Message-trim pipeline (caveman, pfc1, policies, stats, folder keys)
 │   ├── herdr-mcp-server/    # MCP server, tools, HTTP bridge, run engine, triggers, scheduler, event subscriber
-│   ├── herdr-mcp-proxy/     # HTTPS intercepting proxy with per-pane trim policies
 │   ├── herdr-mcp-tui/       # TUI dashboard (bridge client)
 │   ├── herdr-mcp-ui/        # Dioxus web UI (served by the HTTP bridge)
 │   └── herdr-mcp-cli/       # Binaries: herdr-mcp (serve, plugin) + herdr-trim (trim, dashboard, folder-key)
@@ -195,7 +194,6 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release
 | `--http-only` | Skip MCP stdio, HTTP only |
 | `--data-dir <path>` | Data directory (default: `./data`) |
 | `--herdr-socket <path>` | herdr daemon socket path |
-| `--proxy-port <port>` | Auto-start the HTTPS intercepting proxy on this port |
 
 ### Dashboard flags (`herdr-trim dashboard`)
 
@@ -216,7 +214,7 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release
 ### Configuration
 
 Settings come from, lowest to highest: defaults, the config file
-(`$HERDR_MCP_CONFIG`, else `~/.config/herdr-mcp/config.toml`), a `herdmcp.toml`
+(`$HERDR_MCP_CONFIG`, else `./herdr-mcp.toml`, else `~/.config/herdr-mcp/config.toml`), a `herdmcp.toml`
 `[persistent]` section in the working directory, environment variables, CLI flags.
 
 ```toml
@@ -322,7 +320,7 @@ All endpoints return JSON unless noted. Request/response types live in
 | `GET` | `/*` | Web playground (Dioxus bundle, SPA fallback to `index.html`) |
 | `GET` | `/api/health` | Health check |
 | `GET` / `PUT` | `/api/config`, `/api/config/clipboard` | Resolved config / set clipboard commands |
-| `GET` | `/api/tools` | All 58 tools with JSON schemas and categories |
+| `GET` | `/api/tools` | All 54 tools with JSON schemas and categories |
 | `POST` | `/api/tools/{name}` | Call a tool; body is its parameter object |
 | `GET` | `/api/agents?workspace_id=` | Live panes from the agent registry |
 | `GET` | `/api/workspaces` | Workspaces via herdr |
@@ -382,19 +380,13 @@ watched and `idle` when it was.
 | `HERDR_SOCKET_PATH` | see below | herdr daemon socket (herdr sets it in panes) |
 | `HERDR_SESSION` | — | Named herdr session → `~/.config/herdr/sessions/<name>/herdr.sock` |
 | `RUST_LOG` | `herdr_mcp=info` | Tracing filter |
-| `HERDR_MCP_CONFIG` | `~/.config/herdr-mcp/config.toml` | Config file path |
+| `HERDR_MCP_CONFIG` | `./herdr-mcp.toml`, else `~/.config/herdr-mcp/config.toml` | Config file path |
 | `HERDR_MCP_DATA_DIR` | `./data` | Data directory |
 | `HERDR_MCP_HTTP_PORT` | 7676 | HTTP bridge port |
 | `HERDR_MCP_HTTP_ONLY` | — | Set to disable MCP stdio |
 | `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
 | `HERDR_MCP_WEB_DIR` | in-repo `dx bundle` output | Directory of the built web UI |
-| `HERDR_MCP_TOOL_TIMEOUT` | — | Tool call timeout in seconds |
-| `HERDR_MCP_MAX_CONCURRENT` | — | Max concurrent tool calls |
-| `HERDR_MCP_HERDR_TIMEOUT` | — | herdr CLI timeout in seconds |
 | `HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` | detected | Clipboard commands |
-| `HERDR_MCP_LOG_LEVEL` / `_FORMAT` | — | Log level / format (`full`, `compact`, `json`) |
-| `HERDR_MCP_PFC1_MAX_SYMBOLS` | 85 | Max PFC1 Cherokee symbols |
-| `HERDR_MCP_PFC1_ENABLE_PHRASES` | — | Enable multi-word PFC1 phrases |
 
 Socket resolution: `--herdr-socket` > `HERDR_SOCKET_PATH` > config file >
 `HERDR_SESSION` > `~/.config/herdr/herdr.sock`. The resolved socket is passed to
@@ -402,9 +394,9 @@ every `herdr` child process, so CLI calls and the event subscriber hit the same 
 
 ---
 
-## Tools (58)
+## Tools (54)
 
-Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-58-tools-total).
+Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-54-tools-total).
 
 ### Discovery (7)
 | Tool | Description |
@@ -455,7 +447,7 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `agent_wait` | Wait for an agent by role/pane |
 | `agent_list` | List registry agents |
 
-### Variables (2) / Trim (10) / Templates (3) / Scheduler (4) / Folder key (4) / Clipboard (2) / Proxy (4)
+### Variables (2) / Trim (10) / Templates (3) / Scheduler (4) / Folder key (4) / Clipboard (2)
 | Tool | Description |
 |------|-------------|
 | `var_get` / `var_set` | Get / set a workspace-scoped variable |
@@ -466,7 +458,6 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `schedule_recipe` / `list_schedules` / `delete_schedule` / `enable_schedule` | Cron recipe scheduling |
 | `build_folder_key` / `get_folder_key` / `list_folder_keys` / `decompress_with_folder_key` | Per-folder PFC1 keys |
 | `clipboard_get` / `clipboard_set` | System clipboard |
-| `proxy_startup` / `proxy_diagnose` / `proxy_policy_set` / `proxy_policy_get` | HTTPS intercepting proxy: start, health report, per-pane trim policy |
 
 **IDs are session-local** and may compact when items close; re-read them after
 structural changes. Pane-targeting tools accept `label` instead of `pane_id`.

@@ -48,34 +48,6 @@ impl PersistentConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ProxyConfig {
-    pub port: Option<u16>,
-    pub bind_addr: Option<String>,
-    pub target_hosts: Vec<String>,
-    pub ca_validity_days: u32,
-    pub audit_log: bool,
-    pub trim_outbound: bool,
-    pub trim_inbound: bool,
-    pub trim_stages: Vec<String>,
-}
-
-impl Default for ProxyConfig {
-    fn default() -> Self {
-        Self {
-            port: Some(8443),
-            bind_addr: Some("127.0.0.1".into()),
-            target_hosts: vec!["api.openai.com".into(), "api.anthropic.com".into()],
-            ca_validity_days: 3650,
-            audit_log: false,
-            trim_outbound: false,
-            trim_inbound: false,
-            trim_stages: vec!["caveman:full".into(), "pfc1".into()],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
@@ -84,30 +56,11 @@ pub struct Config {
     pub http: HttpConfig,
 
     #[serde(default)]
-    pub mcp: McpConfig,
-
-    #[serde(default)]
     pub herdr: HerdrConfig,
-
-    #[serde(default)]
-    pub trim: TrimConfig,
-
-    #[serde(default)]
-    pub proxy: ProxyConfig,
-
-    #[serde(default)]
-    pub sandbox: SandboxConfig,
-
-    #[serde(default)]
-    pub logging: LoggingConfig,
 
     /// Clipboard backend override for the `clipboard_set` / `clipboard_get` tools.
     #[serde(default)]
     pub clipboard: ClipboardConfig,
-
-    /// TUI dashboard keybinding overrides.
-    #[serde(default)]
-    pub keybindings: crate::keybindings::Keybindings,
 }
 
 /// Defined in `herdr-mcp-api` (it is also the `/api/config` wire type).
@@ -155,14 +108,8 @@ impl Default for Config {
         Self {
             data_dir: default_data_dir(),
             http: Default::default(),
-            mcp: Default::default(),
             herdr: Default::default(),
-            trim: Default::default(),
-            proxy: Default::default(),
-            sandbox: Default::default(),
-            logging: Default::default(),
             clipboard: Default::default(),
-            keybindings: Default::default(),
         }
     }
 }
@@ -204,29 +151,8 @@ impl Default for HttpConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct McpConfig {
-    pub capabilities: Vec<String>,
-    pub tool_timeout_secs: u64,
-    pub max_concurrent_tools: usize,
-    pub default_stages: Vec<String>,
-}
-
-impl Default for McpConfig {
-    fn default() -> Self {
-        Self {
-            capabilities: vec!["tools".into(), "resources".into()],
-            tool_timeout_secs: 300,
-            max_concurrent_tools: 10,
-            default_stages: vec!["caveman:full".into(), "pfc1".into()],
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct HerdrConfig {
     pub socket_path: Option<PathBuf>,
-    pub connect_timeout_secs: u64,
     pub reconnect_attempts: u32,
     pub reconnect_backoff_ms: u64,
 }
@@ -235,156 +161,8 @@ impl Default for HerdrConfig {
     fn default() -> Self {
         Self {
             socket_path: None,
-            connect_timeout_secs: 5,
             reconnect_attempts: 3,
             reconnect_backoff_ms: 500,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct TrimConfig {
-    pub default_stages: Vec<String>,
-    pub pfc1: Pfc1Config,
-    pub caveman: CavemanConfig,
-}
-
-impl Default for TrimConfig {
-    fn default() -> Self {
-        Self {
-            default_stages: vec!["caveman:full".into(), "pfc1".into()],
-            pfc1: Pfc1Config::default(),
-            caveman: CavemanConfig::default(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct Pfc1Config {
-    pub max_symbols: usize,
-    pub min_frequency: usize,
-    pub min_length: usize,
-    pub min_phrase_words: usize,
-    pub max_phrase_words: usize,
-    pub enable_phrases: bool,
-    pub seed_with_default: bool,
-    pub persist_central: bool,
-    pub learn_master: bool,
-}
-
-impl Default for Pfc1Config {
-    fn default() -> Self {
-        Self {
-            max_symbols: 80,
-            min_frequency: 2,
-            min_length: 4,
-            min_phrase_words: 2,
-            max_phrase_words: 4,
-            enable_phrases: true,
-            seed_with_default: true,
-            persist_central: false,
-            learn_master: true,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct CavemanConfig {
-    pub level: String,
-}
-
-impl Default for CavemanConfig {
-    fn default() -> Self {
-        Self {
-            level: "full".into(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct SandboxConfig {
-    pub backend: SandboxBackend,
-    pub allow_network: bool,
-    pub allow_fs_read: Vec<PathBuf>,
-    pub allow_fs_write: Vec<PathBuf>,
-    pub cpu_limit_ms: Option<u64>,
-    pub memory_limit_mb: Option<u64>,
-    pub enabled: bool,
-}
-
-impl Default for SandboxConfig {
-    fn default() -> Self {
-        Self {
-            backend: SandboxBackend::Auto,
-            allow_network: false,
-            allow_fs_read: vec![],
-            allow_fs_write: vec![],
-            cpu_limit_ms: None,
-            memory_limit_mb: None,
-            enabled: false, // Dev default: off
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum SandboxBackend {
-    #[default]
-    Auto,
-    Firejail,
-    Bubblewrap,
-    Landlock,
-    Seatbelt,
-    Docker,
-    None,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct LoggingConfig {
-    pub level: String,
-    pub format: LogFormat,
-    pub file_output: Option<PathBuf>,
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: "info".into(),
-            format: LogFormat::Text,
-            file_output: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum LogFormat {
-    #[default]
-    Text,
-    Json,
-}
-
-impl std::str::FromStr for LogFormat {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "text" => Ok(LogFormat::Text),
-            "json" => Ok(LogFormat::Json),
-            _ => Err(format!("invalid log format: {}", s)),
-        }
-    }
-}
-
-impl std::fmt::Display for LogFormat {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            LogFormat::Text => write!(f, "text"),
-            LogFormat::Json => write!(f, "json"),
         }
     }
 }
@@ -396,7 +174,7 @@ impl Config {
         let mut config = Config::default();
 
         // 1. Load from config file (project config)
-        if let Some(path) = find_config_file_impl() {
+        if let Some(path) = find_config_file() {
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("failed to read config file: {}", path.display()))?;
             let file_config: Config = toml::from_str(&content)
@@ -431,14 +209,8 @@ impl Config {
         Config {
             data_dir: other.data_dir,
             http: other.http,
-            mcp: other.mcp,
             herdr: other.herdr,
-            trim: other.trim,
-            proxy: other.proxy,
-            sandbox: other.sandbox,
-            logging: other.logging,
             clipboard: other.clipboard,
-            keybindings: other.keybindings,
         }
     }
 
@@ -477,38 +249,10 @@ impl Config {
             self.http.web_dir = Some(PathBuf::from(v));
         }
 
-        // mcp
-        if let Ok(v) = env::var("HERDR_MCP_TOOL_TIMEOUT") {
-            self.mcp.tool_timeout_secs = v.parse()?;
-        }
-        if let Ok(v) = env::var("HERDR_MCP_MAX_CONCURRENT") {
-            self.mcp.max_concurrent_tools = v.parse()?;
-        }
-
         // herdr
         if let Ok(v) = env::var("HERDR_SOCKET_PATH") {
             self.herdr.socket_path = Some(PathBuf::from(v));
         }
-        if let Ok(v) = env::var("HERDR_MCP_HERDR_TIMEOUT") {
-            self.herdr.connect_timeout_secs = v.parse()?;
-        }
-
-        // trim
-        if let Ok(v) = env::var("HERDR_MCP_PFC1_ENABLE_PHRASES") {
-            self.trim.pfc1.enable_phrases = v.parse()?;
-        }
-        if let Ok(v) = env::var("HERDR_MCP_PFC1_MAX_SYMBOLS") {
-            self.trim.pfc1.max_symbols = v.parse()?;
-        }
-
-        // logging
-        if let Ok(v) = env::var("HERDR_MCP_LOG_LEVEL") {
-            self.logging.level = v;
-        }
-        if let Ok(v) = env::var("HERDR_MCP_LOG_FORMAT") {
-            self.logging.format = v.parse().map_err(|e: String| anyhow::anyhow!(e))?;
-        }
-
         Ok(self)
     }
 
@@ -523,20 +267,8 @@ impl Config {
         if let Some(v) = cli.http_only {
             self.http.http_only = v;
         }
-        if let Some(v) = cli.http_bind {
-            self.http.bind_addr = Some(v);
-        }
         if let Some(v) = cli.herdr_socket {
             self.herdr.socket_path = Some(v);
-        }
-        if let Some(v) = cli.log_level {
-            self.logging.level = v;
-        }
-        if !cli.trim_stages.is_empty() {
-            self.trim.default_stages = cli.trim_stages;
-        }
-        if let Some(v) = cli.proxy_port {
-            self.proxy.port = Some(v);
         }
         self
     }
@@ -547,33 +279,6 @@ impl Config {
             && !parent.exists()
         {
             anyhow::bail!("data_dir parent does not exist: {}", parent.display());
-        }
-
-        if self.mcp.tool_timeout_secs == 0 {
-            anyhow::bail!("mcp.tool_timeout_secs must be > 0");
-        }
-        if self.mcp.max_concurrent_tools == 0 {
-            anyhow::bail!("mcp.max_concurrent_tools must be > 0");
-        }
-
-        if self.trim.pfc1.min_phrase_words == 0 {
-            anyhow::bail!("trim.pfc1.min_phrase_words must be > 0");
-        }
-        if self.trim.pfc1.max_phrase_words < self.trim.pfc1.min_phrase_words {
-            anyhow::bail!("trim.pfc1.max_phrase_words must be >= min_phrase_words");
-        }
-        if self.trim.pfc1.max_symbols > 85 {
-            anyhow::bail!("trim.pfc1.max_symbols cannot exceed 85 (Cherokee syllabary size)");
-        }
-
-        match self.logging.level.as_str() {
-            "trace" | "debug" | "info" | "warn" | "error" => {}
-            _ => anyhow::bail!("invalid log level: {}", self.logging.level),
-        }
-
-        match self.logging.format.to_string().as_str() {
-            "text" | "json" => {}
-            _ => anyhow::bail!("invalid log format: {}", self.logging.format),
         }
 
         Ok(())
@@ -603,11 +308,6 @@ impl Config {
             PathBuf::from(home).join(".config/herdr/herdr.sock")
         })
     }
-
-    /// Get the effective trim stages
-    pub fn trim_stages(&self) -> &[String] {
-        &self.trim.default_stages
-    }
 }
 
 /// CLI overrides passed from main.rs after parsing
@@ -616,59 +316,12 @@ pub struct CliOverrides {
     pub data_dir: Option<PathBuf>,
     pub http_port: Option<u16>,
     pub http_only: Option<bool>,
-    pub http_bind: Option<String>,
     pub herdr_socket: Option<PathBuf>,
-    pub log_level: Option<String>,
-    pub trim_stages: Vec<String>,
-    /// Auto-start the HTTPS intercepting proxy on this port when set.
-    pub proxy_port: Option<u16>,
-}
-
-/// Generate a default config file with comments for user reference
-pub fn generate_default_config() -> String {
-    let config = Config::default();
-    let mut out = String::new();
-    out.push_str("# herdr-mcp configuration\n");
-    out.push_str("# See https://github.com/yourorg/herdr-mcp for docs\n\n");
-    out.push_str(&toml::to_string_pretty(&config).unwrap());
-    out.push_str(
-        "\n# Clipboard backend override for the clipboard_set / clipboard_get tools.\n\
-         # When both are set they override platform auto-detection (e.g. force\n\
-         # xsel instead of wl-copy on Linux). HERDR_MCP_CLIPBOARD_COPY / _PASTE\n\
-         # env vars still take precedence over this.\n\
-         # [clipboard]\n\
-         # copy-command = \"xsel -i\"\n\
-         # paste-command = \"xsel\"\n",
-    );
-    out.push_str(
-        "\n# TUI dashboard keybinding overrides. Uncomment and edit to customize.\n\
-         # Format: \"ctrl-q\", \"up\", \"page_up\", \"shift-tab\", etc.\n\
-         # [keybindings]\n\
-         # quit = \"ctrl-q\"\n\
-         # refresh = \"ctrl-r\"\n\
-         # copy = \"ctrl-c\"\n\
-         # paste = \"ctrl-v\"\n\
-         # cut = \"ctrl-x\"\n\
-         # nav-up = \"up\"\n\
-         # nav-down = \"down\"\n\
-         # nav-home = \"home\"\n\
-         # nav-end = \"end\"\n\
-         # nav-page-up = \"page_up\"\n\
-         # nav-page-down = \"page_down\"\n\
-         # frame-next = \"tab\"\n\
-         # frame-prev = \"backtab\"\n",
-    );
-    out
 }
 
 /// Returns the path to the config file that `Config::load` would read,
 /// or `None` if no file was found (i.e. defaults would be used).
 pub fn find_config_file() -> Option<PathBuf> {
-    find_config_file_impl()
-}
-
-/// Internal implementation split so `Config::load` can call it without recursion.
-fn find_config_file_impl() -> Option<PathBuf> {
     // 1. Explicit path from env
     if let Ok(p) = env::var("HERDR_MCP_CONFIG") {
         let p = PathBuf::from(p);
@@ -691,22 +344,7 @@ fn find_config_file_impl() -> Option<PathBuf> {
         }
     }
 
-    // 4. Home dir legacy
-    if let Ok(home) = env::var("HOME") {
-        let legacy = PathBuf::from(home).join(".herdr-mcp.toml");
-        if legacy.exists() {
-            return Some(legacy);
-        }
-    }
-
     None
-}
-
-/// Resolve the config file path the loader would use (or `None` if no file
-/// exists on any search path). Exposed so the TUI Settings tab can show the
-/// path and Save can write to the correct file.
-pub fn find_config_file_path() -> Option<PathBuf> {
-    find_config_file()
 }
 
 /// Resolve the config file path the loader *would* read, or — if none exists —
@@ -777,11 +415,6 @@ mod tests {
     fn test_default_config_validates() {
         let config = Config::default();
         config.validate().unwrap();
-    }
-
-    #[test]
-    fn test_config_file_discovery() {
-        let _ = find_config_file();
     }
 
     #[test]
@@ -858,12 +491,7 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.http.port, Some(7676));
         assert_eq!(c.http.bind_addr.as_deref(), Some("127.0.0.1"));
-        assert_eq!(c.mcp.tool_timeout_secs, 300);
-        assert_eq!(c.mcp.max_concurrent_tools, 10);
-        assert_eq!(c.trim.pfc1.max_symbols, 80);
-        assert_eq!(c.logging.level, "info");
-        assert!(!c.sandbox.enabled);
-        assert_eq!(c.trim.default_stages, vec!["caveman:full", "pfc1"]);
+        assert_eq!(c.herdr.reconnect_attempts, 3);
     }
 
     #[test]
@@ -873,11 +501,9 @@ mod tests {
         let restored: Config = toml::from_str(&toml_str).unwrap();
         assert_eq!(original.http.port, restored.http.port);
         assert_eq!(
-            original.mcp.tool_timeout_secs,
-            restored.mcp.tool_timeout_secs
+            original.herdr.reconnect_attempts,
+            restored.herdr.reconnect_attempts
         );
-        assert_eq!(original.trim.default_stages, restored.trim.default_stages);
-        assert_eq!(original.logging.level, restored.logging.level);
     }
 
     #[test]
@@ -909,16 +535,8 @@ mod tests {
                 http_only: true,
                 ..Default::default()
             },
-            mcp: McpConfig {
-                tool_timeout_secs: 1,
-                ..Default::default()
-            },
             herdr: HerdrConfig {
                 socket_path: Some(PathBuf::from("/sock")),
-                ..Default::default()
-            },
-            logging: LoggingConfig {
-                level: "debug".into(),
                 ..Default::default()
             },
             ..Default::default()
@@ -927,9 +545,7 @@ mod tests {
         assert_eq!(merged.data_dir, PathBuf::from("/data"));
         assert_eq!(merged.http.port, Some(9999));
         assert!(merged.http.http_only);
-        assert_eq!(merged.mcp.tool_timeout_secs, 1);
         assert_eq!(merged.herdr.socket_path, Some(PathBuf::from("/sock")));
-        assert_eq!(merged.logging.level, "debug");
     }
 
     #[test]
@@ -943,7 +559,7 @@ mod tests {
         assert_eq!(merged.data_dir, PathBuf::from("./data"));
         assert_eq!(merged.http.port, Some(1234));
         // untouched field keeps its default
-        assert_eq!(merged.logging.level, "info");
+        assert_eq!(merged.herdr.reconnect_attempts, 3);
     }
 
     #[test]
@@ -955,7 +571,7 @@ mod tests {
         let mut c = Config::default();
         c = c.apply_cli_overrides(cli);
         assert_eq!(c.http.port, Some(8080));
-        assert_eq!(c.logging.level, "info");
+        assert!(!c.http.http_only);
     }
 
     #[test]
@@ -996,124 +612,13 @@ mod tests {
             data_dir: Some(PathBuf::from("/cli/data")),
             http_port: Some(9000),
             http_only: Some(true),
-            http_bind: Some("0.0.0.0".into()),
             herdr_socket: Some(PathBuf::from("/cli/sock")),
-            log_level: Some("warn".into()),
-            trim_stages: vec!["pfc1".into()],
-            proxy_port: Some(8443),
         };
         let c = Config::default().apply_cli_overrides(cli);
         assert_eq!(c.data_dir, PathBuf::from("/cli/data"));
         assert_eq!(c.http.port, Some(9000));
         assert!(c.http.http_only);
-        assert_eq!(c.http.bind_addr.as_deref(), Some("0.0.0.0"));
         assert_eq!(c.herdr.socket_path, Some(PathBuf::from("/cli/sock")));
-        assert_eq!(c.logging.level, "warn");
-        assert_eq!(c.trim.default_stages, vec!["pfc1"]);
-        assert_eq!(c.proxy.port, Some(8443));
-    }
-
-    #[test]
-    fn test_validate_accepts_port_zero_for_ephemeral() {
-        // Port 0 means "let the OS pick"; we accept it for http and proxy.
-        let mut c = Config::default();
-        c.http.port = Some(0);
-        c.proxy.port = Some(0);
-        c.validate().expect("port 0 should be valid (ephemeral)");
-    }
-
-    #[test]
-    fn test_validate_rejects_tool_timeout_zero() {
-        let mut c = Config::default();
-        c.mcp.tool_timeout_secs = 0;
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_max_concurrent_zero() {
-        let mut c = Config::default();
-        c.mcp.max_concurrent_tools = 0;
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_max_symbols_over_85() {
-        let mut c = Config::default();
-        c.trim.pfc1.max_symbols = 86;
-        assert!(c.validate().is_err());
-        assert!(c.validate().unwrap_err().to_string().contains("85"));
-    }
-
-    #[test]
-    fn test_validate_rejects_max_symbols_85_ok() {
-        let mut c = Config::default();
-        c.trim.pfc1.max_symbols = 85;
-        assert!(c.validate().is_ok());
-    }
-
-    #[test]
-    fn test_validate_rejects_invalid_log_level() {
-        let mut c = Config::default();
-        c.logging.level = "verbose".into();
-        assert!(c.validate().is_err());
-        assert!(
-            c.validate()
-                .unwrap_err()
-                .to_string()
-                .contains("invalid log level")
-        );
-    }
-
-    #[test]
-    fn test_validate_accepts_all_log_levels() {
-        for lvl in ["trace", "debug", "info", "warn", "error"] {
-            let mut c = Config::default();
-            c.logging.level = lvl.into();
-            assert!(c.validate().is_ok(), "{lvl} should be valid");
-        }
-    }
-
-    #[test]
-    fn test_validate_rejects_max_phrase_lt_min_phrase() {
-        let mut c = Config::default();
-        c.trim.pfc1.min_phrase_words = 4;
-        c.trim.pfc1.max_phrase_words = 2;
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_validate_rejects_min_phrase_zero() {
-        let mut c = Config::default();
-        c.trim.pfc1.min_phrase_words = 0;
-        assert!(c.validate().is_err());
-    }
-
-    #[test]
-    fn test_log_format_from_str() {
-        use std::str::FromStr;
-        assert_eq!(LogFormat::from_str("text"), Ok(LogFormat::Text));
-        assert_eq!(LogFormat::from_str("json"), Ok(LogFormat::Json));
-        assert!(LogFormat::from_str("xml").is_err());
-        assert_eq!(LogFormat::from_str("TEXT"), Ok(LogFormat::Text));
-    }
-
-    #[test]
-    fn test_log_format_display() {
-        assert_eq!(LogFormat::Text.to_string(), "text");
-        assert_eq!(LogFormat::Json.to_string(), "json");
-    }
-
-    #[test]
-    fn test_generate_default_config() {
-        let out = generate_default_config();
-        assert!(out.contains("# herdr-mcp configuration"));
-        assert!(out.contains("http"));
-    }
-
-    #[test]
-    fn test_trim_stages_returns_configured() {
-        let c = Config::default();
-        assert_eq!(c.trim_stages(), c.trim.default_stages.as_slice());
     }
 
     #[test]
