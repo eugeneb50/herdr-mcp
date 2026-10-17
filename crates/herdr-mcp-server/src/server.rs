@@ -1987,11 +1987,30 @@ impl HerdrMcpServer {
         &self,
         Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
     ) -> Result<CallToolResult, McpError> {
-        let mut cli = vec!["pane", "split"];
+        // `pane split` takes a pane, not a workspace: split the focused one.
+        let mut list = vec!["pane", "list"];
         if let Some(ref w) = workspace_id {
-            cli.extend(["--workspace", w]);
+            list.extend(["--workspace", w]);
         }
-        let raw = herdr_cli(&cli).await?;
+        let panes: serde_json::Value =
+            serde_json::from_str(&herdr_cli(&list).await?).unwrap_or_default();
+        let target = panes["result"]["panes"]
+            .as_array()
+            .and_then(|p| dashboard_split_target(p, workspace_id.is_some()))
+            .ok_or_else(|| McpError {
+                code: rmcp::model::ErrorCode(-32000),
+                message: "trim: no pane to split for the dashboard".into(),
+                data: None,
+            })?;
+        let raw = herdr_cli(&[
+            "pane",
+            "split",
+            &target,
+            "--direction",
+            "right",
+            "--no-focus",
+        ])
+        .await?;
         let value: serde_json::Value =
             serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
         let pane_id = extract_pane_id(&value).unwrap_or_default();
@@ -2003,9 +2022,16 @@ impl HerdrMcpServer {
             });
         }
         // The dashboard lives in the `herdr-trim` binary (`herdr-mcp` is
-        // serve-only). The pane runs a shell, so single-quote the path.
-        let data_dir = self.data_dir.display().to_string().replace('\'', r"'\''");
-        let cmd = format!("herdr-trim dashboard --data-dir '{data_dir}'");
+        // serve-only): the sibling of this binary, as `plugin link` finds it,
+        // else whatever PATH has. The pane runs a shell, so single-quote.
+        let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+        let trim = std::env::current_exe()
+            .ok()
+            .map(|exe| exe.with_file_name("herdr-trim"))
+            .filter(|p| p.exists())
+            .map_or_else(|| "herdr-trim".into(), |p| quote(&p.display().to_string()));
+        let data_dir = quote(&self.data_dir.display().to_string());
+        let cmd = format!("{trim} dashboard --data-dir {data_dir}");
         let _ = herdr_cli(&["pane", "send-text", &pane_id, &cmd]).await;
         let _ = herdr_cli(&["pane", "send-keys", &pane_id, "Enter"]).await;
         Ok(CallToolResult::success(vec![
@@ -2401,6 +2427,14 @@ pub(crate) fn extract_pane_id(value: &serde_json::Value) -> Option<String> {
 
 pub(crate) fn as_strs(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
+}
+
+/// Pane `trim_dashboard_open` splits: the focused pane, or — when the list
+/// is one workspace's panes and none of them has focus — its first pane.
+fn dashboard_split_target(panes: &[serde_json::Value], one_workspace: bool) -> Option<String> {
+    let focused = panes.iter().find(|p| p["focused"].as_bool() == Some(true));
+    let pane = focused.or(if one_workspace { panes.first() } else { None })?;
+    pane["pane_id"].as_str().map(String::from)
 }
 
 /// Submit `text` (+ Enter) to an agent: `agent prompt` (0.9 has no `agent send`).
@@ -4319,6 +4353,21 @@ mod tests {
         // Another run's marker doesn't count.
         assert_eq!(exec_result("HERDR_DONE_zzz:0\n", "abc123"), None);
         assert_eq!(tail("a\nb\nc", 2), "b\nc");
+    }
+
+    #[test]
+    fn dashboard_splits_the_focused_pane() {
+        let p = |id: &str, focused: bool| serde_json::json!({"pane_id": id, "focused": focused});
+        let panes = [p("w1:p1", false), p("w1:p2", true)];
+        assert_eq!(
+            dashboard_split_target(&panes, false).as_deref(),
+            Some("w1:p2")
+        );
+        // A background workspace has no focused pane: use its first.
+        let bg = [p("w2:p1", false), p("w2:p3", false)];
+        assert_eq!(dashboard_split_target(&bg, true).as_deref(), Some("w2:p1"));
+        assert_eq!(dashboard_split_target(&bg, false), None);
+        assert_eq!(dashboard_split_target(&[], true), None);
     }
 
     #[test]
