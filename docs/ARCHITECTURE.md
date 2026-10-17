@@ -18,8 +18,7 @@ sophisticated message-trim (compression) pipeline, and a recipe engine for
 chaining tool calls with variable interpolation.
 
 **License:** AGPL v3
-**Current test suite:** run `cargo nextest run --workspace` (337 passing after the
-dead-code sweep)
+**Current test suite:** run `cargo nextest run --workspace` (340 passing)
 **Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---
@@ -48,7 +47,7 @@ dead-code sweep)
 │                        ▼                                     │
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │              HerdrMcpServer (server.rs)                  │ │
-│  │  - 54 tool definitions (discovery, lifecycle, read, write, synchronize, a2a, trim, recipes, scheduler, folder-key) │ │
+│  │  - 55 tool definitions (discovery, lifecycle, read, write, synchronize, a2a, trim, recipes, scheduler, folder-key) │ │
 │  │  - Recipe engine with {{ variable }} interpolation      │ │
 │  │  - Outbound trim: apply_outbound_trim()                 │ │
 │  │  - Badge push: push_badge_for_workspace()               │ │
@@ -168,19 +167,25 @@ herdr-mcp/
 
 ---
 
-## 4. MCP Tool Reference (54 tools total)
+## 4. MCP Tool Reference (55 tools total)
 
-### 4.1 Discovery Tools (7)
+### 4.1 Discovery Tools (8)
+
+`session?` (a name from `list_sessions`) points a Discovery or Read tool at
+another herdr session; the label in `get_pane`/`read_pane` is looked up
+there too. Unset: the server's own session. Every other tool, and the run
+engine, always acts on the server's own session.
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `status` | — | Overall herdr server status |
-| `list_workspaces` | — | List all workspaces in session |
-| `list_tabs` | `workspace_id?` | List tabs, optionally by workspace |
-| `list_panes` | `workspace_id?` | List panes, optionally by workspace |
-| `list_agents` | — | List all detected agents |
-| `get_pane` | `pane_id?`, `label?` | Get pane details by ID or label |
-| `get_agent` | `target` | Get agent details by terminal/name/pane |
+| `list_sessions` | — | Every named herdr session; `current` marks the server's own |
+| `list_workspaces` | `session?` | List all workspaces in a session |
+| `list_tabs` | `workspace_id?`, `session?` | List tabs, optionally by workspace |
+| `list_panes` | `session?`, `workspace_id?`, `tab_id?`, `agent_status?`, `focused?`, `label?` | Typed `{panes: [HerdrPane]}`; every filter narrows (`label`: case-insensitive substring of label or agent) |
+| `list_agents` | `session?` | List all detected agents |
+| `get_pane` | `pane_id?`, `label?`, `session?` | Get pane details by ID or label |
+| `get_agent` | `target`, `session?` | Get agent details by terminal/name/pane |
 
 ### 4.2 Lifecycle Tools (4)
 
@@ -195,8 +200,8 @@ herdr-mcp/
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `read_pane` | `pane_id?`, `label?`, `source?`, `lines?` | Read pane output (visible/recent/recent-unwrapped) |
-| `read_agent` | `target`, `source?`, `lines?` | Read agent output |
+| `read_pane` | `pane_id?`, `label?`, `source?`, `lines?`, `session?` | Read pane output (visible/recent/recent-unwrapped) |
+| `read_agent` | `target`, `source?`, `lines?`, `session?` | Read agent output |
 
 ### 4.4 Write Tools (6)
 
@@ -298,6 +303,8 @@ herdr-mcp/
 | `POST` | `/api/tools/{name}` | `call_tool_handler` | Dispatch tool by name |
 | `GET` | `/api/agents?workspace_id=` | `agents_handler` | Live pane list from AgentRegistry |
 | `GET` | `/api/workspaces` | `workspaces_handler` | Workspace list via herdr CLI |
+| `GET` | `/api/herdr/sessions` | `herdr_sessions_handler` | `SessionsResponse`: every named herdr session, `current` = the bridge's |
+| `GET` | `/api/herdr/panes?session=&workspace_id=&tab_id=&agent_status=&focused=&label=` | `herdr_panes_handler` | `PanesResponse`, filtered like `list_panes`; 502 for an unknown or stopped session |
 | `POST` | `/api/runs` | `start_run_handler` | Start a run; `?wait=true` waits for the final record; `variables` add to the run's scope |
 | `GET` | `/api/herdr/events` | `herdr_events_handler` | SSE: herdr's live event stream (`HerdrEvent` per message) |
 
@@ -966,7 +973,10 @@ overrides let users pin a specific tool.
    sockets. On non-Unix platforms, the registry is populated only by explicit
    tool calls.
 
-5. **`pane_id` vs `id` field name:** The `herdr pane list` CLI output may
-   return the pane identifier as either `pane_id` or `id`. The `resolve_pane_id`
-   function in the server and the TUI fallback both handle this via
-   `.or_else(|| p.get("id"))`.
+5. **One pane list:** every caller that needs herdr's panes (label lookup,
+   agent placement, the dashboard split, auto variables, the event
+   subscriber, `list_panes`, `/api/herdr/panes`) goes through
+   `panes::panes(&PaneFilter)` in `herdr-mcp-server/src/panes.rs`, typed as
+   `herdr_mcp_api::HerdrPane`. herdr 0.9 always names the id `pane_id`.
+   Another session is reached by running `herdr` with that session's
+   `HERDR_SOCKET_PATH` (from `herdr session list --json`).

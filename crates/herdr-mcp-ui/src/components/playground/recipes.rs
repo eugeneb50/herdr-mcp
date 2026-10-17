@@ -683,31 +683,21 @@ fn TemplateForm(
 /// `(pane_id, "label · cwd")` for every pane herdr reports (empty if the
 /// call fails: suggestions are optional).
 async fn live_panes(client: &crate::client::ApiClient) -> Vec<(String, String)> {
-    let Ok(result) = client.call_tool("list_panes", &serde_json::json!({})).await else {
-        return Vec::new();
-    };
-    let text = herdr_mcp_api::tool_text(&result);
-    let Ok(json) = serde_json::from_str::<Value>(&text) else {
-        return Vec::new();
-    };
-    json.pointer("/result/panes")
-        .and_then(Value::as_array)
-        .map(|panes| {
-            panes
-                .iter()
-                .filter_map(|p| {
-                    let id = p.get("pane_id")?.as_str()?.to_string();
-                    let label = [p.get("label"), p.get("agent"), p.get("cwd")]
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" · ");
-                    Some((id, label))
-                })
-                .collect()
+    let panes = client
+        .list_panes(&Default::default())
+        .await
+        .unwrap_or_default();
+    panes
+        .into_iter()
+        .map(|p| {
+            let label = [p.label, p.agent, p.cwd]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            (p.pane_id, label)
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// `when` as the editor shows it: `agent_status=done, pane.tab_id=w1:t1`.

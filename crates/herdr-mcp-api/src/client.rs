@@ -194,6 +194,21 @@ impl ApiClient {
         Self::json::<AgentsResponse>(req).await.map(|r| r.agents)
     }
 
+    /// `GET /api/herdr/sessions` — every named herdr session.
+    pub async fn list_sessions(&self) -> Result<Vec<HerdrSession>, ApiError> {
+        self.get::<SessionsResponse>(&["api", "herdr", "sessions"])
+            .await
+            .map(|r| r.sessions)
+    }
+
+    /// `GET /api/herdr/panes` — herdr's panes, narrowed by `filter`.
+    pub async fn list_panes(&self, filter: &PaneFilter) -> Result<Vec<HerdrPane>, ApiError> {
+        let req = self
+            .request(Method::GET, &["api", "herdr", "panes"])
+            .query(filter);
+        Self::json::<PanesResponse>(req).await.map(|r| r.panes)
+    }
+
     /// `GET /api/workspaces` — passthrough of `herdr workspace list` (JSON or null).
     pub async fn list_workspaces(&self) -> Result<Value, ApiError> {
         self.get(&["api", "workspaces"]).await

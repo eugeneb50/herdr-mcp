@@ -546,28 +546,27 @@ impl HerdrClient {
             }
         };
 
-        if let Some(panes) = self.list_panes_json().await {
-            for p in &panes {
-                let pane_id = p.get("pane_id").and_then(|x| x.as_str()).unwrap_or("");
-                if pane_id.is_empty() {
-                    continue;
+        match crate::panes::panes(&Default::default()).await {
+            Ok(panes) => {
+                for p in &panes {
+                    let agent = p.agent.as_deref().unwrap_or("");
+                    let label = p.label.as_deref().unwrap_or("");
+                    self.registry
+                        .upsert(&p.pane_id, &p.workspace_id, &p.tab_id, agent, label)
+                        .await;
+                    if !label.is_empty() {
+                        self.registry.set_label(&p.pane_id, label).await;
+                    }
+                    if !p.agent_status.is_empty() {
+                        self.registry.set_status(&p.pane_id, &p.agent_status).await;
+                    }
+                    subscriptions.push(serde_json::json!({
+                        "type": "pane.agent_status_changed",
+                        "pane_id": p.pane_id
+                    }));
                 }
-                let ws = p.get("workspace_id").and_then(|x| x.as_str()).unwrap_or("");
-                let agent = p.get("agent").and_then(|x| x.as_str()).unwrap_or("");
-                let label = p.get("label").and_then(|x| x.as_str()).unwrap_or("");
-                let status = p.get("agent_status").and_then(|x| x.as_str()).unwrap_or("");
-                self.registry.upsert(pane_id, ws, "", agent, label).await;
-                if !label.is_empty() {
-                    self.registry.set_label(pane_id, label).await;
-                }
-                if !status.is_empty() {
-                    self.registry.set_status(pane_id, status).await;
-                }
-                subscriptions.push(serde_json::json!({
-                    "type": "pane.agent_status_changed",
-                    "pane_id": pane_id
-                }));
             }
+            Err(e) => tracing::debug!("subscribe: herdr pane list: {}", e.message),
         }
 
         serde_json::json!({
@@ -575,22 +574,6 @@ impl HerdrClient {
             "method": "events.subscribe",
             "params": { "subscriptions": subscriptions }
         })
-    }
-
-    /// Fetch and parse `herdr pane list` -> array of pane objects (best-effort).
-    async fn list_panes_json(&self) -> Option<Vec<serde_json::Value>> {
-        let binary = herdr_mcp_core::herdr_bin();
-        let output = tokio::process::Command::new(binary)
-            .args(["pane", "list"])
-            .output()
-            .await
-            .ok()?;
-        let raw = String::from_utf8_lossy(&output.stdout);
-        let v: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
-        v.get("result")
-            .and_then(|r| r.get("panes"))
-            .and_then(|p| p.as_array())
-            .cloned()
     }
 
     async fn handle_event(&self, event: HerdrEvent) {

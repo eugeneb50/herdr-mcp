@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.1.0--dev-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-337%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-340%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-7%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
@@ -21,7 +21,7 @@ MCP (Model Context Protocol) server written in Rust that exposes [herdr](https:/
   - [HTTP API](#http-api)
   - [Recipe format](#recipe-format)
   - [Environment](#environment)
-- [Tools (54)](#tools-54)
+- [Tools (55)](#tools-55)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
@@ -56,7 +56,7 @@ herdr-trim folder-key    # per-folder PFC1 key management
 ## Features
 
 - **MCP mode** — plug into any MCP client (Claude Desktop, Cursor, Claude Code, Continue, OpenCode) to control herdr workspaces, tabs, panes and agents
-- **54 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, message-trim, recipe templates, scheduler, folder keys and clipboard; `herdr_api` reaches every method the installed herdr exposes
+- **55 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, message-trim, recipe templates, scheduler, folder keys and clipboard; `herdr_api` reaches every method the installed herdr exposes
 - **herdr plugin** — `herdr-mcp plugin link` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
 - **Recipe engine** — chain tool calls with variable interpolation (`{{ stepId.result.path }}`); runs are tracked (`/api/runs`) with per-step events, pause/resume/cancel
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
@@ -320,10 +320,12 @@ All endpoints return JSON unless noted. Request/response types live in
 | `GET` | `/*` | Web playground (Dioxus bundle, SPA fallback to `index.html`) |
 | `GET` | `/api/health` | Health check |
 | `GET` / `PUT` | `/api/config`, `/api/config/clipboard` | Resolved config / set clipboard commands |
-| `GET` | `/api/tools` | All 54 tools with JSON schemas and categories |
+| `GET` | `/api/tools` | All 55 tools with JSON schemas and categories |
 | `POST` | `/api/tools/{name}` | Call a tool; body is its parameter object |
 | `GET` | `/api/agents?workspace_id=` | Live panes from the agent registry |
 | `GET` | `/api/workspaces` | Workspaces via herdr |
+| `GET` | `/api/herdr/sessions` | Every named herdr session (`current` = this bridge's) |
+| `GET` | `/api/herdr/panes` | herdr's panes, filtered (`session`, `workspace_id`, `tab_id`, `agent_status`, `focused`, `label`) |
 | `GET` | `/api/herdr/schema` | The installed herdr's API schema (every socket method + params) |
 | `GET` | `/api/herdr/events` | herdr's live event stream (SSE) |
 | `GET` / `POST` | `/api/recipes` | List / create recipes |
@@ -394,17 +396,20 @@ every `herdr` child process, so CLI calls and the event subscriber hit the same 
 
 ---
 
-## Tools (54)
+## Tools (55)
 
-Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-54-tools-total).
+Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-55-tools-total).
 
-### Discovery (7)
+### Discovery (8)
+Discovery and Read tools take `session` to look inside another herdr session.
+
 | Tool | Description |
 |------|-------------|
 | `status` | herdr server status |
+| `list_sessions` | Every named herdr session |
 | `list_workspaces` | List workspaces |
 | `list_tabs` | List tabs (optionally by workspace) |
-| `list_panes` | List panes (optionally by workspace) |
+| `list_panes` | List panes, filtered by session, workspace, tab, agent status, focus or label |
 | `list_agents` | List detected agents |
 | `get_pane` | Pane details by pane_id or label |
 | `get_agent` | Agent details |

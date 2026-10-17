@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod herdr_client;
+pub mod panes;
 pub mod persistence;
 pub mod profiles;
 pub mod runs;
