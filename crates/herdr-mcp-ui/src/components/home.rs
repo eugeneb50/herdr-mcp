@@ -103,12 +103,27 @@ pub fn Home() -> Element {
         });
     };
 
+    let dash = |s: &Option<String>| s.clone().unwrap_or_else(|| "—".into());
+
     rsx! {
         section { class: "page-head",
-            div { class: "eyebrow", "herdr-mcp" }
-            h1 { class: "page-title", "Agents for the multiplexer" }
+            div { class: "eyebrow", "Home" }
+            h1 { class: "page-title", "Send to a pane" }
             p { class: "lede",
-                "Type into a herdr pane by pane_id or label. Enter sends, Shift+Enter adds a line."
+                "Address a pane by pane_id or label — type it, pick it, or click a pane below. Enter sends, Shift+Enter adds a line."
+            }
+            details { class: "details",
+                summary { "Getting started" }
+                pre { class: "code-block",
+                    "cargo install --path crates/herdr-mcp-cli --bin herdr-mcp\nherdr-mcp serve --http 7676"
+                }
+                ul { class: "doc-list",
+                    li { code { "POST /api/tools/:name" } " — invoke any MCP tool" }
+                    li { code { "POST /api/runs?wait=true" } " — run a recipe (saved or ad-hoc steps) and get the result" }
+                    li { code { "GET /api/variables/auto" } " — live panes and agents as variables" }
+                    li { code { "GET /api/herdr/panes" } " — herdr panes (session/status/label filters)" }
+                    li { code { "GET /api/trim/status" } " — aggregate trim savings" }
+                }
             }
         }
         datalist { id: "pane-ids",
@@ -122,7 +137,6 @@ pub fn Home() -> Element {
             }
         }
         section { class: "card",
-            h2 { class: "card-title", "Send to pane" }
             div { class: "form-row",
                 div { class: "form-col",
                     label { class: "field-head", code { class: "mono accent", "pane_id" } }
@@ -136,7 +150,10 @@ pub fn Home() -> Element {
                     }
                 }
                 div { class: "form-col",
-                    label { class: "field-head", code { class: "mono accent", "label" } }
+                    label { class: "field-head",
+                        code { class: "mono accent", "label" }
+                        span { class: "field-desc", "used when pane_id is empty" }
+                    }
                     input {
                         class: "input",
                         r#type: "text",
@@ -147,25 +164,21 @@ pub fn Home() -> Element {
                     }
                 }
             }
-            p { class: "field-desc", "pane_id wins when both are set." }
-            div { class: "form-block",
-                label { class: "form-label", "Text" }
-                textarea {
-                    class: "input textarea",
-                    rows: "4",
-                    autofocus: true,
-                    placeholder: "run the tests again",
-                    value: "{text}",
-                    oninput: move |e| text.set(e.value()),
-                    onkeydown: move |e: KeyboardEvent| {
-                        if e.key() == Key::Enter && !e.modifiers().shift() {
-                            e.prevent_default();
-                            send();
-                        }
-                    },
-                }
+            textarea {
+                class: "input textarea",
+                rows: "3",
+                autofocus: true,
+                placeholder: "run the tests again",
+                value: "{text}",
+                oninput: move |e| text.set(e.value()),
+                onkeydown: move |e: KeyboardEvent| {
+                    if e.key() == Key::Enter && !e.modifiers().shift() {
+                        e.prevent_default();
+                        send();
+                    }
+                },
             }
-            div { class: "btn-row",
+            div { class: "send-row",
                 label { class: "check-row",
                     input {
                         r#type: "checkbox",
@@ -174,6 +187,11 @@ pub fn Home() -> Element {
                     }
                     span { class: "muted", "press Enter after" }
                 }
+                match &*status.read() {
+                    Some(Ok(msg)) => rsx! { span { class: "send-status", "{msg}" } },
+                    Some(Err(msg)) => rsx! { span { class: "send-status send-error", "{msg}" } },
+                    None => rsx! {},
+                }
                 button {
                     class: "btn btn-primary",
                     disabled: busy() || text.read().is_empty(),
@@ -181,30 +199,11 @@ pub fn Home() -> Element {
                     if busy() { "Sending…" } else { "Send" }
                 }
             }
-            match &*status.read() {
-                Some(Ok(msg)) => rsx! { div { class: "alert", "{msg}" } },
-                Some(Err(msg)) => rsx! { div { class: "alert alert-error", "{msg}" } },
-                None => rsx! {},
-            }
         }
         section { class: "card",
-            details { class: "details",
-                summary { "Getting started" }
-                pre { class: "code-block",
-                    "cargo install --path crates/herdr-mcp-cli --bin herdr-mcp\nherdr-mcp serve --http 7676"
-                }
-                ul { class: "doc-list",
-                    li { code { "GET /api/herdr/panes" } " — herdr panes (session/status/label filters)" }
-                    li { code { "POST /api/tools/:name" } " — invoke any MCP tool" }
-                    li { code { "POST /api/runs?wait=true" } " — run a recipe (saved or ad-hoc steps) and get the result" }
-                    li { code { "GET /api/variables/auto" } " — auto-populated pane variables" }
-                    li { code { "GET /api/trim/status" } " — aggregate trim savings" }
-                }
-            }
-        }
-        section { class: "card",
-            div { class: "btn-row",
-                h2 { class: "card-title", "Panes" }
+            div { class: "card-head",
+                h2 { class: "card-title", "Panes · {panes.len()}" }
+                span { class: "field-desc", "click a pane to target it" }
                 button {
                     class: "btn tab-refresh",
                     title: "Reload panes",
@@ -221,7 +220,6 @@ pub fn Home() -> Element {
                     p { class: "muted", "herdr reports no panes." }
                 },
                 Some(Ok(_)) => rsx! {
-                    p { class: "field-desc", "Click a pane to send to it." }
                     table { class: "table",
                         thead {
                             tr {
@@ -241,11 +239,11 @@ pub fn Home() -> Element {
                                         pane_id.set(p.pane_id.clone());
                                         label.set(String::new());
                                     },
-                                    td { "{p.label.clone().unwrap_or_default()}" }
+                                    td { "{dash(&p.label)}" }
                                     td { code { class: "mono", "{p.pane_id}" } }
-                                    td { "{p.agent.clone().unwrap_or_default()}" }
+                                    td { "{dash(&p.agent)}" }
                                     td { span { class: "pill", "{p.agent_status}" } }
-                                    td { class: "muted", "{p.cwd.clone().unwrap_or_default()}" }
+                                    td { class: "muted cell-path", title: "{dash(&p.cwd)}", "{dash(&p.cwd)}" }
                                 }
                             }
                         }

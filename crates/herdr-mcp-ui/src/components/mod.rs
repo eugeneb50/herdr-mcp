@@ -56,7 +56,7 @@ fn Shell() -> Element {
             }
             a {
                 class: "github-link",
-                href: "https://github.com",
+                href: "https://github.com/eugeneb50/herdr-mcp",
                 target: "_blank",
                 rel: "noopener",
                 "GitHub"
