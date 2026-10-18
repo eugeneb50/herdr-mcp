@@ -19,6 +19,9 @@ use crate::persistence::Persistence;
 use crate::variables::ScheduledRecipe;
 
 /// Runs a recipe by id to completion.
+/// How often [`Scheduler::run`] picks up schedules saved since the last look.
+const SYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub type ExecutorFn = Arc<dyn Fn(Uuid) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 #[derive(Clone)]
@@ -60,10 +63,31 @@ impl Scheduler {
         let _ = self.inner.executor.set(executor);
     }
 
-    /// Start runners for every persisted schedule (after a restart).
+    /// Fire schedules from this process: start a runner for every saved
+    /// schedule now and every [`SYNC_EVERY`] after, so schedules saved by any
+    /// process sharing the data dir (another MCP client, the bridge) start
+    /// here. Only the data dir's daemon calls this; it never returns.
+    pub async fn run(&self) {
+        loop {
+            if let Err(e) = self.sync().await {
+                tracing::warn!("scheduler: listing schedules: {e}");
+            }
+            tokio::time::sleep(SYNC_EVERY).await;
+        }
+    }
+
+    /// Start a runner for each saved schedule that has none running.
     /// Schedules with an invalid cron are skipped with a warning.
-    pub async fn load_existing(&self) -> anyhow::Result<()> {
+    pub async fn sync(&self) -> anyhow::Result<()> {
         for schedule in self.inner.persistence.list_schedules().await? {
+            let running = self
+                .inner
+                .runners
+                .get(&schedule.id)
+                .is_some_and(|h| !h.is_finished());
+            if running {
+                continue;
+            }
             if let Err(e) = parse_cron(&schedule.cron_schedule) {
                 tracing::warn!("schedule {}: {e}; not started", schedule.id);
                 continue;
@@ -73,11 +97,11 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Validate and save a schedule; the daemon's [`Scheduler::run`] starts
+    /// firing it within [`SYNC_EVERY`].
     pub async fn schedule_one(&self, s: ScheduledRecipe) -> anyhow::Result<()> {
         parse_cron(&s.cron_schedule)?;
-        self.inner.persistence.save_schedule(&s).await?;
-        self.spawn_runner(s.id);
-        Ok(())
+        self.inner.persistence.save_schedule(&s).await
     }
 
     fn spawn_runner(&self, id: Uuid) {
@@ -297,6 +321,13 @@ mod tests {
         let mut s = scheduled();
         s.cron_schedule = "* * * * * *".into();
         sched.schedule_one(s.clone()).await.unwrap();
+        assert!(
+            sched.inner.runners.is_empty(),
+            "saving alone starts nothing"
+        );
+        sched.sync().await.unwrap();
+        sched.sync().await.unwrap();
+        assert_eq!(sched.inner.runners.len(), 1, "sync is idempotent");
 
         tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
         assert!(fired.load(Ordering::SeqCst) >= 1, "never fired");
@@ -320,29 +351,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_existing_empty() {
+    async fn test_sync_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let p = Persistence::new(tmp.path().to_path_buf());
         let sched = Scheduler::new(std::sync::Arc::new(p));
         // Should not error when there are no schedules
-        sched.load_existing().await.unwrap();
+        sched.sync().await.unwrap();
         assert!(sched.list().await.is_empty());
     }
 
+    /// A schedule saved through one process starts in the daemon's.
     #[tokio::test]
-    async fn test_load_existing_loads_persisted() {
+    async fn sync_starts_schedules_saved_elsewhere() {
         let tmp = tempfile::tempdir().unwrap();
         let p = Persistence::new(tmp.path().to_path_buf());
-        // First save a schedule
-        let sched1 = Scheduler::new(std::sync::Arc::new(p.clone()));
+        let saver = Scheduler::new(std::sync::Arc::new(p.clone()));
         let s = scheduled();
-        sched1.schedule_one(s.clone()).await.unwrap();
+        saver.schedule_one(s.clone()).await.unwrap();
 
-        // Create a new scheduler and load existing
-        let sched2 = Scheduler::new(std::sync::Arc::new(p));
-        sched2.load_existing().await.unwrap();
-        let list = sched2.list().await;
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, s.id);
+        let daemon = Scheduler::new(std::sync::Arc::new(p));
+        daemon.sync().await.unwrap();
+        assert!(daemon.inner.runners.contains_key(&s.id));
+        assert!(saver.inner.runners.is_empty());
     }
 }

@@ -1,21 +1,25 @@
 //! `herdr-mcp plugin` — herdr-mcp as a herdr plugin.
 //!
-//! `plugin link` writes a `herdr-plugin.toml` (generated from [`manifest`],
-//! pointing at this binary) and registers it with `herdr plugin link`. herdr
-//! then offers the actions below in its action menu and keybindings:
+//! [`manifest`] is the plugin's `herdr-plugin.toml`, committed at the repo
+//! root (`herdr-mcp plugin manifest > herdr-plugin.toml`; a test keeps the
+//! two equal) so `herdr plugin install eugeneb50/herdr-mcp` works. Its
+//! `[[build]]` puts both binaries in the plugin's `bin/`, and every command
+//! runs from the plugin directory, reading port and data dir from config
+//! when it runs. herdr offers the actions below in its action menu and
+//! keybindings:
 //!
 //! - `recipes`: a popup that runs a saved recipe with the invocation context
 //!   (herdr's `HERDR_PLUGIN_CONTEXT_JSON`: `workspace_id`, `selected_text`, …,
 //!   plus `pane_id` = the focused pane) as `{{herdr.…}}`;
 //! - `dashboard`: the TUI dashboard in a split;
-//! - `bridge`: the HTTP bridge in its own tab;
+//! - `bridge`: the HTTP bridge in its own tab (also opened by the startup
+//!   and `workspace.created` hooks when no bridge is running);
 //! - `web`: the web playground in a browser.
 //!
 //! Actions run with no terminal, so each one that needs a screen opens one of
 //! the plugin's panes (`plugin open <pane>`), passing herdr's context along.
 
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -24,25 +28,22 @@ use serde::Serialize;
 use serde_json::Value;
 
 use herdr_mcp_api::{ApiClient, RunEventKind, StartRunRequest, tool_text};
+use herdr_mcp_core::PLUGIN_ID;
 
-pub const PLUGIN_ID: &str = "herdr-mcp";
 /// Env var carrying the invoking action's context into a plugin pane.
 const CONTEXT_ENV: &str = "HERDR_MCP_CONTEXT";
-const DEFAULT_PORT: u16 = 7676;
+/// The binaries `[[build]]` installs, relative to the plugin directory.
+pub const EXE: &str = "./bin/herdr-mcp";
+const TRIM: &str = "./bin/herdr-trim";
 
 #[derive(Subcommand)]
 pub enum PluginCommand {
-    /// Write the plugin manifest and register it with herdr.
-    Link {
-        /// Where to write `herdr-plugin.toml` (default: the herdr-mcp config dir).
-        #[arg(long)]
-        dir: Option<PathBuf>,
-        /// Print the manifest instead of writing and linking it.
-        #[arg(long)]
-        print: bool,
-    },
-    /// Unregister the plugin from herdr.
-    Unlink,
+    /// Print the plugin manifest (the repo's `herdr-plugin.toml`).
+    Manifest,
+    /// Startup / `workspace.created` hook: open the bridge pane unless a
+    /// bridge is already running.
+    #[command(hide = true)]
+    Startup,
     /// Open one of the plugin's panes with the invoking action's context.
     #[command(hide = true)]
     Open { pane: String },
@@ -55,179 +56,182 @@ pub enum PluginCommand {
 }
 
 #[derive(Serialize)]
-struct Manifest {
+pub struct Manifest {
     id: &'static str,
     name: &'static str,
     version: &'static str,
     min_herdr_version: &'static str,
     description: &'static str,
     platforms: Vec<&'static str>,
-    actions: Vec<Action>,
-    panes: Vec<Pane>,
+    build: Vec<Hook>,
+    pub startup: Vec<Hook>,
+    pub events: Vec<Event>,
+    pub actions: Vec<Action>,
+    pub panes: Vec<Pane>,
 }
 
 #[derive(Serialize)]
-struct Action {
-    id: &'static str,
+pub struct Hook {
+    pub command: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct Event {
+    on: &'static str,
+    pub command: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct Action {
+    pub id: &'static str,
     title: &'static str,
     contexts: Vec<&'static str>,
-    command: Vec<String>,
+    pub command: Vec<String>,
 }
 
 #[derive(Serialize)]
-struct Pane {
-    id: &'static str,
+pub struct Pane {
+    pub id: &'static str,
     title: &'static str,
     placement: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     width: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     height: Option<&'static str>,
-    command: Vec<String>,
+    pub command: Vec<String>,
 }
 
-/// The plugin as herdr sees it. `exe` is this binary, `trim` the sibling
-/// `herdr-trim` (the dashboard; skipped when absent), and the bridge pane
-/// serves `data_dir` on `port` — both resolved from config at link time, so
-/// re-run `plugin link` after changing them.
-fn manifest(exe: &Path, trim: Option<&Path>, port: u16, data_dir: &Path) -> Manifest {
-    let exe = exe.display().to_string();
-    let us = |args: &[&str]| {
-        std::iter::once(exe.clone())
-            .chain(args.iter().map(|a| a.to_string()))
+/// The plugin as herdr sees it.
+pub fn manifest() -> Manifest {
+    let argv = |exe: &str, args: &[&str]| {
+        std::iter::once(exe)
+            .chain(args.iter().copied())
+            .map(String::from)
             .collect::<Vec<_>>()
     };
+    let us = |args: &[&str]| argv(EXE, args);
     let everywhere = || vec!["global", "workspace", "tab", "pane", "selection"];
-    let mut actions = vec![
-        Action {
-            id: "recipes",
-            title: "herdr-mcp: run a recipe",
-            contexts: everywhere(),
-            command: us(&["plugin", "open", "recipes"]),
-        },
-        Action {
-            id: "bridge",
-            title: "herdr-mcp: start the bridge",
-            contexts: vec!["global", "workspace"],
-            command: us(&["plugin", "open", "bridge"]),
-        },
-        Action {
-            id: "web",
-            title: "herdr-mcp: open the web playground",
-            contexts: vec!["global", "workspace"],
-            command: us(&["plugin", "web"]),
-        },
-    ];
-    let mut panes = vec![
-        Pane {
-            id: "recipes",
-            title: "Run a recipe",
-            placement: "popup",
-            width: Some("80%"),
-            height: Some("70%"),
-            command: us(&["plugin", "recipes"]),
-        },
-        Pane {
-            id: "bridge",
-            title: "herdr-mcp bridge",
-            placement: "tab",
-            width: None,
-            height: None,
-            command: us(&[
-                "serve",
-                "--http",
-                &port.to_string(),
-                "--http-only",
-                "--data-dir",
-                &data_dir.display().to_string(),
-            ]),
-        },
-    ];
-    if let Some(trim) = trim {
-        actions.push(Action {
-            id: "dashboard",
-            title: "herdr-mcp: open the dashboard",
-            contexts: vec!["global", "workspace", "pane"],
-            command: us(&["plugin", "open", "dashboard"]),
-        });
-        panes.push(Pane {
-            id: "dashboard",
-            title: "herdr-mcp dashboard",
-            placement: "split",
-            width: None,
-            height: None,
-            command: vec![
-                trim.display().to_string(),
-                "dashboard".into(),
-                "--http-port".into(),
-                port.to_string(),
-                "--data-dir".into(),
-                data_dir.display().to_string(),
-            ],
-        });
-    }
     Manifest {
         id: PLUGIN_ID,
         name: "herdr-mcp",
         version: env!("CARGO_PKG_VERSION"),
         min_herdr_version: "0.9.0",
-        description: "Recipes, triggers, dashboard and web playground for herdr",
+        description: "MCP server for herdr: recipes, triggers, schedules, dashboard and web playground",
         platforms: vec!["linux", "macos"],
-        actions,
-        panes,
+        build: vec![Hook {
+            command: argv("sh", &["scripts/plugin-build.sh"]),
+        }],
+        startup: vec![Hook {
+            command: us(&["plugin", "startup"]),
+        }],
+        events: vec![Event {
+            on: "workspace.created",
+            command: us(&["plugin", "startup"]),
+        }],
+        actions: vec![
+            Action {
+                id: "recipes",
+                title: "herdr-mcp: run a recipe",
+                contexts: everywhere(),
+                command: us(&["plugin", "open", "recipes"]),
+            },
+            Action {
+                id: "bridge",
+                title: "herdr-mcp: start the bridge",
+                contexts: vec!["global", "workspace"],
+                command: us(&["plugin", "open", "bridge"]),
+            },
+            Action {
+                id: "web",
+                title: "herdr-mcp: open the web playground",
+                contexts: vec!["global", "workspace"],
+                command: us(&["plugin", "web"]),
+            },
+            Action {
+                id: "dashboard",
+                title: "herdr-mcp: open the dashboard",
+                contexts: vec!["global", "workspace", "pane"],
+                command: us(&["plugin", "open", "dashboard"]),
+            },
+        ],
+        panes: vec![
+            Pane {
+                id: "recipes",
+                title: "Run a recipe",
+                placement: "popup",
+                width: Some("80%"),
+                height: Some("70%"),
+                command: us(&["plugin", "recipes"]),
+            },
+            Pane {
+                id: "bridge",
+                title: "herdr-mcp bridge",
+                placement: "tab",
+                width: None,
+                height: None,
+                command: us(&["serve", "--http-only"]),
+            },
+            Pane {
+                id: "dashboard",
+                title: "herdr-mcp dashboard",
+                placement: "split",
+                width: None,
+                height: None,
+                command: argv(TRIM, &["dashboard"]),
+            },
+        ],
     }
 }
 
 pub async fn run(cmd: PluginCommand, config: &herdr_mcp_core::Config) -> Result<()> {
-    let port = config.http.port.unwrap_or(DEFAULT_PORT);
+    let port = || {
+        config
+            .http
+            .port
+            .context("http.port is unset, so herdr-mcp's bridge is off")
+    };
     match cmd {
-        PluginCommand::Link { dir, print } => link(dir, print, port, &config.data_dir),
-        PluginCommand::Unlink => herdr(&["plugin", "unlink", PLUGIN_ID]),
+        PluginCommand::Manifest => {
+            print!("{}", toml::to_string(&manifest())?);
+            Ok(())
+        }
+        PluginCommand::Startup => startup(port()?).await,
         PluginCommand::Open { pane } => open_pane(&pane),
         PluginCommand::Recipes => {
-            let result = recipes(port).await;
+            let result = match port() {
+                Ok(port) => recipes(port).await,
+                Err(e) => Err(e),
+            };
             if let Err(e) = &result {
                 println!("\n{e:#}");
             }
             pause("\nPress Enter to close.");
             Ok(())
         }
-        PluginCommand::Web => web(port).await,
+        PluginCommand::Web => web(port()?).await,
     }
 }
 
-fn link(dir: Option<PathBuf>, print: bool, port: u16, data_dir: &Path) -> Result<()> {
-    let exe = std::env::current_exe()?.canonicalize()?;
-    let trim = exe.with_file_name("herdr-trim");
-    let data_dir = std::path::absolute(data_dir)?;
-    let text = toml::to_string(&manifest(
-        &exe,
-        trim.exists().then_some(trim.as_path()),
-        port,
-        &data_dir,
-    ))?;
-    if print {
-        print!("{text}");
+/// The startup and `workspace.created` hook: bring the bridge (and with it
+/// schedules and triggers) up with herdr, unless one already serves the port.
+/// A server with no workspace yet has nowhere to put the tab; the first
+/// `workspace.created` opens it then.
+async fn startup(port: u16) -> Result<()> {
+    if bridge(port).await.is_some() {
         return Ok(());
     }
-    let dir = match dir {
-        Some(dir) => dir,
-        None => dirs::config_dir()
-            .context("no config directory")?
-            .join("herdr-mcp/herdr-plugin"),
-    };
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("herdr-plugin.toml"), text)?;
-    // Re-linking replaces an earlier registration (new binary path, port).
-    let _ = herdr_quiet(&["plugin", "unlink", PLUGIN_ID]);
-    herdr(&["plugin", "link", &dir.display().to_string()])?;
-    println!(
-        "\nLinked {PLUGIN_ID} from {}. Bind its actions in herdr's config, e.g.:\n\n\
-         [[keys.command]]\nkey = \"prefix+r\"\ntype = \"plugin_action\"\n\
-         command = \"{PLUGIN_ID}.recipes\"\ndescription = \"run a recipe\"",
-        dir.display()
-    );
-    Ok(())
+    let env = format!("{CONTEXT_ENV}={}", context());
+    let out = herdr_quiet(&open_args("bridge", &env))?;
+    let reply = [out.stdout, out.stderr].concat();
+    let reply = String::from_utf8_lossy(&reply);
+    if out.status.success() {
+        Ok(())
+    } else if reply.contains("no_active_workspace") {
+        println!("no workspace yet: the bridge opens with the first one");
+        Ok(())
+    } else {
+        bail!("opening the bridge pane: {reply}")
+    }
 }
 
 /// `herdr <args>`, output passed through; fails on a non-zero exit.
@@ -261,7 +265,12 @@ fn context() -> Value {
 
 fn open_pane(pane: &str) -> Result<()> {
     let env = format!("{CONTEXT_ENV}={}", context());
-    herdr(&[
+    herdr(&open_args(pane, &env))
+}
+
+/// `herdr plugin pane open` for one of our panes, passing `env` along.
+fn open_args<'a>(pane: &'a str, env: &'a str) -> [&'a str; 9] {
+    [
         "plugin",
         "pane",
         "open",
@@ -270,8 +279,8 @@ fn open_pane(pane: &str) -> Result<()> {
         "--entrypoint",
         pane,
         "--env",
-        &env,
-    ])
+        env,
+    ]
 }
 
 fn notify(body: &str) {
@@ -293,8 +302,7 @@ fn read_line(prompt: &str) -> String {
 }
 
 async fn bridge(port: u16) -> Option<ApiClient> {
-    let port = herdr_mcp_tui::http::discover_bridge(port).await?;
-    herdr_mcp_tui::http::client_for(port).ok()
+    herdr_mcp_tui::http::live_bridge(port).await
 }
 
 async fn web(port: u16) -> Result<()> {
@@ -393,37 +401,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn manifest_points_every_command_at_this_install() {
-        let m = manifest(
-            Path::new("/opt/bin/herdr-mcp"),
-            Some(Path::new("/opt/bin/herdr-trim")),
-            7700,
-            Path::new("/srv/data"),
+    fn committed_manifest_is_current() {
+        let committed = include_str!("../../../herdr-plugin.toml");
+        assert_eq!(
+            committed,
+            toml::to_string(&manifest()).unwrap(),
+            "regenerate: herdr-mcp plugin manifest > herdr-plugin.toml"
         );
-        let text = toml::to_string(&m).unwrap();
-        let back: toml::Value = toml::from_str(&text).unwrap();
-        assert_eq!(back["id"].as_str(), Some(PLUGIN_ID));
-        let actions = back["actions"].as_array().unwrap();
-        let panes = back["panes"].as_array().unwrap();
-        // Every `plugin open <pane>` action names a declared pane.
-        for a in actions {
-            let cmd: Vec<&str> = a["command"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|v| v.as_str().unwrap())
-                .collect();
-            assert!(cmd[0].starts_with("/opt/bin/"));
-            if cmd[1..3] == ["plugin", "open"] {
-                assert!(panes.iter().any(|p| p["id"].as_str() == Some(cmd[3])));
+    }
+
+    #[test]
+    fn every_open_names_a_pane() {
+        let m = manifest();
+        for a in &m.actions {
+            if a.command[1..3] == ["plugin", "open"] {
+                assert!(m.panes.iter().any(|p| p.id == a.command[3]), "{}", a.id);
             }
         }
-        assert!(text.contains("\"7700\""), "bridge port: {text}");
-        assert!(text.contains("/srv/data"));
-        assert!(text.contains("placement = \"popup\""));
-
-        let no_trim = manifest(Path::new("/x"), None, 1, Path::new("/d"));
-        assert!(!no_trim.panes.iter().any(|p| p.id == "dashboard"));
-        assert!(!no_trim.actions.iter().any(|a| a.id == "dashboard"));
     }
 }

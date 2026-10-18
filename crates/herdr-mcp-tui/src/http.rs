@@ -1,6 +1,6 @@
 //! Bridge connection for the TUI dashboard. Endpoints and wire types live in
 //! `herdr-mcp-api` (shared with the web UI); this module only builds the
-//! client for a local port and discovers a live bridge.
+//! client for a local port and checks that its bridge is live.
 
 use std::time::Duration;
 
@@ -20,32 +20,25 @@ pub fn client_for(port: u16) -> Result<ApiClient, ApiError> {
     ApiClient::with_timeout(&base(port), REQUEST_TIMEOUT)
 }
 
-/// Find a live bridge: tries `initial` (the configured port) first, then the
-/// historical defaults. Returns the first port whose `GET /api/health` is 2xx.
-pub async fn discover_bridge(initial: u16) -> Option<u16> {
-    let mut candidates: Vec<u16> = vec![initial, 8080, 7676];
-    candidates.dedup();
-    for port in candidates {
-        let Ok(probe) = ApiClient::with_timeout(&base(port), PROBE_TIMEOUT) else {
-            continue;
-        };
-        if probe.health().await.is_ok() {
-            return Some(port);
-        }
-    }
-    None
+/// A client for the bridge on `port` (the configured one) if its
+/// `GET /api/health` answers 2xx. No other port is tried: a bridge elsewhere
+/// may serve another data dir or herdr session.
+pub async fn live_bridge(port: u16) -> Option<ApiClient> {
+    let probe = ApiClient::with_timeout(&base(port), PROBE_TIMEOUT).ok()?;
+    probe.health().await.ok()?;
+    client_for(port).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Discovery must finish quickly (500ms per candidate port) rather than
-    // hanging for the full request timeout.
+    // The probe must finish quickly (500ms) rather than hanging for the full
+    // request timeout.
     #[tokio::test]
-    async fn discover_bridge_does_not_hang() {
-        let res = tokio::time::timeout(Duration::from_secs(5), discover_bridge(1)).await;
-        assert!(res.is_ok(), "discover_bridge hung");
+    async fn live_bridge_does_not_hang() {
+        let res = tokio::time::timeout(Duration::from_secs(2), live_bridge(1)).await;
+        assert!(matches!(res, Ok(None)), "live_bridge hung or found port 1");
     }
 
     #[test]

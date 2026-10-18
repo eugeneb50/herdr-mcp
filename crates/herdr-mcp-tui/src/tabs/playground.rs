@@ -1148,10 +1148,7 @@ fn render_tool_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
             Line::from("Start `herdr-mcp serve` (or run"),
             Line::from("`herdr-trim dashboard --http-port <port>`)."),
             Line::from(""),
-            Line::from(format!(
-                "Auto-discovering on :{} / :8080 / :7676 …",
-                app.opts.http_port
-            )),
+            Line::from(format!("Waiting for a bridge on :{} …", app.opts.http_port)),
         ];
         frame.render_widget(Paragraph::new(msg).wrap(Wrap { trim: false }), inner);
         return;

@@ -45,7 +45,7 @@ it first, see [Install & build](#install--build)).
 
 ```bash
 herdr-mcp serve          # explicit MCP + HTTP
-herdr-mcp plugin link    # register herdr-mcp as a herdr plugin
+herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 herdr-trim dashboard     # TUI dashboard with mouse + keyboard nav
 herdr-trim trim          # one-shot message compression
 herdr-trim folder-key    # per-folder PFC1 key management
@@ -57,7 +57,7 @@ herdr-trim folder-key    # per-folder PFC1 key management
 
 - **MCP mode** — plug into any MCP client (Claude Desktop, Cursor, Claude Code, Continue, OpenCode) to control herdr workspaces, tabs, panes and agents
 - **54 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, message-trim, recipe templates, scheduler, folder keys and clipboard; `herdr_api` reaches every method the installed herdr exposes
-- **herdr plugin** — `herdr-mcp plugin link` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
+- **herdr plugin** — `herdr plugin install eugeneb50/herdr-mcp` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
 - **Recipe engine** — chain tool calls with variable interpolation (`{{ stepId.result.path }}`); runs are tracked (`/api/runs`) with per-step events, pause/resume/cancel
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
 - **Live herdr events** — the bridge relays herdr's event stream as SSE (`/api/herdr/events`); the playground shows it live
@@ -181,7 +181,7 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release
 |------------|-------------|
 | `herdr-mcp` | MCP stdio server + HTTP bridge on port 7676 (same as `serve`) |
 | `herdr-mcp serve` | Explicit MCP + HTTP with full flag control |
-| `herdr-mcp plugin link` / `unlink` | Register / unregister the herdr plugin (`link --print` shows the manifest) |
+| `herdr-mcp plugin manifest` | Print the herdr plugin manifest (the repo's `herdr-plugin.toml`) |
 | `herdr-trim dashboard` | TUI dashboard (bridge-backed) |
 | `herdr-trim trim` | One-shot message-trim pipeline on text or a file |
 | `herdr-trim folder-key` | Build/list/show/decompress per-folder PFC1 keys |
@@ -263,17 +263,29 @@ Inside a herdr pane, herdr-mcp finds the right herdr on its own
 ### herdr plugin
 
 ```bash
-herdr-mcp plugin link
+herdr plugin install eugeneb50/herdr-mcp
+# or, from a checkout:
+sh scripts/plugin-build.sh && herdr plugin link .
 ```
 
-Writes `~/.config/herdr-mcp/herdr-plugin/herdr-plugin.toml` and registers it
-with `herdr plugin link`. It adds these actions:
+herdr reads the repo's `herdr-plugin.toml`; its build step
+(`scripts/plugin-build.sh`) compiles `herdr-mcp` and `herdr-trim` into the
+plugin's `bin/` (and bundles the web UI when `dx` is installed). Port and data
+dir come from herdr-mcp's config when each command runs; with no `data_dir`
+configured the plugin keeps its state in herdr's state dir for the plugin. Set
+`data_dir` in `~/.config/herdr-mcp/config.toml` to share one store with the
+`herdr-mcp` your MCP clients run.
+
+When herdr starts (or creates the first workspace, on a fresh server), the
+plugin opens the bridge in a tab unless a bridge already answers on
+`http.port`. As a plugin it never reads `herdr-mcp.toml` / `herdmcp.toml` from
+its working directory (the plugin checkout). It adds these actions:
 
 | Action | Opens |
 |---|---|
 | `herdr-mcp.recipes` | Popup: pick a saved recipe and run it with the invocation context as `{{herdr.…}}` (`workspace_id`, `pane_id` = focused pane, `selected_text`, …), following its steps |
 | `herdr-mcp.bridge` | Tab: `herdr-mcp serve --http-only` |
-| `herdr-mcp.dashboard` | Split: `herdr-trim dashboard` (when `herdr-trim` is installed) |
+| `herdr-mcp.dashboard` | Split: `herdr-trim dashboard` |
 | `herdr-mcp.web` | The web playground in a browser |
 
 Bind one in herdr's config:

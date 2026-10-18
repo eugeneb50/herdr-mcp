@@ -700,11 +700,10 @@ impl App {
     }
 
     async fn refresh_inner(&mut self) {
-        // If we're not connected, try to discover a live bridge first.
+        // If we're not connected, check for a live bridge first.
         if !self.bridge_connected {
-            if let Some(port) = http::discover_bridge(self.opts.http_port).await {
-                self.opts.http_port = port;
-                self.http = http::client_for(port).ok();
+            if let Some(client) = http::live_bridge(self.opts.http_port).await {
+                self.http = Some(client);
                 self.bridge_connected = true;
                 self.status_msg.clear();
             } else {

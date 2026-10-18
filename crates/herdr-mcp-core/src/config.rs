@@ -22,10 +22,12 @@ pub struct PersistentConfig {
 }
 
 impl PersistentConfig {
-    /// Load persistent config from CWD `herdmcp.toml` if it exists.
-    /// Only parses the `[persistent]` section.
+    /// Load persistent config from CWD `herdmcp.toml` if it exists (never as
+    /// the plugin, see [`project_dir`]). Only parses the `[persistent]` section.
     pub fn load_from_cwd() -> Result<Self> {
-        let cwd = std::env::current_dir()?;
+        let Some(cwd) = project_dir() else {
+            return Ok(Self::default());
+        };
         let path = cwd.join("herdmcp.toml");
         if path.exists() {
             let content = std::fs::read_to_string(&path)
@@ -98,10 +100,40 @@ fn expand_home(path: &std::path::Path) -> PathBuf {
     }
 }
 
-/// Where state lives when nothing else says: `./data`.
+/// Where state lives when nothing else says: herdr's state dir for this
+/// plugin when herdr runs us as the `herdr-mcp` plugin (our working directory
+/// is then the plugin checkout, replaced on update), else `./data`.
 fn default_data_dir() -> PathBuf {
-    PathBuf::from("./data")
+    plugin_state_dir(
+        env::var("HERDR_PLUGIN_ID").ok().as_deref(),
+        env::var_os("HERDR_PLUGIN_STATE_DIR"),
+    )
+    .unwrap_or_else(|| PathBuf::from("./data"))
 }
+
+/// The directory project-local config (`herdr-mcp.toml`, `herdmcp.toml`) is
+/// read from: the working directory, except when herdr runs us as the
+/// `herdr-mcp` plugin — the working directory is then the plugin checkout,
+/// whose files are not the user's config.
+fn project_dir() -> Option<PathBuf> {
+    if env::var("HERDR_PLUGIN_ID").as_deref() == Ok(PLUGIN_ID) {
+        return None;
+    }
+    env::current_dir().ok()
+}
+
+fn plugin_state_dir(
+    plugin_id: Option<&str>,
+    state_dir: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    (plugin_id == Some(PLUGIN_ID))
+        .then_some(state_dir)
+        .flatten()
+        .map(PathBuf::from)
+}
+
+/// herdr-mcp's id as a herdr plugin (`herdr-plugin.toml`).
+pub const PLUGIN_ID: &str = "herdr-mcp";
 
 impl Default for Config {
     fn default() -> Self {
@@ -331,8 +363,9 @@ pub fn find_config_file() -> Option<PathBuf> {
     }
 
     // 2. Current directory
-    let local = PathBuf::from("herdr-mcp.toml");
-    if local.exists() {
+    if let Some(local) = project_dir().map(|d| d.join("herdr-mcp.toml"))
+        && local.exists()
+    {
         return Some(local);
     }
 
@@ -403,6 +436,18 @@ pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_runs_keep_state_in_herdrs_state_dir() {
+        let state = || Some(std::ffi::OsString::from("/state"));
+        assert_eq!(
+            plugin_state_dir(Some(PLUGIN_ID), state()),
+            Some(PathBuf::from("/state"))
+        );
+        assert_eq!(plugin_state_dir(Some("other.plugin"), state()), None);
+        assert_eq!(plugin_state_dir(None, state()), None);
+        assert_eq!(plugin_state_dir(Some(PLUGIN_ID), None), None);
+    }
     use std::sync::{Mutex, OnceLock};
 
     /// Env vars are process-global; serialize tests that touch them.
