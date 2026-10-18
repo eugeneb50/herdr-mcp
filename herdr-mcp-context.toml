@@ -228,9 +228,8 @@
 # - [[startup]] + [[events]] workspace.created -> `plugin startup`: opens the
 #   bridge tab unless a bridge answers on http.port; `no_active_workspace`
 #   (fresh server) is not an error. herdr prints that error on STDERR.
-# - As the plugin, project-local config in the cwd (herdr-mcp.toml,
-#   herdmcp.toml [persistent]) is skipped: cwd is the checkout, and both files
-#   are TRACKED in this repo (data-dir ./data, xsel clipboard).
+# - As the plugin, a project-local herdr-mcp.toml in the cwd is skipped: cwd
+#   is the checkout.
 # - discover_bridge (tried 8080 and 7676 after the configured port) replaced
 #   by http::live_bridge(port): it found the user's real 7676 bridge from an
 #   isolated plugin. Smoke gotcha: HERDR_PLUGIN_STATE_DIR is under
@@ -242,4 +241,34 @@
 #   schedule_one only persists; Scheduler::run (daemon) syncs every 5 s.
 # - Bare `herdr-mcp` no longer forces port 7676 over config; `herdr-trim
 #   dashboard --http-port` defaults to config http.port.
-# - Cargo.lock is gitignored, so the build step can't use --locked.
+# - Cargo.lock is committed; scripts/plugin-build.sh builds with --locked.
+# - Single source of truth for settings: herdmcp.toml + PersistentConfig
+#   ([persistent] http-port/data-dir/herdr-socket, a second config file in the
+#   cwd) deleted. Precedence: defaults < config file < env < CLI. herdr-mcp.toml
+#   is untracked + gitignored (it held one user's xsel clipboard).
+# - Crate version/edition live once in [workspace.package]; the manifest's
+#   `version` is env!("CARGO_PKG_VERSION"), so a release bumps one line.
+# - Marketplace: GitHub topic `herdr-plugin` is set; herdr.dev only lists a
+#   repo whose DEFAULT branch has a parseable herdr-plugin.toml, so the
+#   listing goes live when this PR merges (held for 0.2.0).
+
+# Spec facts the tests rely on (moved from the deleted herdmcp.toml)
+#
+# - extract_variables always prefixes keys with "result." (input
+#   {"result":"hello"} -> "result.result") and ignores arrays.
+# - resolve_json_path: an exact key wins (its step text); otherwise
+#   step.field navigation, also into the tool payload; `step.text` falls back
+#   to the step's text.
+# - resolve_variables leaves unknown {{ path }} placeholders unchanged.
+# - Config::merge takes `other` wholesale for every field.
+# - TrimPolicy::parse_stages defaults emit_header = true; parse_stages_with
+#   sets it.
+# - CompressionKey = HashMap<String,String> (Cherokee symbol -> term), 85
+#   symbols (U+13A0..=U+13FF).
+# - stats.rs: savings_pct() = gross/total_input; workspace_net_pct() =
+#   net/gross.
+# - resolve_label_in_panes accepts both `pane_id` and `id` keys (herdr pane
+#   list returns either).
+# - Gotcha: build_folder_key writes its output INTO the scanned folder, so a
+#   second scan re-ingests it -> keys differ across separate builds (HashMap
+#   order). One persisted key is stable; never assert two builds are equal.

@@ -41,7 +41,7 @@ enum Command {
 
     /// Open the dashboard (bridge-backed UI) for trim savings.
     Dashboard {
-        /// Data directory (default `./data`, `HERDR_MCP_DATA_DIR`, herdmcp.toml).
+        /// Data directory (default `./data`, `HERDR_MCP_DATA_DIR`, config file).
         #[arg(long)]
         data_dir: Option<std::path::PathBuf>,
         /// HTTP bridge port the dashboard talks to (default: `http.port`

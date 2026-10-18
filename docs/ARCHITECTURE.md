@@ -820,7 +820,7 @@ runs `./bin/…` from the plugin directory and resolves port and data dir from
 config at run time. With no `data_dir` configured, a process herdr runs as this
 plugin (`HERDR_PLUGIN_ID=herdr-mcp`) defaults to `HERDR_PLUGIN_STATE_DIR`, not
 the checkout (replaced on update). Project-local config
-(`herdr-mcp.toml` / `herdmcp.toml` in the working directory) is skipped as the
+(`herdr-mcp.toml` in the working directory) is skipped as the
 plugin: that directory is the checkout. `[[startup]]` and the
 `workspace.created` event hook run `plugin startup`: open the `bridge` pane
 unless a bridge already answers on `http.port` (a fresh server with no

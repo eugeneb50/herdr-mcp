@@ -214,15 +214,18 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release
 ### Configuration
 
 Settings come from, lowest to highest: defaults, the config file
-(`$HERDR_MCP_CONFIG`, else `./herdr-mcp.toml`, else `~/.config/herdr-mcp/config.toml`), a `herdmcp.toml`
-`[persistent]` section in the working directory, environment variables, CLI flags.
+(`$HERDR_MCP_CONFIG`, else `./herdr-mcp.toml`, else `~/.config/herdr-mcp/config.toml`),
+environment variables, CLI flags. The config file is the only settings file.
 
 ```toml
-# herdmcp.toml
-[persistent]
-http-port = 7676
-data-dir = "./data"
-# herdr-socket = "~/.config/herdr/herdr.sock"
+# ~/.config/herdr-mcp/config.toml
+data-dir = "~/.local/share/herdr-mcp"
+
+[http]
+port = 7676
+
+# [herdr]
+# socket-path = "~/.config/herdr/herdr.sock"
 ```
 
 ---
@@ -278,7 +281,7 @@ configured the plugin keeps its state in herdr's state dir for the plugin. Set
 
 When herdr starts (or creates the first workspace, on a fresh server), the
 plugin opens the bridge in a tab unless a bridge already answers on
-`http.port`. As a plugin it never reads `herdr-mcp.toml` / `herdmcp.toml` from
+`http.port`. As a plugin it never reads `herdr-mcp.toml` from
 its working directory (the plugin checkout). It adds these actions:
 
 | Action | Opens |

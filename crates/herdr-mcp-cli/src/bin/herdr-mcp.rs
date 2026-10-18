@@ -35,7 +35,7 @@ enum Command {
         #[arg(long)]
         http_only: bool,
         /// Data directory (default `./data`; also `HERDR_MCP_DATA_DIR` or
-        /// `data_dir` in herdmcp.toml — this flag wins over both).
+        /// `data-dir` in the config file — this flag wins over both).
         #[arg(long)]
         data_dir: Option<std::path::PathBuf>,
         #[arg(long)]

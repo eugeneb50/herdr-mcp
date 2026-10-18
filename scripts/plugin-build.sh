@@ -4,7 +4,7 @@
 # the manifest runs) and bundles the web UI when `dx` is installed.
 set -eu
 
-cargo build --release -p herdr-mcp-cli --bin herdr-mcp --bin herdr-trim
+cargo build --release --locked -p herdr-mcp-cli --bin herdr-mcp --bin herdr-trim
 mkdir -p bin
 cp target/release/herdr-mcp target/release/herdr-trim bin/
 
