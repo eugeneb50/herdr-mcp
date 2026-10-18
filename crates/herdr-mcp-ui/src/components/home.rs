@@ -7,8 +7,9 @@
 use dioxus::prelude::*;
 use herdr_mcp_api::HerdrPane;
 
+use super::pane_options::{PaneOptions, pane_list};
 use crate::client::use_api;
-use crate::vars::{auto_panes, pane_names, pane_text};
+use crate::vars::auto_panes;
 
 /// Browser-local keys for the last target sent to, as typed.
 const LAST_PANE_ID: &str = "herdr-mcp.send.pane_id";
@@ -62,10 +63,11 @@ pub fn Home() -> Element {
             client.auto_variables(None).await.map(|a| a.variables)
         }
     });
-    let (panes, names) = match &*auto.read() {
-        Some(Ok(vars)) => (auto_panes(vars), pane_names(vars)),
+    let vars = match &*auto.read() {
+        Some(Ok(vars)) => vars.clone(),
         _ => Default::default(),
     };
+    let panes = auto_panes(&vars);
 
     let mut send = move || {
         let body = text();
@@ -126,16 +128,7 @@ pub fn Home() -> Element {
                 }
             }
         }
-        datalist { id: "pane-ids",
-            for p in panes.iter().cloned() {
-                option { value: "{p.pane_id}", "{pane_text([&p.label, &p.agent, &p.cwd])}" }
-            }
-        }
-        datalist { id: "pane-labels",
-            for (name, id) in names {
-                option { value: "{name}", "{id}" }
-            }
-        }
+        PaneOptions { auto: vars }
         section { class: "card",
             div { class: "form-row",
                 div { class: "form-col",
@@ -143,7 +136,7 @@ pub fn Home() -> Element {
                     input {
                         class: "input",
                         r#type: "text",
-                        list: "pane-ids",
+                        list: pane_list("pane_id"),
                         placeholder: "w1:p2",
                         value: "{pane_id}",
                         oninput: move |e| pane_id.set(e.value()),
@@ -157,7 +150,7 @@ pub fn Home() -> Element {
                     input {
                         class: "input",
                         r#type: "text",
-                        list: "pane-labels",
+                        list: pane_list("label"),
                         placeholder: "builder",
                         value: "{label}",
                         oninput: move |e| label.set(e.value()),

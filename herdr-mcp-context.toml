@@ -253,10 +253,13 @@
 # - ApiClient::send_to_pane(pane_id?, label?, text, enter): send_text, or
 #   run_command (text + Enter) when enter; pane addressed exactly like the
 #   tools (pane_id wins). Web form mirrors the tool runner: free-text
-#   pane_id + label inputs with <datalist> dropdowns. Dropdowns, the Home
-#   pane table and the template form's pane suggestions all read
-#   GET /api/variables/auto via vars::{auto_panes, pane_names} (one source;
-#   the per-page list_panes suggestion fetch is gone).
+#   pane_id + label inputs with <datalist> dropdowns. All pane dropdowns
+#   come from components/pane_options.rs: PaneOptions renders #pane-ids /
+#   #pane-labels from GET /api/variables/auto (vars::{auto_panes,
+#   pane_names}); pane_list(field) picks the list ("label" -> labels, names
+#   containing "pane" -> ids). Home passes its own fetch (it also feeds the
+#   pane table); Playground mounts LivePaneOptions once for the tool runner,
+#   herdr API, recipe builder and template form (DynamicForm text inputs).
 # - /api/variables/auto = server::pane_vars: herdr pane JSON per pane id with
 #   the registry handle's non-empty fields laid over it (also under its
 #   role), then the workspace's var_set vars. AgentRegistry::seed(Option<ws>)

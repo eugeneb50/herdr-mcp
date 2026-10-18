@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use super::forms::{DynamicForm, ResponseViewer, build_params};
 use super::runner::{ToolInfo, schema_parts, tool_groups, tool_list};
 use crate::client::use_api;
+use crate::components::pane_options::pane_list;
 use crate::vars::substitute;
 use herdr_mcp_api::{
     CreateRecipeRequest, InstantiateTemplateRequest, Recipe, RecipeStep, RecipeTemplate,
@@ -583,7 +584,7 @@ pub fn RecipeLibrary(on_select: EventHandler<Loaded>, refresh_key: u32) -> Eleme
 
 /// Variables of a template, filled in before it loads into the builder.
 /// The server does the substitution (`/api/templates/{id}/instantiate`);
-/// pane fields suggest the live panes from the auto variables.
+/// pane fields suggest the live panes (the Playground's `LivePaneOptions`).
 #[component]
 fn TemplateForm(
     template: RecipeTemplate,
@@ -602,14 +603,6 @@ fn TemplateForm(
             .collect()
     });
     let mut error: Signal<Option<String>> = use_signal(|| None);
-    let panes = use_resource(move || {
-        let client = client();
-        async move {
-            // Suggestions are optional: no panes if the call fails.
-            let auto = client.auto_variables(None).await.unwrap_or_default();
-            crate::vars::auto_panes(&auto.variables)
-        }
-    });
     let missing = template.variables.iter().any(|v| {
         v.required
             && values
@@ -643,14 +636,6 @@ fn TemplateForm(
         div { class: "card",
             h3 { class: "card-title", "{template.name}" }
             p { class: "field-desc", "{template.description}" }
-            datalist { id: "live-panes",
-                for p in panes.read().clone().unwrap_or_default() {
-                    option {
-                        value: "{p.pane_id}",
-                        "{crate::vars::pane_text([&p.label, &p.agent, &p.cwd])}"
-                    }
-                }
-            }
             for var in template.variables.iter().cloned() {
                 div { key: "{var.name}", class: "field",
                     label { class: "field-head",
@@ -663,7 +648,7 @@ fn TemplateForm(
                     input {
                         class: "input",
                         r#type: "text",
-                        list: if var.name.contains("pane") { "live-panes" } else { "" },
+                        list: pane_list(&var.name),
                         value: "{values.read().get(&var.name).cloned().unwrap_or_default()}",
                         oninput: move |e| {
                             values.write().insert(var.name.clone(), e.value());

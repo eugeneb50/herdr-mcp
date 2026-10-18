@@ -2,6 +2,7 @@
 
 pub mod home;
 pub mod overview;
+pub mod pane_options;
 pub mod playground;
 pub mod settings;
 pub mod trim;

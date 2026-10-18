@@ -711,7 +711,7 @@ Cron-based recipe scheduling using the `cron` crate:
 |---|---|---|
 | `/` | `Home` | Landing page: send to a pane by `pane_id` and/or `label` (typed, or picked from dropdowns of the panes and labels/roles in `GET /api/variables/auto`; `ApiClient::send_to_pane` → `send_text` / `run_command`, `pane_id` wins), remembers the last target in `localStorage`; collapsed getting-started notes; pane table at the bottom from the same auto variables (click a row to target it) |
 | `/overview` | `Overview` | Pane browser: `GET /api/herdr/panes` with session/status/label filters, grouped by workspace and tab |
-| `/playground` | `Playground` | Tool runner (schema-driven form) + recipe builder/library |
+| `/playground` | `Playground` | Tool runner (schema-driven form) + recipe builder/library; `pane_id` / `label` fields offer the same auto-variable pane dropdowns as Home (`components/pane_options.rs`) |
 | `/trim` | `Trim` | Trim savings, per-pane bars, active policies, diagnose/summary |
 | `/variables` | `Variables` | User variables (CRUD/import) + auto variables |
 | `/settings` | `Settings` | Runtime config + clipboard round-trip test |

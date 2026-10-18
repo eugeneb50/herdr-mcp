@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+use crate::components::pane_options::pane_list;
 use herdr_mcp_api::schema_type;
 
 /// Tool arguments from raw form values: each `resolve`d (variable
@@ -173,6 +174,7 @@ pub fn DynamicForm(
                                 input {
                                     class: "input",
                                     r#type: "text",
+                                    list: pane_list(&key),
                                     placeholder: if is_required { "required" } else { "optional" },
                                     value: "{val}",
                                     oninput: {
