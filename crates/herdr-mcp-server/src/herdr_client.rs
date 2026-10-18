@@ -216,11 +216,16 @@ impl AgentRegistry {
         self.inner.read().await.values().cloned().collect()
     }
 
-    /// Build the variable seed for a recipe run: `{{pane_id.output}}` and
-    /// `{{role.output}}` both resolve to the agent handle.
-    pub async fn seed(&self, ws: &str) -> HashMap<String, serde_json::Value> {
+    /// Agent handles as variables — `{{pane_id.output}}` and
+    /// `{{role.output}}` both resolve to the handle — for one workspace, or
+    /// every workspace when `ws` is `None`.
+    pub async fn seed(&self, ws: Option<&str>) -> HashMap<String, serde_json::Value> {
+        let handles = match ws {
+            Some(ws) => self.list_for_ws(ws).await,
+            None => self.inner_snapshot().await,
+        };
         let mut out = HashMap::new();
-        for h in self.list_for_ws(ws).await {
+        for h in handles {
             let obj = serde_json::json!({
                 "pane_id": h.pane_id,
                 "workspace_id": h.workspace_id,
@@ -822,7 +827,7 @@ mod tests {
         let reg = make_registry();
         reg.upsert("p1", "w1", "", "claude", "agentA").await;
         reg.set_output("p1", "out".into()).await;
-        let seed = reg.seed("w1").await;
+        let seed = reg.seed(Some("w1")).await;
         assert!(seed.contains_key("p1"));
         assert!(seed.contains_key("agentA"));
         assert_eq!(seed.get("p1").unwrap()["output"], serde_json::json!("out"));

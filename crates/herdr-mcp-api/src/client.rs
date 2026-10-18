@@ -251,15 +251,16 @@ impl ApiClient {
     }
 
     /// Type `text` into a pane: `send_text`, or `run_command` (text + Enter)
-    /// when `enter`. Addressed by id — the exact pane picked, even if its
-    /// label changed or now names two panes.
+    /// when `enter`. The pane is addressed like the tools address it:
+    /// `pane_id` and/or `label`, `pane_id` winning when both are set.
     pub async fn send_to_pane(
         &self,
-        pane_id: &str,
+        pane_id: Option<&str>,
+        label: Option<&str>,
         text: &str,
         enter: bool,
     ) -> Result<(), ApiError> {
-        let (tool, params) = send_call(pane_id, text, enter);
+        let (tool, params) = send_call(pane_id, label, text, enter);
         let v = self.call_tool(tool, &params).await?;
         tool_ok(&v).map(|_| ())
     }
@@ -535,14 +536,26 @@ pub fn tool_is_error(v: &Value) -> bool {
 }
 
 /// The tool call [`ApiClient::send_to_pane`] makes.
-fn send_call(pane_id: &str, text: &str, enter: bool) -> (&'static str, Value) {
-    if enter {
-        let params = serde_json::json!({ "pane_id": pane_id, "command": text });
-        ("run_command", params)
+fn send_call(
+    pane_id: Option<&str>,
+    label: Option<&str>,
+    text: &str,
+    enter: bool,
+) -> (&'static str, Value) {
+    let (tool, key) = if enter {
+        ("run_command", "command")
     } else {
-        let params = serde_json::json!({ "pane_id": pane_id, "text": text });
-        ("send_text", params)
+        ("send_text", "text")
+    };
+    let mut params = serde_json::Map::new();
+    if let Some(id) = pane_id {
+        params.insert("pane_id".into(), id.into());
     }
+    if let Some(l) = label {
+        params.insert("label".into(), l.into());
+    }
+    params.insert(key.into(), text.into());
+    (tool, Value::Object(params))
 }
 
 /// Map a tool result with `isError: true` to [`ApiError::Tool`].
@@ -566,17 +579,17 @@ mod tests {
     #[test]
     fn send_call_picks_tool() {
         assert_eq!(
-            send_call("w1:p2", "hi", false),
+            send_call(Some("w1:p2"), None, "hi", false),
             (
                 "send_text",
                 serde_json::json!({"pane_id": "w1:p2", "text": "hi"})
             )
         );
         assert_eq!(
-            send_call("w1:p1", "make", true),
+            send_call(None, Some("builder"), "make", true),
             (
                 "run_command",
-                serde_json::json!({"pane_id": "w1:p1", "command": "make"})
+                serde_json::json!({"label": "builder", "command": "make"})
             )
         );
     }

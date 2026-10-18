@@ -583,7 +583,7 @@ pub fn RecipeLibrary(on_select: EventHandler<Loaded>, refresh_key: u32) -> Eleme
 
 /// Variables of a template, filled in before it loads into the builder.
 /// The server does the substitution (`/api/templates/{id}/instantiate`);
-/// pane fields suggest the live pane ids.
+/// pane fields suggest the live panes from the auto variables.
 #[component]
 fn TemplateForm(
     template: RecipeTemplate,
@@ -604,7 +604,11 @@ fn TemplateForm(
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let panes = use_resource(move || {
         let client = client();
-        async move { live_panes(&client).await }
+        async move {
+            // Suggestions are optional: no panes if the call fails.
+            let auto = client.auto_variables(None).await.unwrap_or_default();
+            crate::vars::auto_panes(&auto.variables)
+        }
     });
     let missing = template.variables.iter().any(|v| {
         v.required
@@ -640,8 +644,11 @@ fn TemplateForm(
             h3 { class: "card-title", "{template.name}" }
             p { class: "field-desc", "{template.description}" }
             datalist { id: "live-panes",
-                for (pane, label) in panes.read().clone().unwrap_or_default() {
-                    option { value: "{pane}", "{label}" }
+                for p in panes.read().clone().unwrap_or_default() {
+                    option {
+                        value: "{p.pane_id}",
+                        "{crate::vars::pane_text([&p.label, &p.agent, &p.cwd])}"
+                    }
                 }
             }
             for var in template.variables.iter().cloned() {
@@ -678,26 +685,6 @@ fn TemplateForm(
             }
         }
     }
-}
-
-/// `(pane_id, "label · cwd")` for every pane herdr reports (empty if the
-/// call fails: suggestions are optional).
-async fn live_panes(client: &crate::client::ApiClient) -> Vec<(String, String)> {
-    let panes = client
-        .list_panes(&Default::default())
-        .await
-        .unwrap_or_default();
-    panes
-        .into_iter()
-        .map(|p| {
-            let label = [p.label, p.agent, p.cwd]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(" · ");
-            (p.pane_id, label)
-        })
-        .collect()
 }
 
 /// `when` as the editor shows it: `agent_status=done, pane.tab_id=w1:t1`.

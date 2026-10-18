@@ -66,9 +66,6 @@ body {
 .lede { color: var(--muted); line-height: 1.6; max-width: 42rem; }
 .lede code { color: var(--accent); font-family: ui-monospace, monospace; }
 
-.hero { margin-bottom: 2.5rem; }
-.hero-title { font-size: 2.6rem; margin: 0 0 1rem; letter-spacing: -0.02em; }
-.hero-actions { display: flex; gap: 0.75rem; margin-top: 1.5rem; }
 
 .card {
   border: 1px solid var(--border);
@@ -143,6 +140,9 @@ body {
 .table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
 .table th { text-align: left; color: var(--muted); font-weight: 500; padding: 0.5rem; border-bottom: 1px solid var(--border); }
 .table td { padding: 0.5rem; border-bottom: 1px solid var(--border); }
+.row-pick { cursor: pointer; }
+.row-pick:hover { background: rgba(23, 23, 23, 0.7); }
+.row-sel td { color: var(--accent); }
 
 .pill {
   display: inline-block;

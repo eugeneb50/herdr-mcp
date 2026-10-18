@@ -1,25 +1,17 @@
 //! Routes + shared shell (header/nav) for the herdr-mcp web UI.
-//!
-//! Port order per spec: shell → docs → overview → trim → variables →
-//! settings → playground. This step lands shell/home/docs/overview/trim;
-//! variables/settings/playground routes arrive with their ports.
 
-pub mod docs;
 pub mod home;
 pub mod overview;
 pub mod playground;
-pub mod send;
 pub mod settings;
 pub mod trim;
 pub mod variables;
 
 use dioxus::prelude::*;
 
-use docs::Docs;
 use home::Home;
 use overview::Overview;
 use playground::Playground;
-use send::Send;
 use settings::Settings;
 use trim::Trim;
 use variables::Variables;
@@ -29,11 +21,7 @@ use variables::Variables;
 pub enum Route {
     #[layout(Shell)]
         #[route("/")]
-        Send {},
-        #[route("/home")]
         Home {},
-        #[route("/docs")]
-        Docs {},
         #[route("/overview")]
         Overview {},
         #[route("/playground")]
@@ -59,9 +47,7 @@ fn Shell() -> Element {
                 }
             }
             nav { class: "nav",
-                Link { class: "nav-link", to: Route::Send {}, "Send" }
                 Link { class: "nav-link", to: Route::Home {}, "Home" }
-                Link { class: "nav-link", to: Route::Docs {}, "Docs" }
                 Link { class: "nav-link", to: Route::Overview {}, "Overview" }
                 Link { class: "nav-link", to: Route::Playground {}, "Playground" }
                 Link { class: "nav-link", to: Route::Trim {}, "Trim" }

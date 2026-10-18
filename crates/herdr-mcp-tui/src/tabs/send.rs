@@ -171,7 +171,7 @@ async fn send(app: &mut App) {
     };
     let pane_id = pane.pane_id.clone();
     let enter = app.send.enter;
-    match http.send_to_pane(&pane_id, &text, enter).await {
+    match http.send_to_pane(Some(&pane_id), None, &text, enter).await {
         Ok(()) => {
             let how = if enter { " + Enter" } else { "" };
             app.send.msg = format!(

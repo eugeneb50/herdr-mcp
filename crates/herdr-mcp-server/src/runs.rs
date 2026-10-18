@@ -367,21 +367,9 @@ async fn seed_scope(server: &HerdrMcpServer, ws: &str, scope: &mut HashMap<Strin
             .entry(key.to_string())
             .or_insert_with(|| Value::String(ws.to_string()));
     }
-    scope.extend(server.registry.seed(ws).await);
-    for handle in server.registry.inner_snapshot().await {
-        let obj = serde_json::json!({
-            "pane_id": handle.pane_id,
-            "workspace_id": handle.workspace_id,
-            "tab_id": handle.tab_id,
-            "agent": handle.agent,
-            "role": handle.role,
-            "status": handle.status,
-            "output": handle.output,
-        });
-        scope.entry(handle.pane_id.clone()).or_insert(obj.clone());
-        if !handle.role.is_empty() {
-            scope.entry(handle.role.clone()).or_insert(obj);
-        }
+    scope.extend(server.registry.seed(Some(ws)).await);
+    for (key, obj) in server.registry.seed(None).await {
+        scope.entry(key).or_insert(obj);
     }
 }
 

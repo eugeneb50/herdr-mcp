@@ -3747,56 +3747,66 @@ async fn list_variables_handler(
 
 /// `GET /api/variables/auto[?workspace_id=w1]` — variables resolved on
 /// request, never stored: every live herdr pane under its pane id (from
-/// `herdr pane list`), overlaid by the agent registry (by pane id and role),
-/// plus the workspace's `var_set` session variables when one is given.
+/// `herdr pane list`), with its agent registry handle's non-empty fields laid
+/// over it (and the merged pane also under the handle's role), then the
+/// workspace's `var_set` session variables when one is given.
 async fn auto_variables_handler(
     State(AppState { server, .. }): State<AppState>,
     Query(params): Query<TrimStatusParams>,
 ) -> Json<AutoVariablesResponse> {
     let ws = params.workspace_id.filter(|s| !s.trim().is_empty());
-    let mut merged = HashMap::new();
-    if let Some(ws) = &ws {
-        merged.extend(server.registry.seed(ws).await);
-        if let Ok(bag) = server.persistence.load_session_vars(ws).await {
-            merged.extend(bag.variables);
-        }
-    }
-    for handle in server.registry.inner_snapshot().await {
-        if ws.as_ref().is_some_and(|ws| *ws != handle.workspace_id) {
-            continue;
-        }
-        let obj = serde_json::json!({
-            "pane_id": handle.pane_id,
-            "workspace_id": handle.workspace_id,
-            "tab_id": handle.tab_id,
-            "agent": handle.agent,
-            "role": handle.role,
-            "status": handle.status,
-            "output": handle.output,
-        });
-        merged.entry(handle.pane_id.clone()).or_insert(obj.clone());
-        if !handle.role.is_empty() {
-            merged.entry(handle.role.clone()).or_insert(obj);
-        }
-    }
     let filter = herdr_mcp_api::PaneFilter {
         workspace_id: ws.clone(),
         ..Default::default()
     };
-    match crate::panes::panes(&filter).await {
-        Ok(panes) => {
-            for pane in panes {
-                if let Ok(obj) = serde_json::to_value(&pane) {
-                    merged.entry(pane.pane_id).or_insert(obj);
-                }
-            }
+    let panes: HashMap<String, serde_json::Value> = match crate::panes::panes(&filter).await {
+        Ok(panes) => panes
+            .into_iter()
+            .filter_map(|p| Some((p.pane_id.clone(), serde_json::to_value(p).ok()?)))
+            .collect(),
+        Err(e) => {
+            tracing::debug!("auto variables: herdr pane list: {}", e.message);
+            HashMap::new()
         }
-        Err(e) => tracing::debug!("auto variables: herdr pane list: {}", e.message),
+    };
+    let mut merged = pane_vars(panes, server.registry.seed(ws.as_deref()).await);
+    if let Some(ws) = &ws
+        && let Ok(bag) = server.persistence.load_session_vars(ws).await
+    {
+        merged.extend(bag.variables);
     }
     Json(AutoVariablesResponse {
         workspace_id: ws.unwrap_or_default(),
         variables: merged,
     })
+}
+
+/// Live panes (by pane id) with the registry handles (by pane id and role,
+/// from `AgentRegistry::seed`) laid over them, non-empty fields winning.
+fn pane_vars(
+    mut panes: HashMap<String, serde_json::Value>,
+    handles: HashMap<String, serde_json::Value>,
+) -> HashMap<String, serde_json::Value> {
+    let mut merged = HashMap::new();
+    for (key, handle) in handles {
+        let pane_id = handle["pane_id"].as_str().unwrap_or_default();
+        let mut obj = panes
+            .get(pane_id)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let (Some(obj), Some(fields)) = (obj.as_object_mut(), handle.as_object()) {
+            for (k, v) in fields {
+                if v.as_str() != Some("") {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        merged.insert(key, obj);
+    }
+    for (pane_id, obj) in panes.drain() {
+        merged.entry(pane_id).or_insert(obj);
+    }
+    merged
 }
 
 /// `GET /api/playground?workspace_id=w1` — load last-used playground values.
@@ -3899,6 +3909,7 @@ mod tests {
     use super::*;
     use crate::variables::RecipeStep;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
     use std::collections::HashMap;
 
     fn sample_results() -> HashMap<String, serde_json::Value> {
@@ -3915,6 +3926,31 @@ mod tests {
             serde_json::json!({ "output": "world", "n": 42 }),
         );
         m
+    }
+
+    #[test]
+    fn pane_vars_overlays_handles_on_live_panes() {
+        let panes = HashMap::from([
+            (
+                "w1:p1".to_string(),
+                json!({"pane_id": "w1:p1", "label": "builder", "cwd": "/w", "agent": "claude"}),
+            ),
+            ("w1:p2".to_string(), json!({"pane_id": "w1:p2"})),
+        ]);
+        let handle = json!({"pane_id": "w1:p1", "role": "builder", "agent": "", "output": "ok"});
+        let handles = HashMap::from([
+            ("w1:p1".to_string(), handle.clone()),
+            ("builder".to_string(), handle),
+        ]);
+        let vars = pane_vars(panes, handles);
+        let want = json!({
+            "pane_id": "w1:p1", "label": "builder", "cwd": "/w", "agent": "claude",
+            "role": "builder", "output": "ok"
+        });
+        assert_eq!(vars["w1:p1"], want);
+        assert_eq!(vars["builder"], want);
+        assert_eq!(vars["w1:p2"], json!({"pane_id": "w1:p2"}));
+        assert_eq!(vars.len(), 3);
     }
 
     #[test]

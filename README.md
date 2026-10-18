@@ -39,8 +39,9 @@ Requires the `herdr` CLI on `PATH` ([install](https://herdr.dev)), 0.9 or newer.
 
 Running without any subcommand starts the MCP stdio server and the HTTP bridge
 on `127.0.0.1:7676` — open http://localhost:7676/ for the web UI (build it
-first, see [Install & build](#install--build)). It lands on **Send**: pick a
-pane by label, type, Enter.
+first, see [Install & build](#install--build)). It lands on **Home**: set a
+`pane_id` or `label` (type it or pick from the dropdown, or click a pane in the
+list below), type, Enter.
 
 ### Other entry points
 
@@ -64,7 +65,7 @@ herdr-trim folder-key    # per-folder PFC1 key management
 - **Live herdr events** — the bridge relays herdr's event stream as SSE (`/api/herdr/events`); the playground shows it live
 - **Cron scheduler** — schedule recipe runs on cron expressions
 - **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: tools, herdr API, recipe builder with triggers, runs, variables, herdr events
-- **Send to a pane** — the web UI and the TUI open on it: pick a pane by label, type, Enter sends (optionally pressing Enter in the pane)
+- **Send to a pane** — the web UI (Home) and the TUI open on it: pick a pane by `pane_id`/label, type, Enter sends (optionally pressing Enter in the pane)
 - **TUI dashboard** — VS Code-style tabbed terminal dashboard (mouse + keyboard): send, overview, playground, trim analytics, variables, settings
 - **Message-trim pipeline** — `caveman` (lossy style) + `pfc1` (lossless Cherokee-syllabary phonetic) compressors for agent-to-agent comms, with per-pane trim policies
 - **Live agent registry** — Unix socket event subscriber tracks panes and agent status in real time; role/label resolution for a2a primitives

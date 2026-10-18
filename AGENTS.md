@@ -216,7 +216,7 @@ When uncertain, classify as higher risk.
 - **herdr events** — herdr reads nothing more on a connection after `events.subscribe`, so the subscriber reconnects (with a fresh pane list) on `pane.created` / `pane.closed` instead of re-subscribing. Global events arrive as `pane_created`; `HerdrEvent::parse` normalizes them to the subscription name `pane.created`.
 - **Triggers live on recipes** — `Recipe.triggers` is the only copy, read from disk on every event; a recipe never has two triggered runs in flight (this also stops self-retriggering).
 - **One tool dispatch** — the bridge and run engine call tools through rmcp's router over an in-process MCP session, never a hand-written match. Tool groups come from each tool's `#[tool(meta = category("…"))]`.
-- **Auto variables are a view** — `GET /api/variables/auto` resolves live herdr panes + registry agents (+ a workspace's `var_set` vars) on request; tool calls never write variables behind the user's back.
+- **Auto variables are a view** — `GET /api/variables/auto` resolves live herdr panes with their registry handles laid over them (by pane id and role, `AgentRegistry::seed`) (+ a workspace's `var_set` vars) on request — the pane dropdowns and the Home pane table read it; tool calls never write variables behind the user's back.
 - **Host allowlist** — the bridge answers only `localhost`, `*.localhost`, IP literals and its bind name (DNS-rebinding guard; it can type into panes).
 - **Default command is `serve`** — running `herdr-mcp` with no arguments starts MCP stdio + HTTP on port 7676 (bound to `127.0.0.1`).
 

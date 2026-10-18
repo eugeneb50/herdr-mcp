@@ -246,14 +246,24 @@
 
 # Send-to-pane landing (feat/quick-send, stacked on #33, 2026-10-17)
 #
-# - The user's main action is "send text to a pane by label". Web `/` is the
-#   Send page (Home moved to /home); TUI opens on tab 1 Send (tabs Ctrl+1-6).
-# - ApiClient::send_to_pane(pane_id, text, enter): send_text, or run_command
-#   (text + Enter) when enter. Addressed by PANE ID on purpose: a client-side
-#   label-uniqueness check races herdr (the TUI context refreshes every 15 s),
-#   which sent by a label that had just become ambiguous -> server error.
-#   The user still picks by label; the id is the row they picked.
-# - Web remembers the last pane in localStorage (label, then id); "press
+# - The user's main action is "send text to a pane by label". Web `/` is
+#   Home: Send + Home + Docs merged into one page (send form, collapsed
+#   getting-started, live pane table at the bottom; click a row to target
+#   it). TUI opens on tab 1 Send (tabs Ctrl+1-6).
+# - ApiClient::send_to_pane(pane_id?, label?, text, enter): send_text, or
+#   run_command (text + Enter) when enter; pane addressed exactly like the
+#   tools (pane_id wins). Web form mirrors the tool runner: free-text
+#   pane_id + label inputs with <datalist> dropdowns. Dropdowns, the Home
+#   pane table and the template form's pane suggestions all read
+#   GET /api/variables/auto via vars::{auto_panes, pane_names} (one source;
+#   the per-page list_panes suggestion fetch is gone).
+# - /api/variables/auto = server::pane_vars: herdr pane JSON per pane id with
+#   the registry handle's non-empty fields laid over it (also under its
+#   role), then the workspace's var_set vars. AgentRegistry::seed(Option<ws>)
+#   is the one builder of handle variables (runs::seed_scope used to copy it). The TUI
+#   sends by PANE ID on purpose: a client-side label-uniqueness check races
+#   herdr (its context refreshes every 15 s).
+# - Web remembers the last pane_id/label as typed in localStorage; "press
 #   Enter after" defaults on. TUI: ↑/↓ pane, type, Enter send, Ctrl+t toggle,
 #   Esc clear; refuses while viewing another session.
 # - 343 tests.
