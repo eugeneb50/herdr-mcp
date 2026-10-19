@@ -1,7 +1,7 @@
 [package]
 name = "herdr-mcp-api"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 description = "Wire contract for the herdr-mcp HTTP bridge: shared types + typed client (native + wasm)."
 
 # Leaf crate: must stay wasm32-compatible (consumed by the Dioxus web UI).

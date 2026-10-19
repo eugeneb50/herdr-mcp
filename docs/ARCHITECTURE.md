@@ -142,7 +142,7 @@ herdr-mcp/
 │   ├── herdr-mcp-tui/      # TUI dashboard (crossterm + ratatui); bridge client only
 │   │   └── src/
 │   │       ├── lib.rs      # App state, event loop, mouse handling
-│   │       ├── http.rs     # Bridge discovery; every call goes through ApiClient
+│   │       ├── http.rs     # Bridge liveness probe (configured port only); every call goes through ApiClient
 │   │       ├── theme.rs    # Color palette and styles
 │   │       └── tabs/       # overview, playground, trim, variables, settings
 │   ├── herdr-mcp-server/   # MCP server, tools, HTTP bridge
@@ -806,7 +806,7 @@ cargo fmt --all -- --check
 herdr-mcp                         # MCP stdio + HTTP bridge on port 7676
 herdr-mcp serve                   # Explicit MCP + HTTP
 herdr-trim dashboard              # TUI dashboard
-herdr-mcp plugin link             # register herdr-mcp as a herdr plugin (see §13.3)
+herdr-mcp plugin manifest         # print the herdr plugin manifest (see §13.3)
 herdr-mcp trim --stage caveman:full --stage pfc1 "text to compress"
 herdr-mcp trim --decompress "compressed text"
 herdr-mcp trim --file input.txt
@@ -818,10 +818,23 @@ herdr-mcp folder-key decompress ./my-folder "compressed text"
 
 ### 13.3 herdr Plugin
 
-`herdr-mcp plugin link` writes `~/.config/herdr-mcp/herdr-plugin/herdr-plugin.toml`
-(generated in `crates/herdr-mcp-cli/src/plugin.rs`, commands pointing at this
-binary; bridge port and data dir taken from config at link time) and runs
-`herdr plugin link`. `--print` shows the manifest; `plugin unlink` removes it.
+The repo-root `herdr-plugin.toml` is generated from
+`crates/herdr-mcp-cli/src/plugin.rs::manifest` (`herdr-mcp plugin manifest >
+herdr-plugin.toml`; a test fails when they differ), so `herdr plugin install
+eugeneb50/herdr-mcp` works and the repo can carry the `herdr-plugin`
+marketplace topic. `[[build]]` runs `scripts/plugin-build.sh` (release
+`herdr-mcp` + `herdr-trim` into `bin/`, web UI when `dx` exists); every command
+runs `./bin/…` from the plugin directory and resolves port and data dir from
+config at run time. With no `data_dir` configured, a process herdr runs as this
+plugin (`HERDR_PLUGIN_ID=herdr-mcp`) defaults to `HERDR_PLUGIN_STATE_DIR`, not
+the checkout (replaced on update). Project-local config
+(`herdr-mcp.toml` in the working directory) is skipped as the
+plugin: that directory is the checkout. `[[startup]]` and the
+`workspace.created` event hook run `plugin startup`: open the `bridge` pane
+unless a bridge already answers on `http.port` (a fresh server with no
+workspace yet waits for the first one). The recipe picker, web action and TUI
+dashboard only talk to the bridge on the configured port (no fallback ports:
+another bridge may serve another data dir).
 
 | Action (`herdr-mcp.<id>`) | Opens |
 |---|---|

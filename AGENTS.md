@@ -81,8 +81,8 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release  # build served by 
 herdr-mcp                                   # MCP stdio + HTTP on 127.0.0.1:7676
 herdr-mcp serve                             # same, with flags (--http, --data-dir, --herdr-socket, …)
 herdr-mcp serve --http 7676 --http-only     # HTTP bridge only
-herdr-mcp plugin link                       # register the herdr plugin (--print shows the manifest)
-herdr-mcp plugin unlink
+herdr-mcp plugin manifest                   # print herdr-plugin.toml (regenerate after changing plugin.rs)
+sh scripts/plugin-build.sh && herdr plugin link .   # the herdr plugin from this checkout
 herdr-trim dashboard                        # TUI dashboard (bridge client)
 herdr-trim trim "text to compress"          # message trim
 herdr-trim folder-key                       # per-folder PFC1 keys
@@ -90,7 +90,7 @@ herdr-trim folder-key                       # per-folder PFC1 keys
 
 **Smoke testing against herdr:** never create panes or link plugins in the
 user's live herdr session. Use an isolated session (`HERDR_SESSION=hmcp-smoke`),
-an explicit `--data-dir` under a temp dir, and, for `plugin link`, a short
+an explicit `--data-dir` under a temp dir, and, for `herdr plugin link`, a short
 `XDG_CONFIG_HOME` under `/tmp` (herdr's plugin registry is global per user).
 
 ## Project Snapshot
@@ -203,7 +203,8 @@ When uncertain, classify as higher risk.
 
 - **Shell-out architecture** — every tool shells out via `tokio::process::Command` with real argv (no shell injection). The CLI is herdr's stable surface. Trade-off: higher latency per call vs. direct socket. The socket is used only for the event subscription and `herdr_api`.
 - **Stdout = MCP, Stderr = logs** — prevents log output from corrupting the MCP protocol stream.
-- **One server instance** — `serve_core` builds one `HerdrMcpServer` and starts the background tasks (trim poller, scheduler, triggers, HTTP) once; stdio reuses it. A second instance would fire every schedule and trigger again.
+- **One server instance** — `serve_core` builds one `HerdrMcpServer` and starts the background tasks once; stdio reuses it.
+- **One daemon per data dir** — many herdr-mcp processes can share a data dir (MCP clients, the plugin's bridge, the dashboard). Only the holder of `<data_dir>/daemon.lock` fires schedules and triggers and pushes trim badges; the others retry every 15 s and take over when it exits. `Scheduler::schedule_one` only saves; the daemon's `Scheduler::run` picks saved schedules up within 5 s.
 - **One web UI** — the Dioxus app (`crates/herdr-mcp-ui`) is the only web frontend. The bridge serves its `dx bundle` output from `http.web-dir` (env `HERDR_MCP_WEB_DIR`) with SPA fallback to `index.html`; no CORS layer since the UI is same-origin (or proxied by `dx serve`).
 - **Non-colliding compressors** — `caveman` operates on ASCII/Latin prose (U+0000–U+007F); `pfc1` uses Cherokee syllabary (U+13A0–U+13FF). The two cannot interfere, making composition trivially safe.
 - **Adaptive gate (never expand)** — if `candidate.len() >= current.len()`, pass through unchanged. Prevents short messages from drowning in PFC1 headers.

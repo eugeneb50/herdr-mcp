@@ -6,7 +6,7 @@
 #![deny(clippy::correctness)]
 #![deny(clippy::suspicious)]
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use herdr_mcp_core::{CliOverrides, Config};
@@ -41,12 +41,13 @@ enum Command {
 
     /// Open the dashboard (bridge-backed UI) for trim savings.
     Dashboard {
-        /// Data directory (default `./data`, `HERDR_MCP_DATA_DIR`, herdmcp.toml).
+        /// Data directory (default `./data`, `HERDR_MCP_DATA_DIR`, config file).
         #[arg(long)]
         data_dir: Option<std::path::PathBuf>,
-        /// HTTP bridge port the dashboard talks to (playground/recipe builder).
-        #[arg(long, default_value_t = 7676)]
-        http_port: u16,
+        /// HTTP bridge port the dashboard talks to (default: `http.port`
+        /// from config).
+        #[arg(long)]
+        http_port: Option<u16>,
     },
 
     /// Manage per-folder PFC1 phonetic keys (scan, list, decompress).
@@ -100,13 +101,16 @@ fn main() -> Result<()> {
         // reads pane state from the live AgentRegistry via the bridge.
         let config = Config::load(Some(CliOverrides {
             data_dir: data_dir.clone(),
-            http_port: Some(*http_port),
+            http_port: *http_port,
             http_only: Some(true),
             ..Default::default()
         }))?;
         // SAFETY: single-threaded here; the runtime starts below.
         unsafe { config.export_herdr_socket() };
-        let http_port = *http_port;
+        let http_port = config
+            .http
+            .port
+            .context("no bridge port: pass --http-port or set http.port")?;
         return tokio::runtime::Runtime::new()?.block_on(async move {
             common::run_serve_headless(&config).await?;
             let opts = herdr_mcp_tui::DashboardOptions {

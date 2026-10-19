@@ -713,6 +713,7 @@ mod tests {
             .schedule_one(schedule.clone())
             .await
             .unwrap();
+        server.scheduler.sync().await.unwrap();
 
         let mut found = None;
         for _ in 0..30 {

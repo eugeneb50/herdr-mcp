@@ -1,0 +1,60 @@
+id = "herdr-mcp"
+name = "herdr-mcp"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "MCP server for herdr: recipes, triggers, schedules, dashboard and web playground"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["sh", "scripts/plugin-build.sh"]
+
+[[startup]]
+command = ["./bin/herdr-mcp", "plugin", "startup"]
+
+[[events]]
+on = "workspace.created"
+command = ["./bin/herdr-mcp", "plugin", "startup"]
+
+[[actions]]
+id = "recipes"
+title = "herdr-mcp: run a recipe"
+contexts = ["global", "workspace", "tab", "pane", "selection"]
+command = ["./bin/herdr-mcp", "plugin", "open", "recipes"]
+
+[[actions]]
+id = "bridge"
+title = "herdr-mcp: start the bridge"
+contexts = ["global", "workspace"]
+command = ["./bin/herdr-mcp", "plugin", "open", "bridge"]
+
+[[actions]]
+id = "web"
+title = "herdr-mcp: open the web playground"
+contexts = ["global", "workspace"]
+command = ["./bin/herdr-mcp", "plugin", "web"]
+
+[[actions]]
+id = "dashboard"
+title = "herdr-mcp: open the dashboard"
+contexts = ["global", "workspace", "pane"]
+command = ["./bin/herdr-mcp", "plugin", "open", "dashboard"]
+
+[[panes]]
+id = "recipes"
+title = "Run a recipe"
+placement = "popup"
+width = "80%"
+height = "70%"
+command = ["./bin/herdr-mcp", "plugin", "recipes"]
+
+[[panes]]
+id = "bridge"
+title = "herdr-mcp bridge"
+placement = "tab"
+command = ["./bin/herdr-mcp", "serve", "--http-only"]
+
+[[panes]]
+id = "dashboard"
+title = "herdr-mcp dashboard"
+placement = "split"
+command = ["./bin/herdr-trim", "dashboard"]

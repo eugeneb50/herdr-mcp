@@ -10,6 +10,10 @@ members = [
     "crates/herdr-mcp-ui",
 ]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
 [workspace.dependencies]
 rmcp = { version = "1.7", features = ["server", "client", "transport-io", "macros"] }
 tokio = { version = "1", features = ["full"] }

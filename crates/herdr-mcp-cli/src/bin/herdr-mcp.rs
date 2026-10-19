@@ -35,13 +35,13 @@ enum Command {
         #[arg(long)]
         http_only: bool,
         /// Data directory (default `./data`; also `HERDR_MCP_DATA_DIR` or
-        /// `data_dir` in herdmcp.toml — this flag wins over both).
+        /// `data-dir` in the config file — this flag wins over both).
         #[arg(long)]
         data_dir: Option<std::path::PathBuf>,
         #[arg(long)]
         herdr_socket: Option<std::path::PathBuf>,
     },
-    /// herdr plugin: link/unlink it, and the entry points herdr runs.
+    /// herdr plugin: its manifest, and the entry points herdr runs.
     Plugin {
         #[command(subcommand)]
         command: plugin::PluginCommand,
@@ -70,12 +70,7 @@ fn main() -> Result<()> {
             http_only: Some(*http_only),
             herdr_socket: herdr_socket.clone(),
         }),
-        None => Some(CliOverrides {
-            data_dir: None,
-            http_port: Some(7676),
-            http_only: Some(false),
-            herdr_socket: None,
-        }),
+        None => None,
         Some(Command::Plugin { .. }) => unreachable!("handled above"),
     };
 
@@ -83,4 +78,23 @@ fn main() -> Result<()> {
     // SAFETY: single-threaded here; the runtime starts below.
     unsafe { config.export_herdr_socket() };
     tokio::runtime::Runtime::new()?.block_on(common::run_serve(&config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every command the plugin manifest runs through this binary parses.
+    #[test]
+    fn manifest_commands_parse() {
+        let m = plugin::manifest();
+        let commands = m.actions.iter().map(|a| &a.command);
+        let panes = m.panes.iter().map(|p| &p.command);
+        let hooks = m.startup.iter().map(|h| &h.command);
+        let events = m.events.iter().map(|e| &e.command);
+        let all = commands.chain(panes).chain(hooks).chain(events);
+        for argv in all.filter(|c| c[0] == plugin::EXE) {
+            assert!(Args::try_parse_from(argv).is_ok(), "{argv:?}");
+        }
+    }
 }

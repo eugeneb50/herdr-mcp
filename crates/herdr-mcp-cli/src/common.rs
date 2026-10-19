@@ -33,7 +33,8 @@ pub fn init_tracing() -> Result<()> {
 }
 
 /// Build the full serve stack (persistence, herdr subscriber, registry, HTTP
-/// bridge, recipe triggers) and spawn its background tasks. Does NOT block —
+/// bridge; schedules, triggers and trim badges once this process is the data
+/// dir's daemon, see [`spawn_daemon`]) and spawn its background tasks. Does NOT block —
 /// the spawned tasks live on the Tokio runtime until it shuts down. Returns
 /// the one `HerdrMcpServer` every surface shares (HTTP, stdio, triggers, trim
 /// poller): a single scheduler and one set of live runs. Shared by both
@@ -56,16 +57,7 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
 
     let server = HerdrMcpServer::with_config((*persistence).clone(), registry, config)
         .with_herdr_client(herdr_client.clone());
-    // Periodic trim-badge refresh so savings badges survive server restarts.
-    spawn_trim_poller(std::sync::Arc::new(server.clone()));
-
-    let scheduler = server.scheduler.clone();
-    tokio::spawn(async move {
-        if let Err(e) = scheduler.load_existing().await {
-            tracing::warn!("failed to load existing schedules: {e}");
-        }
-    });
-    triggers::spawn(server.clone(), herdr_client.events());
+    spawn_daemon(server.clone(), herdr_client.clone(), data_dir.clone());
 
     if let Some(port) = config.http.port {
         let server = server.clone();
@@ -84,6 +76,71 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
     }
 
     Ok(server)
+}
+
+/// Lock file in the data dir. Its holder is the data dir's daemon: the one
+/// process that fires schedules and triggers and pushes trim badges, however
+/// many herdr-mcp processes (MCP clients, the bridge, the dashboard) share it.
+const DAEMON_LOCK: &str = "daemon.lock";
+/// How often a process without the lock tries again, so one of them takes
+/// over when the daemon exits.
+const DAEMON_RETRY: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Become the data dir's daemon once its lock is free, then run the
+/// background work only the daemon does. The lock is held (and released by
+/// the OS) for the life of the process.
+fn spawn_daemon(
+    server: HerdrMcpServer,
+    herdr_client: std::sync::Arc<HerdrClient>,
+    data_dir: std::path::PathBuf,
+) {
+    let path = data_dir.join(DAEMON_LOCK);
+    tokio::spawn(async move {
+        let mut told = false;
+        let _lock = loop {
+            match try_lock(&path) {
+                Ok(Some(file)) => break file,
+                Ok(None) if !told => {
+                    tracing::info!(
+                        "another herdr-mcp holds {}; it runs schedules and triggers",
+                        path.display()
+                    );
+                    told = true;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "cannot lock {}: {e}; schedules and triggers off",
+                        path.display()
+                    );
+                    return;
+                }
+            }
+            tokio::time::sleep(DAEMON_RETRY).await;
+        };
+        tracing::info!(
+            "daemon for {}: running schedules and triggers",
+            data_dir.display()
+        );
+        // Periodic trim-badge refresh so savings badges survive server restarts.
+        spawn_trim_poller(std::sync::Arc::new(server.clone()));
+        triggers::spawn(server.clone(), herdr_client.events());
+        server.scheduler.run().await;
+    });
+}
+
+/// The lock file, exclusively locked, or `None` if another process holds it.
+fn try_lock(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
 }
 
 /// `serve` — full MCP server (stdio + optional HTTP).
@@ -126,4 +183,20 @@ pub fn build_herdr_client(
         reconnect_backoff_ms,
     );
     std::sync::Arc::new(client)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_daemon_per_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(DAEMON_LOCK);
+        let first = try_lock(&path).unwrap();
+        assert!(first.is_some());
+        assert!(try_lock(&path).unwrap().is_none(), "second holder");
+        drop(first);
+        assert!(try_lock(&path).unwrap().is_some(), "takeover after exit");
+    }
 }

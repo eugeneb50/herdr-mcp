@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.1.0--dev-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-343%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-337%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-7%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
@@ -21,7 +21,7 @@ MCP (Model Context Protocol) server written in Rust that exposes [herdr](https:/
   - [HTTP API](#http-api)
   - [Recipe format](#recipe-format)
   - [Environment](#environment)
-- [Tools (55)](#tools-55)
+- [Tools (54)](#tools-54)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
@@ -38,16 +38,14 @@ cargo build --release
 Requires the `herdr` CLI on `PATH` ([install](https://herdr.dev)), 0.9 or newer.
 
 Running without any subcommand starts the MCP stdio server and the HTTP bridge
-on `127.0.0.1:7676` — open http://localhost:7676/ for the web UI (build it
-first, see [Install & build](#install--build)). It lands on **Home**: set a
-`pane_id` or `label` (type it or pick from the dropdown, or click a pane in the
-list below), type, Enter.
+on `127.0.0.1:7676` — open http://localhost:7676/ for the web playground (build
+it first, see [Install & build](#install--build)).
 
 ### Other entry points
 
 ```bash
 herdr-mcp serve          # explicit MCP + HTTP
-herdr-mcp plugin link    # register herdr-mcp as a herdr plugin
+herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 herdr-trim dashboard     # TUI dashboard with mouse + keyboard nav
 herdr-trim trim          # one-shot message compression
 herdr-trim folder-key    # per-folder PFC1 key management
@@ -58,15 +56,14 @@ herdr-trim folder-key    # per-folder PFC1 key management
 ## Features
 
 - **MCP mode** — plug into any MCP client (Claude Desktop, Cursor, Claude Code, Continue, OpenCode) to control herdr workspaces, tabs, panes and agents
-- **55 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, message-trim, recipe templates, scheduler, folder keys and clipboard; `herdr_api` reaches every method the installed herdr exposes
-- **herdr plugin** — `herdr-mcp plugin link` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
+- **54 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, message-trim, recipe templates, scheduler, folder keys and clipboard; `herdr_api` reaches every method the installed herdr exposes
+- **herdr plugin** — `herdr plugin install eugeneb50/herdr-mcp` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
 - **Recipe engine** — chain tool calls with variable interpolation (`{{ stepId.result.path }}`); runs are tracked (`/api/runs`) with per-step events, pause/resume/cancel
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
 - **Live herdr events** — the bridge relays herdr's event stream as SSE (`/api/herdr/events`); the playground shows it live
 - **Cron scheduler** — schedule recipe runs on cron expressions
 - **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: tools, herdr API, recipe builder with triggers, runs, variables, herdr events
-- **Send to a pane** — the web UI (Home) and the TUI open on it: pick a pane by `pane_id`/label, type, Enter sends (optionally pressing Enter in the pane)
-- **TUI dashboard** — VS Code-style tabbed terminal dashboard (mouse + keyboard): send, overview, playground, trim analytics, variables, settings
+- **TUI dashboard** — VS Code-style tabbed terminal dashboard (mouse + keyboard): overview, playground, trim analytics, variables, settings
 - **Message-trim pipeline** — `caveman` (lossy style) + `pfc1` (lossless Cherokee-syllabary phonetic) compressors for agent-to-agent comms, with per-pane trim policies
 - **Live agent registry** — Unix socket event subscriber tracks panes and agent status in real time; role/label resolution for a2a primitives
 - **Shell-out core** — talks to herdr through its CLI (`tokio::process::Command`, real argv) and socket; no other runtime dependencies
@@ -184,7 +181,7 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release
 |------------|-------------|
 | `herdr-mcp` | MCP stdio server + HTTP bridge on port 7676 (same as `serve`) |
 | `herdr-mcp serve` | Explicit MCP + HTTP with full flag control |
-| `herdr-mcp plugin link` / `unlink` | Register / unregister the herdr plugin (`link --print` shows the manifest) |
+| `herdr-mcp plugin manifest` | Print the herdr plugin manifest (the repo's `herdr-plugin.toml`) |
 | `herdr-trim dashboard` | TUI dashboard (bridge-backed) |
 | `herdr-trim trim` | One-shot message-trim pipeline on text or a file |
 | `herdr-trim folder-key` | Build/list/show/decompress per-folder PFC1 keys |
@@ -217,15 +214,18 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release
 ### Configuration
 
 Settings come from, lowest to highest: defaults, the config file
-(`$HERDR_MCP_CONFIG`, else `./herdr-mcp.toml`, else `~/.config/herdr-mcp/config.toml`), a `herdmcp.toml`
-`[persistent]` section in the working directory, environment variables, CLI flags.
+(`$HERDR_MCP_CONFIG`, else `./herdr-mcp.toml`, else `~/.config/herdr-mcp/config.toml`),
+environment variables, CLI flags. The config file is the only settings file.
 
 ```toml
-# herdmcp.toml
-[persistent]
-http-port = 7676
-data-dir = "./data"
-# herdr-socket = "~/.config/herdr/herdr.sock"
+# ~/.config/herdr-mcp/config.toml
+data-dir = "~/.local/share/herdr-mcp"
+
+[http]
+port = 7676
+
+# [herdr]
+# socket-path = "~/.config/herdr/herdr.sock"
 ```
 
 ---
@@ -266,17 +266,29 @@ Inside a herdr pane, herdr-mcp finds the right herdr on its own
 ### herdr plugin
 
 ```bash
-herdr-mcp plugin link
+herdr plugin install eugeneb50/herdr-mcp
+# or, from a checkout:
+sh scripts/plugin-build.sh && herdr plugin link .
 ```
 
-Writes `~/.config/herdr-mcp/herdr-plugin/herdr-plugin.toml` and registers it
-with `herdr plugin link`. It adds these actions:
+herdr reads the repo's `herdr-plugin.toml`; its build step
+(`scripts/plugin-build.sh`) compiles `herdr-mcp` and `herdr-trim` into the
+plugin's `bin/` (and bundles the web UI when `dx` is installed). Port and data
+dir come from herdr-mcp's config when each command runs; with no `data_dir`
+configured the plugin keeps its state in herdr's state dir for the plugin. Set
+`data_dir` in `~/.config/herdr-mcp/config.toml` to share one store with the
+`herdr-mcp` your MCP clients run.
+
+When herdr starts (or creates the first workspace, on a fresh server), the
+plugin opens the bridge in a tab unless a bridge already answers on
+`http.port`. As a plugin it never reads `herdr-mcp.toml` from
+its working directory (the plugin checkout). It adds these actions:
 
 | Action | Opens |
 |---|---|
 | `herdr-mcp.recipes` | Popup: pick a saved recipe and run it with the invocation context as `{{herdr.…}}` (`workspace_id`, `pane_id` = focused pane, `selected_text`, …), following its steps |
 | `herdr-mcp.bridge` | Tab: `herdr-mcp serve --http-only` |
-| `herdr-mcp.dashboard` | Split: `herdr-trim dashboard` (when `herdr-trim` is installed) |
+| `herdr-mcp.dashboard` | Split: `herdr-trim dashboard` |
 | `herdr-mcp.web` | The web playground in a browser |
 
 Bind one in herdr's config:
@@ -323,12 +335,10 @@ All endpoints return JSON unless noted. Request/response types live in
 | `GET` | `/*` | Web playground (Dioxus bundle, SPA fallback to `index.html`) |
 | `GET` | `/api/health` | Health check |
 | `GET` / `PUT` | `/api/config`, `/api/config/clipboard` | Resolved config / set clipboard commands |
-| `GET` | `/api/tools` | All 55 tools with JSON schemas and categories |
+| `GET` | `/api/tools` | All 54 tools with JSON schemas and categories |
 | `POST` | `/api/tools/{name}` | Call a tool; body is its parameter object |
 | `GET` | `/api/agents?workspace_id=` | Live panes from the agent registry |
 | `GET` | `/api/workspaces` | Workspaces via herdr |
-| `GET` | `/api/herdr/sessions` | Every named herdr session (`current` = this bridge's) |
-| `GET` | `/api/herdr/panes` | herdr's panes, filtered (`session`, `workspace_id`, `tab_id`, `agent_status`, `focused`, `label`) |
 | `GET` | `/api/herdr/schema` | The installed herdr's API schema (every socket method + params) |
 | `GET` | `/api/herdr/events` | herdr's live event stream (SSE) |
 | `GET` / `POST` | `/api/recipes` | List / create recipes |
@@ -399,20 +409,17 @@ every `herdr` child process, so CLI calls and the event subscriber hit the same 
 
 ---
 
-## Tools (55)
+## Tools (54)
 
-Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-55-tools-total).
+Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-54-tools-total).
 
-### Discovery (8)
-Discovery and Read tools take `session` to look inside another herdr session.
-
+### Discovery (7)
 | Tool | Description |
 |------|-------------|
 | `status` | herdr server status |
-| `list_sessions` | Every named herdr session |
 | `list_workspaces` | List workspaces |
 | `list_tabs` | List tabs (optionally by workspace) |
-| `list_panes` | List panes, filtered by session, workspace, tab, agent status, focus or label |
+| `list_panes` | List panes (optionally by workspace) |
 | `list_agents` | List detected agents |
 | `get_pane` | Pane details by pane_id or label |
 | `get_agent` | Agent details |
