@@ -1,5 +1,6 @@
 //! Routes + shared shell (header/nav) for the herdr-mcp web UI.
 
+pub mod highlight;
 pub mod home;
 pub mod overview;
 pub mod pane_options;
