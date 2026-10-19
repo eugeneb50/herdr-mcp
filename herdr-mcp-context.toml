@@ -41,7 +41,8 @@
 #   apply_env_overrides). PUT /api/config/clipboard with both empty removes the
 #   [clipboard] keys (set_clipboard_in_file(path, None)) -> built-in.
 #   Copy command: stdout/stderr NOT captured (xclip's child holds them open).
-#   Removed: detect_clipboard (leaked a String per call), command probing.
+#   Removed: detect_clipboard (leaked a String per call), command probing,
+#   and the tracked herdr-mcp.toml (`xsel -i` = PRIMARY, not CLIPBOARD).
 #
 # TUI Settings tab now has a Clipboard backend panel:
 # - Backend preset radio: built-in / xsel / xclip / wl-copy / pbcopy / custom
