@@ -192,12 +192,15 @@ async fn run_clipboard_test(app: &mut App) {
     match http.clipboard_get().await {
         Ok(got) => {
             if got == nonce {
-                let unsaved = app.config.as_ref().is_some_and(|c| {
-                    c.clipboard.copy_command.as_deref()
-                        != Some(app.settings.clipboard.copy_cmd.as_str())
-                        || c.clipboard.paste_command.as_deref()
-                            != Some(app.settings.clipboard.paste_cmd.as_str())
-                });
+                let clip = &app.settings.clipboard;
+                let edited = herdr_mcp_api::ClipboardConfig {
+                    copy_command: Some(clip.copy_cmd.clone()),
+                    paste_command: Some(clip.paste_cmd.clone()),
+                };
+                let unsaved = app
+                    .config
+                    .as_ref()
+                    .is_some_and(|c| c.clipboard.commands() != edited.commands());
                 let note = if unsaved {
                     " (active commands; press s to apply edits)"
                 } else {

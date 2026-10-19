@@ -401,7 +401,7 @@ watched and `idle` when it was.
 | `HERDR_MCP_HTTP_ONLY` | — | Set to disable MCP stdio |
 | `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
 | `HERDR_MCP_WEB_DIR` | in-repo `dx bundle` output | Directory of the built web UI |
-| `HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` | detected | Clipboard commands |
+| `HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` | built-in | Clipboard commands (both set: used instead of the OS clipboard) |
 
 Socket resolution: `--herdr-socket` > `HERDR_SOCKET_PATH` > config file >
 `HERDR_SESSION` > `~/.config/herdr/herdr.sock`. The resolved socket is passed to
@@ -472,7 +472,7 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `list_templates` / `get_template` / `instantiate_template` | Bundled recipe templates |
 | `schedule_recipe` / `list_schedules` / `delete_schedule` / `enable_schedule` | Cron recipe scheduling |
 | `build_folder_key` / `get_folder_key` / `list_folder_keys` / `decompress_with_folder_key` | Per-folder PFC1 keys |
-| `clipboard_get` / `clipboard_set` | System clipboard |
+| `clipboard_get` / `clipboard_set` | System clipboard: built in on macOS, Windows, X11 and Wayland (data-control, else XWayland); `[clipboard]` commands override |
 
 **IDs are session-local** and may compact when items close; re-read them after
 structural changes. Pane-targeting tools accept `label` instead of `pane_id`.
