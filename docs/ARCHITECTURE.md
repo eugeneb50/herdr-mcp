@@ -284,6 +284,8 @@ herdr-mcp/
 | `clipboard_set` | `text` | Write text to system clipboard |
 | `clipboard_get` | — | Read text from system clipboard |
 
+Both go through `clipboard.rs` (see §14.10).
+
 ---
 
 ## 5. HTTP Bridge API
@@ -838,8 +840,8 @@ Bind one in herdr's config: `[[keys.command]] key = "prefix+r"`,
 | `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
 | `HERDR_MCP_WEB_DIR` | in-repo `dx bundle` output | Built web UI directory |
 | `HERDR_MCP_CONFIG` | — | Config file path |
-| `HERDR_MCP_CLIPBOARD_COPY` | — | Clipboard copy command override |
-| `HERDR_MCP_CLIPBOARD_PASTE` | — | Clipboard paste command override |
+| `HERDR_MCP_CLIPBOARD_COPY` | — | `clipboard.copy-command` |
+| `HERDR_MCP_CLIPBOARD_PASTE` | — | `clipboard.paste-command` |
 
 ---
 
@@ -905,16 +907,22 @@ single-server deployment.
 **Rationale:** Recipes run within a workspace context; variables should chain
 across runs in the same workspace but not leak between workspaces.
 
-### 14.10 Clipboard Detection & Override
+### 14.10 Built-in Clipboard & Command Override
 
-**Decision:** Clipboard commands are auto-detected from the environment
-(pbcopy/pbpaste on macOS, wl-copy/wl-paste on Wayland, xclip/xsel on X11)
-with env-var overrides (`HERDR_MCP_CLIPBOARD_COPY`, `HERDR_MCP_CLIPBOARD_PASTE`)
-and config-file overrides (`clipboard.copy_command`, `clipboard.paste_command`).  
-**Rationale:** The clipboard is needed for the TUI's copy/paste operations; no
-single command works across all platforms and display servers. Env/config
-overrides let users pin a specific tool.  
-**Detection order:** environment override → config override → platform auto-detect.
+**Decision:** `clipboard_set` / `clipboard_get` use the OS clipboard through
+[arboard](https://github.com/1Password/arboard) (macOS, Windows, X11; Wayland
+via the data-control protocol, falling back to XWayland). When both
+`clipboard.copy-command` and `clipboard.paste-command` are set (config file, or
+`HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` through the config's env layer) the
+server runs those commands instead (argv split on whitespace, no shell).
+Saving both empty from Settings removes them.  
+**Rationale:** no tool to install on the common desktops; the commands remain
+for compositors without data-control or a preferred tool.  
+**Handle lifetime:** one arboard handle per process (`clipboard::NATIVE`),
+used on a blocking thread. On X11/Wayland the copying process serves the text
+while the handle lives, so a copy outlives the call but not the process unless
+a clipboard manager takes it. Pure-Rust X11/Wayland backends: no system
+libraries linked.
 
 ---
 

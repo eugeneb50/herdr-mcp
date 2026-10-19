@@ -249,6 +249,14 @@ impl Config {
             self.http.web_dir = Some(PathBuf::from(v));
         }
 
+        // clipboard
+        if let Ok(v) = env::var("HERDR_MCP_CLIPBOARD_COPY") {
+            self.clipboard.copy_command = Some(v);
+        }
+        if let Ok(v) = env::var("HERDR_MCP_CLIPBOARD_PASTE") {
+            self.clipboard.paste_command = Some(v);
+        }
+
         // herdr
         if let Ok(v) = env::var("HERDR_SOCKET_PATH") {
             self.herdr.socket_path = Some(PathBuf::from(v));
@@ -354,10 +362,11 @@ pub fn config_file_or_default() -> PathBuf {
     find_config_file().unwrap_or_else(|| PathBuf::from("herdr-mcp.toml"))
 }
 
-/// Upsert the `[clipboard]` table's `copy-command` / `paste-command` keys in
-/// the config file at `path`, preserving all other content (comments, tables,
-/// formatting). Creates the file if absent.
-pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str) -> Result<()> {
+/// Write the `[clipboard]` table's `copy-command` / `paste-command` keys in the
+/// config file at `path` (`None` removes them: the built-in clipboard),
+/// preserving all other content (comments, tables, formatting). Creates the
+/// file if absent.
+pub fn set_clipboard_in_file(path: &std::path::Path, commands: Option<(&str, &str)>) -> Result<()> {
     use std::io::Write;
 
     let content = if path.exists() {
@@ -372,7 +381,6 @@ pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str)
         .parse::<toml_edit::DocumentMut>()
         .with_context(|| format!("{} is not valid TOML; fix it first", path.display()))?;
 
-    // Ensure the `[clipboard]` table exists.
     if !doc.contains_table("clipboard") {
         doc.insert("clipboard", toml_edit::table());
     }
@@ -380,8 +388,19 @@ pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str)
         .get_mut("clipboard")
         .and_then(|item| item.as_table_mut())
         .context("[clipboard] is not a table")?;
-    tbl.insert("copy-command", toml_edit::value(copy));
-    tbl.insert("paste-command", toml_edit::value(paste));
+    match commands {
+        Some((copy, paste)) => {
+            tbl.insert("copy-command", toml_edit::value(copy));
+            tbl.insert("paste-command", toml_edit::value(paste));
+        }
+        None => {
+            tbl.remove("copy-command");
+            tbl.remove("paste-command");
+            if tbl.is_empty() {
+                doc.remove("clipboard");
+            }
+        }
+    }
 
     let out = doc.to_string();
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -629,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_clipboard_preserves_other_sections() {
+    fn test_set_clipboard_preserves_other_sections() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("herdr-mcp.toml");
         // Seed with an [http] section + a comment; [clipboard] absent.
@@ -639,7 +658,7 @@ mod tests {
         )
         .unwrap();
 
-        upsert_clipboard_in_file(&path, "xsel -i", "xsel").unwrap();
+        set_clipboard_in_file(&path, Some(("xsel -i", "xsel"))).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         // [http] preserved.
@@ -656,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_clipboard_overwrites_existing_keys() {
+    fn test_set_clipboard_overwrites_existing_keys() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("herdr-mcp.toml");
         std::fs::write(
@@ -665,7 +684,7 @@ mod tests {
         )
         .unwrap();
 
-        upsert_clipboard_in_file(&path, "wl-copy", "wl-paste").unwrap();
+        set_clipboard_in_file(&path, Some(("wl-copy", "wl-paste"))).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let cfg: Config = toml::from_str(&content).unwrap();
@@ -675,20 +694,55 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_clipboard_refuses_malformed_file() {
+    fn test_set_clipboard_refuses_malformed_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("herdr-mcp.toml");
         let broken = "data-dir = \"/keep\"\n[http\nport = 1\n";
         std::fs::write(&path, broken).unwrap();
-        assert!(upsert_clipboard_in_file(&path, "xsel -i", "xsel").is_err());
+        assert!(set_clipboard_in_file(&path, Some(("xsel -i", "xsel"))).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
     }
 
     #[test]
-    fn test_upsert_clipboard_creates_missing_file() {
+    fn test_set_clipboard_none_removes_the_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("herdr-mcp.toml");
+        std::fs::write(
+            &path,
+            "# keep\n[http]\nport = 9999\n\n[clipboard]\ncopy-command = \"xsel -i\"\npaste-command = \"xsel\"\n",
+        )
+        .unwrap();
+
+        set_clipboard_in_file(&path, None).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("clipboard"), "{content}");
+        assert!(content.contains("# keep") && content.contains("port = 9999"));
+    }
+
+    #[test]
+    fn test_clipboard_env_vars_set_the_commands() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", "my-copy");
+            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", "my-paste");
+        }
+        let cfg = Config::default().apply_env_overrides();
+        unsafe {
+            std::env::remove_var("HERDR_MCP_CLIPBOARD_COPY");
+            std::env::remove_var("HERDR_MCP_CLIPBOARD_PASTE");
+        }
+        assert_eq!(
+            cfg.unwrap().clipboard.commands(),
+            Some(("my-copy", "my-paste"))
+        );
+    }
+
+    #[test]
+    fn test_set_clipboard_creates_missing_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nested/deep/herdr-mcp.toml");
-        upsert_clipboard_in_file(&path, "xsel -i", "xsel").unwrap();
+        set_clipboard_in_file(&path, Some(("xsel -i", "xsel"))).unwrap();
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("[clipboard]"));

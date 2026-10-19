@@ -650,26 +650,27 @@ impl HerdrMcpServer {
             .clone()
     }
 
-    /// Save clipboard commands to the config file at `path` and apply them to
-    /// the running server. The file is written first, so a failed write
-    /// leaves the live config unchanged.
+    /// Save clipboard commands to the config file at `path` (`None`: the
+    /// built-in OS clipboard) and apply them to the running server. The file
+    /// is written first, so a failed write leaves the live config unchanged.
     pub async fn save_clipboard_config(
         &self,
         path: std::path::PathBuf,
-        copy: String,
-        paste: String,
+        commands: Option<(String, String)>,
     ) -> anyhow::Result<()> {
-        let (c, p) = (copy.clone(), paste.clone());
+        let saved = commands.clone();
         tokio::task::spawn_blocking(move || {
-            herdr_mcp_core::upsert_clipboard_in_file(&path, &c, &p)
+            let commands = saved.as_ref().map(|(c, p)| (c.as_str(), p.as_str()));
+            herdr_mcp_core::set_clipboard_in_file(&path, commands)
         })
         .await??;
+        let (copy_command, paste_command) = commands.unzip();
         *self
             .clipboard
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = herdr_mcp_core::ClipboardConfig {
-            copy_command: Some(copy),
-            paste_command: Some(paste),
+            copy_command,
+            paste_command,
         };
         Ok(())
     }
@@ -2286,55 +2287,34 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Clipboard"),
-        description = "Write text to the system clipboard. Requires a clipboard utility on the host (pbcopy on macOS, wl-copy on Wayland, xclip/xsel on X11). Text only."
+        description = "Write text to the system clipboard (the OS clipboard, or the configured [clipboard] commands). Text only."
     )]
     async fn clipboard_set(
         &self,
         Parameters(ClipboardSetParams { text }): Parameters<ClipboardSetParams>,
     ) -> Result<CallToolResult, McpError> {
-        let (copy_cmd, _paste_cmd) = detect_clipboard(&self.clipboard_config())?;
-        eprintln!(
-            "[clipboard] set: running `{copy_cmd}` ({} chars)",
-            text.len()
-        );
-        match shell_with_stdin(copy_cmd, &text).await {
-            Ok(out) => {
-                eprintln!("[clipboard] set: ok (stdout={out:?})");
-                Ok(CallToolResult::success(vec![
-                    Content::json(serde_json::json!({
-                        "ok": true,
-                        "length": text.len(),
-                    }))
-                    .map_err(to_mcp_err)?,
-                ]))
-            }
-            Err(e) => {
-                eprintln!("[clipboard] set: FAILED: {e}");
-                Err(e)
-            }
-        }
+        let length = text.len();
+        crate::clipboard::set(&self.clipboard_config(), text)
+            .await
+            .map_err(|e| to_mcp_err(format!("{e:#}")))?;
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({ "ok": true, "length": length }))
+                .map_err(to_mcp_err)?,
+        ]))
     }
 
     #[tool(
         meta = category("Clipboard"),
-        description = "Read the current text content of the system clipboard. Requires a clipboard utility on the host (pbpaste on macOS, wl-paste on Wayland, xclip/xsel on X11). Returns empty string if the clipboard contains no text. Text only."
+        description = "Read the system clipboard's text (the OS clipboard, or the configured [clipboard] commands). Returns an empty string when it holds no text. Text only."
     )]
     async fn clipboard_get(
         &self,
         Parameters(_): Parameters<ClipboardGetParams>,
     ) -> Result<CallToolResult, McpError> {
-        let (_copy_cmd, paste_cmd) = detect_clipboard(&self.clipboard_config())?;
-        eprintln!("[clipboard] get: running `{paste_cmd}`");
-        match shell_output(paste_cmd).await {
-            Ok(text) => {
-                eprintln!("[clipboard] get: ok ({} chars)", text.len());
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => {
-                eprintln!("[clipboard] get: FAILED: {e}");
-                Err(e)
-            }
-        }
+        let text = crate::clipboard::get(&self.clipboard_config())
+            .await
+            .map_err(|e| to_mcp_err(format!("{e:#}")))?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
 
@@ -2525,161 +2505,6 @@ async fn run_herdr_json(args: &[&str]) -> Result<CallToolResult, McpError> {
 async fn run_herdr_text(args: &[&str]) -> Result<CallToolResult, McpError> {
     let output = herdr_cli(args).await?;
     Ok(CallToolResult::success(vec![Content::text(output)]))
-}
-
-// ── Clipboard helpers ────────────────────────────────────────────────
-
-/// Detect the platform clipboard command pair (copy, paste).
-///
-/// Resolution order (highest precedence first):
-/// 1. `HERDR_MCP_CLIPBOARD_COPY` / `HERDR_MCP_CLIPBOARD_PASTE` env vars (both set).
-/// 2. The `clipboard.copy-command` / `clipboard.paste-command` config settings
-///    (both set) — lets Linux users force e.g. `xsel` instead of `wl-copy`.
-/// 3. Platform auto-detection (pbcopy / wl-copy / xclip / xsel).
-///
-/// The leaked `&'static str` pairs are used for the process lifetime; this
-/// avoids threading an allocator through the call sites.
-fn detect_clipboard(
-    cfg: &herdr_mcp_core::ClipboardConfig,
-) -> Result<(&'static str, &'static str), McpError> {
-    if let (Ok(copy), Ok(paste)) = (
-        std::env::var("HERDR_MCP_CLIPBOARD_COPY"),
-        std::env::var("HERDR_MCP_CLIPBOARD_PASTE"),
-    ) && !copy.trim().is_empty()
-        && !paste.trim().is_empty()
-    {
-        // Leak intentionally: the returned pair is 'static and used for the
-        // process lifetime; this avoids threading an allocator through the
-        // call sites.
-        let copy: &'static str = Box::leak(copy.into_boxed_str());
-        let paste: &'static str = Box::leak(paste.into_boxed_str());
-        return Ok((copy, paste));
-    }
-    if let (Some(copy), Some(paste)) = (&cfg.copy_command, &cfg.paste_command)
-        && !copy.trim().is_empty()
-        && !paste.trim().is_empty()
-    {
-        let copy: &'static str = Box::leak(copy.clone().into_boxed_str());
-        let paste: &'static str = Box::leak(paste.clone().into_boxed_str());
-        return Ok((copy, paste));
-    }
-    match std::env::consts::OS {
-        "macos" => Ok(("pbcopy", "pbpaste")),
-        "windows" => Ok(("clip", "powershell -command Get-Clipboard")),
-        "linux" => {
-            // Prefer xsel/xclip (work headless) over wl-copy (requires Wayland).
-            if command_exists("xsel") {
-                Ok(("xsel --clipboard --input", "xsel --clipboard --output"))
-            } else if command_exists("xclip") {
-                Ok((
-                    "xclip -selection clipboard",
-                    "xclip -selection clipboard -o",
-                ))
-            } else if command_exists("wl-copy") {
-                Ok(("wl-copy", "wl-paste"))
-            } else {
-                Err(McpError {
-                    code: rmcp::model::ErrorCode(-32603),
-                    message:
-                        "No clipboard utility found. Install xclip, xsel, or wl-clipboard (e.g. `apt install xclip`).".into(),
-                    data: None,
-                })
-            }
-        }
-        _ => Err(McpError {
-            code: rmcp::model::ErrorCode(-32603),
-            message: "Unsupported platform for clipboard operations.".into(),
-            data: None,
-        }),
-    }
-}
-
-/// True if `cmd` resolves on PATH.
-fn command_exists(cmd: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(cmd)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Shell out to a command, piping `stdin_text` to its stdin (clipboard copy).
-async fn shell_with_stdin(cmd: &str, stdin_text: &str) -> Result<String, McpError> {
-    tracing::debug!("clipboard copy via: {cmd}");
-    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-    let bin = parts[0];
-    let args: Vec<&str> = parts
-        .get(1)
-        .map(|a| a.split_whitespace().collect())
-        .unwrap_or_default();
-
-    let mut child = tokio::process::Command::new(bin)
-        .args(&args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| McpError {
-            code: rmcp::model::ErrorCode(-32603),
-            message: format!("Clipboard utility '{bin}' not found: {e}").into(),
-            data: None,
-        })?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(stdin_text.as_bytes())
-            .await
-            .map_err(|e| McpError {
-                code: rmcp::model::ErrorCode(-32603),
-                message: format!("Failed to write to clipboard utility stdin: {e}").into(),
-                data: None,
-            })?;
-    }
-
-    let output = child.wait_with_output().await.map_err(|e| McpError {
-        code: rmcp::model::ErrorCode(-32603),
-        message: format!("Clipboard utility failed: {e}").into(),
-        data: None,
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.trim().is_empty() {
-            return Err(McpError {
-                code: rmcp::model::ErrorCode(-32000),
-                message: format!("Clipboard write failed: {}", stderr.trim()).into(),
-                data: None,
-            });
-        }
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Shell out to a command, capturing stdout (clipboard paste).
-async fn shell_output(cmd: &str) -> Result<String, McpError> {
-    tracing::debug!("clipboard paste via: {cmd}");
-    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-    let bin = parts[0];
-    let args: Vec<&str> = parts
-        .get(1)
-        .map(|a| a.split_whitespace().collect())
-        .unwrap_or_default();
-
-    let output = tokio::process::Command::new(bin)
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| McpError {
-            code: rmcp::model::ErrorCode(-32603),
-            message: format!("Clipboard utility '{bin}' not found: {e}").into(),
-            data: None,
-        })?;
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Spawn a background task that refreshes trim badges for all workspaces
@@ -2988,21 +2813,26 @@ async fn config_handler(State(AppState { server, .. }): State<AppState>) -> Json
     Json(config_response(&server))
 }
 
-/// `PUT /api/config/clipboard` — persist clipboard commands and apply them live.
+/// `PUT /api/config/clipboard` — persist clipboard commands and apply them
+/// live. Both empty switches back to the built-in OS clipboard.
 async fn set_clipboard_config_handler(
     State(AppState { server, .. }): State<AppState>,
     Json(cfg): Json<herdr_mcp_core::ClipboardConfig>,
 ) -> Result<Json<ConfigResponse>, (StatusCode, String)> {
-    let non_empty = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let (Some(copy), Some(paste)) = (non_empty(cfg.copy_command), non_empty(cfg.paste_command))
-    else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "copy-command and paste-command must both be non-empty".into(),
-        ));
+    let blank = |s: &Option<String>| s.as_deref().is_none_or(|s| s.trim().is_empty());
+    let commands = match cfg.commands() {
+        Some((copy, paste)) => Some((copy.to_string(), paste.to_string())),
+        None if blank(&cfg.copy_command) && blank(&cfg.paste_command) => None,
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "set both copy-command and paste-command, or neither for the built-in clipboard"
+                    .into(),
+            ));
+        }
     };
     server
-        .save_clipboard_config(herdr_mcp_core::config_file_or_default(), copy, paste)
+        .save_clipboard_config(herdr_mcp_core::config_file_or_default(), commands)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
     Ok(Json(config_response(&server)))
@@ -4017,7 +3847,7 @@ mod tests {
         std::fs::write(&path, "# keep me\n[http]\nport = 1\n").unwrap();
 
         server
-            .save_clipboard_config(path.clone(), "wl-copy".into(), "wl-paste".into())
+            .save_clipboard_config(path.clone(), Some(("wl-copy".into(), "wl-paste".into())))
             .await
             .unwrap();
 
@@ -4031,108 +3861,62 @@ mod tests {
         std::fs::write(&path, "[http\n").unwrap();
         assert!(
             server
-                .save_clipboard_config(path.clone(), "a".into(), "b".into())
+                .save_clipboard_config(path.clone(), Some(("a".into(), "b".into())))
                 .await
                 .is_err()
         );
         assert_eq!(server.clipboard_config(), live);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[http\n");
+
+        // None clears the override: back to the built-in clipboard.
+        std::fs::write(
+            &path,
+            "[clipboard]\ncopy-command = \"a\"\npaste-command = \"b\"\n",
+        )
+        .unwrap();
+        server
+            .save_clipboard_config(path.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(server.clipboard_config().commands(), None);
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("clipboard")
+        );
     }
 
-    // Single test touching process-global env vars so the assertions don't
-    // race with each other when tests run in parallel.
+    // The tools run the configured commands (the built-in OS clipboard needs
+    // a display, so it is not exercised here).
     #[tokio::test]
-    async fn test_clipboard_env_override_and_roundtrip() {
-        let server = clipboard_test_server();
-        // --- detection override ---
-        unsafe {
-            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", "mycopy");
-            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", "mypaste");
-        }
-        let (copy, paste) =
-            detect_clipboard(&server.clipboard_config()).expect("override should be used");
-        assert_eq!(copy, "mycopy");
-        assert_eq!(paste, "mypaste");
-
-        // Override beats platform detection (even if a real backend exists).
-        unsafe {
-            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", "forced-copy");
-            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", "forced-paste");
-        }
-        let (copy, _) = detect_clipboard(&server.clipboard_config()).unwrap();
-        assert_eq!(copy, "forced-copy");
-
-        // --- roundtrip via a fake backend driven by the override ---
+    async fn clipboard_tools_use_configured_commands() {
         let tmp = tempfile::tempdir().unwrap();
         let clip = tmp.path().join("clip.txt");
-        let copy_sh = tmp.path().join("fake_copy.sh");
-        let paste_sh = tmp.path().join("fake_paste.sh");
-        std::fs::write(&copy_sh, "#!/bin/sh\ncat > \"$1\"\n").unwrap();
-        std::fs::write(&paste_sh, "#!/bin/sh\ncat \"$1\"\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = 0o755;
-            std::fs::set_permissions(&copy_sh, std::fs::Permissions::from_mode(mode)).unwrap();
-            std::fs::set_permissions(&paste_sh, std::fs::Permissions::from_mode(mode)).unwrap();
-        }
+        let mut cfg = herdr_mcp_core::Config::default();
+        cfg.clipboard.copy_command = Some(format!("tee {}", clip.display()));
+        cfg.clipboard.paste_command = Some(format!("cat {}", clip.display()));
+        let reg = AgentRegistry::new(std::sync::Arc::new(Persistence::new(tmp.path().join("d1"))));
+        let server =
+            HerdrMcpServer::with_config(Persistence::new(tmp.path().join("d2")), reg, &cfg);
 
-        let copy_cmd = format!("{} {}", copy_sh.display(), clip.display());
-        let paste_cmd = format!("{} {}", paste_sh.display(), clip.display());
-        unsafe {
-            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", &copy_cmd);
-            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", &paste_cmd);
-        }
-
-        let data_dir = tmp.path().join("data");
-        let pers = Persistence::new(data_dir.clone());
-        let pers_arc = std::sync::Arc::new(pers);
-        let registry = AgentRegistry::new(pers_arc);
-        let server = HerdrMcpServer::new(Persistence::new(data_dir), registry);
-
-        let set_res = server
+        server
             .clipboard_set(Parameters(ClipboardSetParams {
                 text: "hello clipboard".into(),
             }))
-            .await;
-        assert!(set_res.is_ok(), "clipboard_set should succeed via override");
-        // The backend file proves the text was actually written through.
-        let written = std::fs::read_to_string(&clip).unwrap();
-        assert_eq!(written, "hello clipboard");
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&clip).unwrap(), "hello clipboard");
 
         let got = server
             .clipboard_get(Parameters(ClipboardGetParams {}))
             .await
-            .expect("clipboard_get should succeed");
-        // Extract text via the rmcp API (Content derefs to RawContent).
-        let mut text = String::new();
-        for c in &got.content {
-            if let Some(tc) = c.as_text() {
-                text = tc.text.clone();
-            }
-        }
-        assert_eq!(text, "hello clipboard");
-
-        unsafe {
-            std::env::remove_var("HERDR_MCP_CLIPBOARD_COPY");
-            std::env::remove_var("HERDR_MCP_CLIPBOARD_PASTE");
-        }
-
-        // --- config override beats platform detection (env now cleared) ---
-        let mut cfg = herdr_mcp_core::Config::default();
-        cfg.clipboard.copy_command = Some("cfg-copy".into());
-        cfg.clipboard.paste_command = Some("cfg-paste".into());
-        let cc_tmp = tempfile::tempdir().unwrap();
-        let cc_pers = Persistence::new(cc_tmp.path().join("data"));
-        let cc_reg = AgentRegistry::new(std::sync::Arc::new(cc_pers));
-        let cfg_server = HerdrMcpServer::with_config(
-            Persistence::new(cc_tmp.path().join("data2")),
-            cc_reg,
-            &cfg,
-        );
-        let (copy, paste) = detect_clipboard(&cfg_server.clipboard_config()).unwrap();
-        assert_eq!(copy, "cfg-copy");
-        assert_eq!(paste, "cfg-paste");
+            .unwrap();
+        let text = got
+            .content
+            .iter()
+            .find_map(|c| c.as_text())
+            .map(|t| t.text.as_str());
+        assert_eq!(text, Some("hello clipboard"));
     }
 
     // ── resolve_label_in_panes tests ──────────────────────────────────
@@ -4199,14 +3983,6 @@ mod tests {
         let panes = vec![];
         let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
         assert!(err.contains("no labeled panes found"), "{err}");
-    }
-
-    #[test]
-    fn detect_clipboard_empty_config_does_not_panic() {
-        let cfg = herdr_mcp_core::ClipboardConfig::default();
-        // With no env and no config, detection falls through to platform auto-detect.
-        // On a real system this returns a tool or an error — but it must not panic.
-        let _ = detect_clipboard(&cfg);
     }
 
     /// Contract test: the shared `herdr_mcp_api::ApiClient` (used by the web
@@ -4382,12 +4158,12 @@ mod tests {
         assert!(cfg.data_dir.ends_with("data"));
         assert!(!cfg.config_path.is_empty());
         // Validation runs before any file write, so this never touches disk.
-        let empty = herdr_mcp_api::ClipboardConfig {
+        let half = herdr_mcp_api::ClipboardConfig {
             copy_command: Some("  ".into()),
             paste_command: Some("xsel -o".into()),
         };
         assert!(matches!(
-            api.set_clipboard_config(&empty).await,
+            api.set_clipboard_config(&half).await,
             Err(ApiError::Status { status: 400, .. })
         ));
         assert!(!api.list_tools().await.unwrap().is_empty());

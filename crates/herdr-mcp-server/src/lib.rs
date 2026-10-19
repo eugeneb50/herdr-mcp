@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod clipboard;
 pub mod herdr_client;
 pub mod persistence;
 pub mod profiles;

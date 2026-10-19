@@ -31,19 +31,21 @@
 
 # Result selection + clipboard env override + Settings tab config UI (added)
 #
-# Clipboard backend override: detect_clipboard() resolution order:
-#   1. HERDR_MCP_CLIPBOARD_COPY / _PASTE env vars (both set & non-empty)
-#   2. [clipboard] copy-command / paste-command in Config (both set & non-empty)
-#      -> herdr-mcp-core::ClipboardConfig; lets Linux force xsel over wl-copy.
-#   3. Platform auto-detection (pbcopy / wl-copy / xclip / xsel).
-# Server resolves the pair at startup from Config (HerdrMcpServer::with_config),
-# stored as `clipboard: ClipboardConfig`. detect_clipboard(cfg: &ClipboardConfig)
-# is a free fn (NOT a method) — call sites pass &self.clipboard. Leaked to 'static.
-# CLI run_serve passes `config` into with_config for all 3 server constructions.
-# generate_default_config() documents the [clipboard] section with an xsel example.
+# Clipboard (feat/arboard-clipboard, 2026-10-18): server/src/clipboard.rs.
+#   ClipboardConfig::commands() (both non-empty) -> run those (argv, no shell);
+#   else the built-in OS clipboard via arboard 3.6.1 (default-features off:
+#   no `image`; wayland-data-control on, falls back to X11/XWayland).
+#   One static arboard handle per process, used in spawn_blocking: on X11 the
+#   process serves the selection while the handle lives.
+#   HERDR_MCP_CLIPBOARD_COPY/_PASTE are the config env layer (Config::
+#   apply_env_overrides). PUT /api/config/clipboard with both empty removes the
+#   [clipboard] keys (set_clipboard_in_file(path, None)) -> built-in.
+#   Copy command: stdout/stderr NOT captured (xclip's child holds them open).
+#   Removed: detect_clipboard (leaked a String per call), command probing.
 #
 # TUI Settings tab now has a Clipboard backend panel:
-# - Backend preset radio: xsel / xclip / wl-copy / pbcopy / custom.
+# - Backend preset radio: built-in / xsel / xclip / wl-copy / pbcopy / custom
+#   (built-in = no commands; selected when the server has none).
 #   Left/Right arrows or click preset row cycle preset; copy/paste commands auto-fill unless Custom.
 # - Copy / Paste command fields (clickable to focus + start editing). Tab cycles: preset -> copy -> paste.
 # - [t] Test / [s] Save buttons are clickable; click the button or press t/s.

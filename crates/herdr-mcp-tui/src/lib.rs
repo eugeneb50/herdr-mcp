@@ -496,6 +496,8 @@ pub struct ClipboardSettingsState {
 /// Clipboard backend presets offered in the Settings radio.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BackendPreset {
+    /// The server's built-in OS clipboard (no commands).
+    BuiltIn,
     Xsel,
     Xclip,
     WlCopy,
@@ -505,7 +507,8 @@ pub enum BackendPreset {
 
 impl BackendPreset {
     /// All presets in display order.
-    pub const ALL: [BackendPreset; 5] = [
+    pub const ALL: [BackendPreset; 6] = [
+        BackendPreset::BuiltIn,
         BackendPreset::Xsel,
         BackendPreset::Xclip,
         BackendPreset::WlCopy,
@@ -515,6 +518,7 @@ impl BackendPreset {
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::BuiltIn => "built-in",
             Self::Xsel => "xsel",
             Self::Xclip => "xclip",
             Self::WlCopy => "wl-copy",
@@ -523,7 +527,8 @@ impl BackendPreset {
         }
     }
 
-    /// Default (copy, paste) commands for this preset. `Custom` returns empty.
+    /// Default (copy, paste) commands for this preset. `BuiltIn` and `Custom`
+    /// return empty.
     pub fn commands(self) -> (&'static str, &'static str) {
         match self {
             Self::Xsel => ("xsel --clipboard --input", "xsel --clipboard --output"),
@@ -533,29 +538,24 @@ impl BackendPreset {
             ),
             Self::WlCopy => ("wl-copy", "wl-paste"),
             Self::Pbcopy => ("pbcopy", "pbpaste"),
-            Self::Custom => ("", ""),
+            Self::BuiltIn | Self::Custom => ("", ""),
         }
     }
 }
 
 impl App {
     /// Store the bridge config and load its clipboard commands into the
-    /// Settings editor (selecting the matching preset, else Custom). When the
-    /// server has no explicit commands (auto-detect) the editor keeps its
-    /// preset defaults.
+    /// Settings editor: the matching preset, else Custom; `BuiltIn` when the
+    /// server has no commands.
     pub fn set_config(&mut self, config: ConfigResponse) {
-        if let (Some(copy), Some(paste)) = (
-            config.clipboard.copy_command.as_deref(),
-            config.clipboard.paste_command.as_deref(),
-        ) {
-            let clip = &mut self.settings.clipboard;
-            clip.preset_index = BackendPreset::ALL
-                .iter()
-                .position(|p| p.commands() == (copy, paste))
-                .unwrap_or(BackendPreset::ALL.len() - 1);
-            clip.copy_cmd = copy.to_string();
-            clip.paste_cmd = paste.to_string();
-        }
+        let (copy, paste) = config.clipboard.commands().unwrap_or_default();
+        let clip = &mut self.settings.clipboard;
+        clip.preset_index = BackendPreset::ALL
+            .iter()
+            .position(|p| p.commands() == (copy, paste))
+            .unwrap_or(BackendPreset::ALL.len() - 1);
+        clip.copy_cmd = copy.to_string();
+        clip.paste_cmd = paste.to_string();
         self.config = Some(config);
     }
 
@@ -646,8 +646,8 @@ impl App {
                 selected: 0,
                 clipboard: ClipboardSettingsState {
                     preset_index: 0,
-                    copy_cmd: BackendPreset::Xsel.commands().0.into(),
-                    paste_cmd: BackendPreset::Xsel.commands().1.into(),
+                    copy_cmd: String::new(),
+                    paste_cmd: String::new(),
                     field_focus: 0,
                     editing: false,
                     edit_field: 0,
@@ -2131,9 +2131,14 @@ mod tests {
         assert_eq!(BackendPreset::ALL[clip.preset_index], BackendPreset::Custom);
         assert_eq!(clip.copy_cmd, "my-copy");
 
-        // Auto-detect (no explicit commands) leaves the editor as it was.
+        // No commands: the built-in clipboard.
         app.set_config(cfg(None, None));
-        assert_eq!(app.settings.clipboard.copy_cmd, "my-copy");
+        let clip = &app.settings.clipboard;
+        assert_eq!(
+            BackendPreset::ALL[clip.preset_index],
+            BackendPreset::BuiltIn
+        );
+        assert_eq!(clip.copy_cmd, "");
         assert!(app.config.is_some());
     }
 

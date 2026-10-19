@@ -24,6 +24,7 @@ toml = { workspace = true }
 herdr-mcp-trim = { path = "../herdr-mcp-trim" }
 herdr-mcp-api = { path = "../herdr-mcp-api" }
 herdr-mcp-core = { path = "../herdr-mcp-core" }
+arboard = { version = "=3.6.1", default-features = false, features = ["wayland-data-control"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
