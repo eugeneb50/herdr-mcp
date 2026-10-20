@@ -6,3 +6,5 @@
 /bin
 # personal settings; the shared defaults live in the code
 /herdr-mcp.toml
+# runtime state (recipes, runs, sessions, keys); default data dir
+/data/
