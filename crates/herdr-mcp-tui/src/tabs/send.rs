@@ -10,23 +10,18 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 
 use crate::theme::{accent_style, dim_style, focused_panel_block, panel_block};
-use crate::{App, HerdrPane};
+use crate::{App, HerdrPane, pane_name};
 
 /// Panes in the order the tab lists them: labeled first, each group in
 /// herdr's order. A view over `app.herdr.panes`, built per call.
 pub fn targets(panes: &[HerdrPane]) -> Vec<&HerdrPane> {
     let mut out: Vec<&HerdrPane> = panes.iter().collect();
-    out.sort_by_key(|p| p.label.is_empty());
+    out.sort_by_key(|p| p.label.is_none());
     out
 }
 
 fn pane_line(p: &HerdrPane) -> String {
-    let head = if p.label.is_empty() {
-        p.pane_id.as_str()
-    } else {
-        p.label.as_str()
-    };
-    [Some(head), p.agent.as_deref(), Some(p.cwd.as_str())]
+    [Some(pane_name(p)), p.agent.as_deref(), p.cwd.as_deref()]
         .into_iter()
         .flatten()
         .filter(|s| !s.is_empty())
@@ -165,11 +160,7 @@ async fn send(app: &mut App) {
         app.send.msg = "no pane to send to".into();
         return;
     };
-    let name = if pane.label.is_empty() {
-        pane.pane_id.clone()
-    } else {
-        pane.label.clone()
-    };
+    let name = pane_name(pane).to_string();
     let pane_id = pane.pane_id.clone();
     let enter = app.send.enter;
     match http.send_to_pane(Some(&pane_id), None, &text, enter).await {
@@ -192,9 +183,9 @@ mod tests {
     fn pane(id: &str, label: &str) -> HerdrPane {
         HerdrPane {
             pane_id: id.into(),
-            label: label.into(),
+            label: Some(label.into()).filter(|l: &String| !l.is_empty()),
             agent: Some("claude".into()),
-            cwd: "/w".into(),
+            cwd: Some("/w".into()),
             ..Default::default()
         }
     }

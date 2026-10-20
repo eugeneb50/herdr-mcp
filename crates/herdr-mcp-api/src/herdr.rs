@@ -68,7 +68,7 @@ impl RecipeTrigger {
 
 /// One pane as herdr's `pane list` reports it. herdr owns this data; the
 /// bridge only relays it (fields herdr adds later are ignored).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct HerdrPane {
     pub pane_id: String,
     pub workspace_id: String,

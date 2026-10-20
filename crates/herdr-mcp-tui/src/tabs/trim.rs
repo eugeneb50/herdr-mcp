@@ -392,6 +392,10 @@ async fn apply_policy(app: &mut App) {
                 app.trim.stages.len(),
                 direction_label(&app.trim.direction)
             );
+            // The pane list's policy badges read trim_status.
+            if let Ok(v) = http.trim_status(None).await {
+                app.trim_status = Some(v);
+            }
         }
         Err(e) => {
             app.trim.policy_msg = format!("apply failed: {e}");
@@ -501,26 +505,14 @@ fn render_trim_settings(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             let p = &app.herdr.panes[i];
             let selected = i == sel;
             let marker = if selected { "> " } else { "  " };
-            let label = if p.label.is_empty() {
-                truncate(&p.pane_id, 16)
-            } else {
-                truncate(&p.label, 16)
-            };
+            let label = truncate(crate::pane_name(p), 16);
             let agent = p.agent.as_deref().unwrap_or("—");
-            let status = &p.status;
-
-            // Policy badge: try pane.trim_policy first, fall back to
-            // trim_status.active_policies for panes from the CLI fallback path.
-            let policy_stages = p
-                .trim_policy
+            let status = &p.agent_status;
+            let policy_stages = app
+                .trim_status
                 .as_ref()
-                .map(|tp| tp.stages.join(","))
-                .or_else(|| {
-                    app.trim_status
-                        .as_ref()
-                        .and_then(|t| t.active_policies.get(&p.pane_id))
-                        .map(|stages| stages.join(","))
-                })
+                .and_then(|t| t.active_policies.get(&p.pane_id))
+                .map(|stages| stages.join(","))
                 .unwrap_or_default();
 
             let style = if selected {

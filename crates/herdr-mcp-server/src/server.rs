@@ -1874,13 +1874,17 @@ impl HerdrMcpServer {
                 entry.net_saved_bytes = entry.net_saved_bytes.saturating_add(ps.net_saved_bytes);
                 entry.messages_trimmed = entry.messages_trimmed.saturating_add(ps.messages_trimmed);
             }
-            for h in self.registry.list_for_ws(w).await {
-                if let Some(ref policy) = h.trim_policy
-                    && policy.is_active()
-                {
-                    resp.active_policies
-                        .insert(h.pane_id.clone(), policy.stages.clone());
-                }
+        }
+
+        // Policies live in the registry, not the stats files: a workspace
+        // that has trimmed nothing yet still shows its panes' policies.
+        let handles = match ws {
+            Some(w) => self.registry.list_for_ws(w).await,
+            None => self.registry.inner_snapshot().await,
+        };
+        for h in handles {
+            if let Some(policy) = h.trim_policy.filter(|p| p.is_active()) {
+                resp.active_policies.insert(h.pane_id, policy.stages);
             }
         }
 
@@ -4600,5 +4604,32 @@ esac
             .await
             .unwrap();
         assert_eq!(page, "<html>ui</html>");
+    }
+
+    #[tokio::test]
+    async fn trim_status_lists_policies_without_stats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let registry = AgentRegistry::new(std::sync::Arc::new(Persistence::new(data_dir.clone())));
+        registry.upsert("w9:p1", "w9", "w9:t1", "claude", "").await;
+        let policy = herdr_mcp_api::TrimPolicy {
+            stages: vec!["caveman".into()],
+            direction: herdr_mcp_api::TrimDirection::Outbound,
+        };
+        registry.set_trim_policy("w9:p1", Some(policy)).await;
+        let server = HerdrMcpServer::new(Persistence::new(data_dir), registry);
+
+        // w9 has no trim_stats.json: its policy still shows, as in the count.
+        for ws in [None, Some("w9")] {
+            let resp = server.aggregate_trim_status(ws).await;
+            assert_eq!(resp.active_policies["w9:p1"], ["caveman"], "{ws:?}");
+        }
+        assert!(
+            server
+                .aggregate_trim_status(Some("w1"))
+                .await
+                .active_policies
+                .is_empty()
+        );
     }
 }

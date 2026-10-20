@@ -125,14 +125,14 @@ fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
     let rows = app.herdr.panes.iter().enumerate().map(|(i, pane)| {
         let is_focused = pane.focused;
-        let status_color = match pane.status.as_str() {
+        let status_color = match pane.agent_status.as_str() {
             "working" => Color::Green,
             "idle" => Color::DarkGray,
             "done" => Color::Cyan,
             _ => Color::Gray,
         };
-        let cwd_short = trim_cwd(&pane.cwd);
-        let mut label = pane.label.clone();
+        let cwd_short = trim_cwd(pane.cwd.as_deref().unwrap_or_default());
+        let mut label = pane.label.clone().unwrap_or_default();
         if is_focused {
             label = format!("● {}", label);
         }
@@ -147,13 +147,15 @@ fn render_pane_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
             Cell::from(pane.tab_id.clone()).style(row_style),
             Cell::from(label).style(row_style),
             Cell::from(pane.agent.clone().unwrap_or_default()).style(row_style),
-            Cell::from(pane.status.clone()).style(Style::default().fg(status_color).add_modifier(
-                if i == clamped {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                },
-            )),
+            Cell::from(pane.agent_status.clone()).style(
+                Style::default()
+                    .fg(status_color)
+                    .add_modifier(if i == clamped {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
             Cell::from(cwd_short).style(row_style),
         ])
     });
@@ -198,10 +200,10 @@ fn render_pane_detail(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let lines = vec![
         detail_line("pane_id", &pane.pane_id, 10),
         detail_line("tab", &pane.tab_id, 10),
-        detail_line("label", &pane.label, 10),
+        detail_line("label", pane.label.as_deref().unwrap_or("—"), 10),
         detail_line("agent", pane.agent.as_deref().unwrap_or("—"), 10),
-        detail_line("status", &pane.status, 10),
-        detail_line("cwd", &pane.cwd, 10),
+        detail_line("status", &pane.agent_status, 10),
+        detail_line("cwd", pane.cwd.as_deref().unwrap_or("—"), 10),
         detail_line("focused", if pane.focused { "yes" } else { "no" }, 10),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -293,17 +295,14 @@ mod tests {
         app.herdr.panes = (0..count)
             .map(|i| HerdrPane {
                 pane_id: format!("ws:p{i}"),
-                label: format!("pane-{i}"),
+                label: Some(format!("pane-{i}")),
                 agent: Some(format!("agent-{i}")),
-                status: "idle".into(),
-                role: String::new(),
-                output: String::new(),
-                trim_policy: None,
-                updated_at: 0,
-                cwd: format!("/tmp/pane-{i}"),
+                agent_status: "idle".into(),
+                cwd: Some(format!("/tmp/pane-{i}")),
                 focused: i == 0,
                 workspace_id: "ws".into(),
                 tab_id: "ws:t1".into(),
+                ..Default::default()
             })
             .collect();
         app
