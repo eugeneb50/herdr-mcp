@@ -151,14 +151,14 @@ pub async fn run_serve(config: &Config) -> Result<()> {
         tracing::info!("HTTP-only mode — waiting for shutdown signal");
         tokio::signal::ctrl_c().await?;
         tracing::info!("Shutting down");
-        return Ok(());
+    } else {
+        tracing::info!("Starting herdr-mcp MCP server");
+        let service = server.serve(stdio()).await?;
+        tracing::info!("herdr-mcp server initialized, waiting for requests");
+        service.waiting().await?;
+        tracing::info!("herdr-mcp server stopped");
     }
-
-    tracing::info!("Starting herdr-mcp MCP server");
-    let service = server.serve(stdio()).await?;
-    tracing::info!("herdr-mcp server initialized, waiting for requests");
-    service.waiting().await?;
-    tracing::info!("herdr-mcp server stopped");
+    tokio::task::spawn_blocking(herdr_mcp_server::clipboard::release).await?;
     Ok(())
 }
 

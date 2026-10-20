@@ -135,7 +135,10 @@ pub struct PaneFilter {
 
 impl PaneFilter {
     pub fn matches(&self, pane: &HerdrPane) -> bool {
-        let eq = |want: &Option<String>, got: &str| want.as_deref().is_none_or(|w| w == got);
+        // An empty string filters nothing, as in `panes()`'s herdr args.
+        let eq = |want: &Option<String>, got: &str| {
+            want.as_deref().is_none_or(|w| w.is_empty() || w == got)
+        };
         eq(&self.workspace_id, &pane.workspace_id)
             && eq(&self.tab_id, &pane.tab_id)
             && eq(&self.agent_status, &pane.agent_status)

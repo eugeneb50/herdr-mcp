@@ -10,8 +10,15 @@ use herdr_mcp_core::ClipboardConfig;
 
 /// This process's OS clipboard handle, opened on first use. It has to outlive
 /// each call: on X11 and Wayland this process serves the copied text for as
-/// long as the handle lives (arboard hands it to a clipboard manager on drop).
+/// long as the handle lives. Statics are never dropped, so [`release`] drops
+/// it at exit (arboard then hands the text to a clipboard manager).
 static NATIVE: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
+
+/// Drop the OS clipboard handle so copied text outlives the process. Blocks
+/// while arboard hands it over; call once, on the way out.
+pub fn release() {
+    drop(NATIVE.lock().unwrap_or_else(PoisonError::into_inner).take());
+}
 
 /// Write `text` to the clipboard.
 pub async fn set(cfg: &ClipboardConfig, text: String) -> Result<()> {
@@ -84,6 +91,13 @@ async fn run_paste(cmd: &str) -> Result<String> {
         .output()
         .await
         .with_context(|| format!("running `{cmd}`"))?;
+    if !out.status.success() {
+        bail!(
+            "`{cmd}` failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -122,5 +136,11 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn failing_paste_command_is_an_error() {
+        let err = get(&commands("true", "false")).await.unwrap_err();
+        assert!(err.to_string().contains("`false` failed"), "{err}");
     }
 }

@@ -160,7 +160,8 @@ async fn send(app: &mut App) {
         return;
     };
     let list = targets(&app.herdr.panes);
-    let Some(pane) = list.get(app.send.pane_index).copied() else {
+    let selected = app.send.pane_index.min(list.len().saturating_sub(1));
+    let Some(pane) = list.get(selected).copied() else {
         app.send.msg = "no pane to send to".into();
         return;
     };

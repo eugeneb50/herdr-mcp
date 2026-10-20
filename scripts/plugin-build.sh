@@ -3,6 +3,9 @@
 # `herdr plugin install`. Puts herdr-mcp and herdr-trim in ./bin (the commands
 # the manifest runs) and bundles the web UI when `dx` is installed.
 set -eu
+# Build into ./target whatever CARGO_TARGET_DIR says: the copies below and the
+# bridge's default web dir (target/dx/...) are paths in this checkout.
+export CARGO_TARGET_DIR="$PWD/target"
 
 cargo build --release --locked -p herdr-mcp-cli --bin herdr-mcp --bin herdr-trim
 mkdir -p bin

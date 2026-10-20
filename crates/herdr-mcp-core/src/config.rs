@@ -325,10 +325,14 @@ pub fn find_config_file() -> Option<PathBuf> {
 }
 
 /// Resolve the config file path the loader *would* read, or — if none exists —
-/// the default location in the current working directory (`herdr-mcp.toml`).
+/// the first place it looks that a save can create: `herdr-mcp.toml` in the
+/// project dir, or the XDG config file when there is none (as the plugin).
 /// Used by the Settings tab's Save so it always has a concrete target.
 pub fn config_file_or_default() -> PathBuf {
-    find_config_file().unwrap_or_else(|| PathBuf::from("herdr-mcp.toml"))
+    find_config_file()
+        .or_else(|| project_dir().map(|d| d.join("herdr-mcp.toml")))
+        .or_else(|| dirs::config_dir().map(|d| d.join("herdr-mcp/config.toml")))
+        .unwrap_or_else(|| PathBuf::from("herdr-mcp.toml"))
 }
 
 /// Write the `[clipboard]` table's `copy-command` / `paste-command` keys in the

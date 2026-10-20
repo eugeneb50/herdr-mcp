@@ -2373,7 +2373,6 @@ impl HerdrMcpServer {
 
 #[tool_handler(
     name = "herdr-mcp",
-    version = "0.1.0",
     instructions = "Control herdr — a terminal-native agent multiplexer. \
                     Manage workspaces, tabs, and panes; spawn agents; \
                     read output; send text, keys, and commands; \

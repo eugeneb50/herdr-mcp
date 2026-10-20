@@ -117,7 +117,9 @@ fn main() -> Result<()> {
                 data_dir: config.data_dir.clone(),
                 http_port,
             };
-            herdr_mcp_tui::run(opts).await
+            let res = herdr_mcp_tui::run(opts).await;
+            tokio::task::spawn_blocking(herdr_mcp_server::clipboard::release).await?;
+            res
         });
     }
     tokio::runtime::Runtime::new()?.block_on(run(args.command))

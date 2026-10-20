@@ -113,21 +113,19 @@ pub fn auto_panes(auto: &HashMap<String, Value>) -> Vec<HerdrPane> {
     panes
 }
 
-/// Names that address a pane — herdr labels and registry roles — with the
-/// pane id each resolves to, sorted by name.
+/// herdr pane labels — what the tools' `label` parameter resolves — with
+/// the pane id each names, sorted by label. Registry roles are left out: a
+/// `label` that is only a role does not resolve.
 pub fn pane_names(auto: &HashMap<String, Value>) -> Vec<(String, String)> {
-    let mut names = BTreeMap::new();
-    for (k, v) in auto {
-        let Some(id) = v["pane_id"].as_str() else {
-            continue;
-        };
-        if k != id {
-            names.insert(k.clone(), id.to_string());
-        }
-        if let Some(label) = v["label"].as_str() {
-            names.insert(label.to_string(), id.to_string());
-        }
-    }
+    let names: BTreeMap<_, _> = auto
+        .values()
+        .filter_map(|v| {
+            Some((
+                v["label"].as_str()?.to_string(),
+                v["pane_id"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
     names.into_iter().collect()
 }
 
@@ -191,10 +189,7 @@ mod tests {
         assert_eq!(ids, ["w1:p2", "w1:p1"]);
         assert_eq!(
             pane_names(&auto),
-            [
-                ("builder".to_string(), "w1:p2".to_string()),
-                ("reviewer".to_string(), "w1:p1".to_string())
-            ]
+            [("builder".to_string(), "w1:p2".to_string())]
         );
         assert_eq!(
             pane_text([&Some("a".into()), &None, &Some("b".into())]),

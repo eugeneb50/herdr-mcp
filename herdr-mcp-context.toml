@@ -255,6 +255,26 @@
 #   repo whose DEFAULT branch has a parseable herdr-plugin.toml, so the
 #   listing goes live when this PR merges (held for 0.2.0).
 
+# 0.2.0 release (release/0.2.0, 2026-10-19)
+#
+# - release/0.2.0 = test/release-all (#32-#37) + #31 + #38. The MCP server's
+#   version comes from CARGO_PKG_VERSION (rmcp tool_handler with no `version`)
+#   and the CLI test reads env!, so [workspace.package] is the only copy.
+# - Review fixes: clipboard::release() drops the arboard handle at exit
+#   (statics never drop, so the X11 handover to a clipboard manager never
+#   ran); a failing paste command is an error; as the plugin, Settings Save
+#   writes the XDG config (not the checkout the loader skips); PaneFilter
+#   treats "" as no filter (as panes() does); the label datalist holds herdr
+#   labels only (the `label` param doesn't resolve registry roles); TUI Send
+#   uses the clamped index; plugin-build.sh pins CARGO_TARGET_DIR=./target.
+# - Known, not fixed: a cron with no future fire (year-bounded) is respawned
+#   and re-warned every 5 s by Scheduler::sync; startup + workspace.created
+#   can race and open a second bridge tab before the first binds its port.
+# - Smoke gotcha: the bridge's default web dir is compile-time
+#   CARGO_MANIFEST_DIR/../../target/dx/... — a worktree build with a shared
+#   CARGO_TARGET_DIR looks in the worktree; pass HERDR_MCP_WEB_DIR. dx bundle
+#   into the shared target replaces what the user's live 7676 bridge serves.
+
 # Spec facts the tests rely on (moved from the deleted herdmcp.toml)
 #
 # - extract_variables always prefixes keys with "result." (input
@@ -270,8 +290,8 @@
 #   symbols (U+13A0..=U+13FF).
 # - stats.rs: savings_pct() = gross/total_input; workspace_net_pct() =
 #   net/gross.
-# - resolve_label_in_panes accepts both `pane_id` and `id` keys (herdr pane
-#   list returns either).
+# - resolve_label_in_panes takes typed HerdrPane (herdr 0.9 always sends
+#   pane_id; herdr's PaneInfo has workspace_id/tab_id as required strings).
 # - Gotcha: build_folder_key writes its output INTO the scanned folder, so a
 #   second scan re-ingests it -> keys differ across separate builds (HashMap
 #   order). One persisted key is stable; never assert two builds are equal.

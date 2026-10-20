@@ -1,6 +1,6 @@
 id = "herdr-mcp"
 name = "herdr-mcp"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.9.0"
 description = "MCP server for herdr: recipes, triggers, schedules, dashboard and web playground"
 platforms = ["linux", "macos"]
