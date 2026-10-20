@@ -44,6 +44,11 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   `POST /api/variables/resolve` previews a value in that scope.
 - **Send one request.** `POST /api/runs` takes `step_ids` to run only those
   steps of a recipe.
+- **Playground = collections (web).** Postman-style: collections (recipes,
+  in folders) of requests (any tool or herdr method), Send / Run collection,
+  click a result path to extract it, collection variables and globals. The
+  Tool Runner, herdr API and Recipe Builder tabs are folded into it; the
+  browser no longer substitutes `{{ }}` itself.
 
 # 0.2.0
 

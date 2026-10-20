@@ -1,7 +1,6 @@
-//! Client-side variable helpers: `{{name}}` substitution (preview only —
-//! actual resolution happens server-side), display formatting, auto-var
-//! grouping, and the pane choices pane fields offer. Port of
-//! `VariableStore.tsx` semantics + `api/variables.ts`.
+//! Client-side variable helpers: display formatting, auto-var grouping, and
+//! the pane choices pane fields offer. `{{ }}` placeholders resolve only on
+//! the server (`/api/variables/resolve`, runs).
 
 use herdr_mcp_api::HerdrPane;
 use serde_json::Value;
@@ -14,68 +13,6 @@ pub fn display_value(v: &Value) -> String {
         Value::Null => String::new(),
         other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
     }
-}
-
-fn is_word_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_'
-}
-
-/// Client-side preview substitution: `{{name}}` / `{{a.b}}` resolve
-/// user-first, then auto; unknown names pass through untouched.
-/// Mirrors `/\{\{(\w[\w.]*\w|\w)\}\}/g`.
-pub fn substitute(
-    template: &str,
-    user: &HashMap<String, String>,
-    auto: &HashMap<String, String>,
-) -> String {
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(open) = rest.find("{{") {
-        out.push_str(&rest[..open]);
-        let after = &rest[open + 2..];
-        match after.find("}}") {
-            Some(close) => {
-                let name = &after[..close];
-                if valid_name(name) {
-                    let resolved = user
-                        .get(name)
-                        .or_else(|| auto.get(name))
-                        .cloned()
-                        .unwrap_or_else(|| format!("{{{{{name}}}}}"));
-                    out.push_str(&resolved);
-                } else {
-                    out.push_str("{{");
-                    out.push_str(name);
-                    out.push_str("}}");
-                }
-                rest = &after[close + 2..];
-            }
-            None => {
-                out.push_str(&rest[open..]);
-                rest = "";
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-fn valid_name(name: &str) -> bool {
-    if name.is_empty() {
-        return false;
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !is_word_char(first) {
-        return false;
-    }
-    if name.len() == 1 {
-        return true;
-    }
-    if !name.chars().all(|c| is_word_char(c) || c == '.') {
-        return false;
-    }
-    is_word_char(name.chars().last().unwrap())
 }
 
 /// A dotted-prefix group: (prefix, [(short_key, value)]).
@@ -142,28 +79,6 @@ pub fn pane_text<'a>(parts: impl IntoIterator<Item = &'a Option<String>>) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn maps() -> (HashMap<String, String>, HashMap<String, String>) {
-        (
-            [("a".to_string(), "USER".to_string())].into(),
-            [
-                ("a".to_string(), "AUTO".to_string()),
-                ("pane.x".to_string(), "out".to_string()),
-            ]
-            .into(),
-        )
-    }
-
-    #[test]
-    fn substitute_user_wins_and_unknown_passes_through() {
-        let (u, a) = maps();
-        assert_eq!(substitute("{{a}}!", &u, &a), "USER!");
-        assert_eq!(substitute("{{pane.x}}", &u, &a), "out");
-        assert_eq!(substitute("{{missing}}", &u, &a), "{{missing}}");
-        assert_eq!(substitute("no vars", &u, &a), "no vars");
-        assert_eq!(substitute("{{bad name}}", &u, &a), "{{bad name}}");
-        assert_eq!(substitute("{{unclosed", &u, &a), "{{unclosed");
-    }
 
     #[test]
     fn display_value_never_object_object() {

@@ -276,6 +276,29 @@
 # - Smoke gotcha: a dx bundle into a shared target dir changes what the next
 #   herdr-mcp build embeds; the user's running 7676 bridge keeps its copy.
 
+# Playground collections (feat/playground-collections #41 + feat/playground-postman, 2026-10-19)
+#
+# - Postman model on existing types: collection = Recipe (folder = category),
+#   request = RecipeStep. No separate collection store (user decision).
+# - RecipeStep.extract [{path, var, scope global|collection}] applied by the
+#   run executor after StepFinished; emits variable_set; failure = StepFailed
+#   (422). Global -> Persistence::set_global; collection -> recipe.variables
+#   (needs recipe_id).
+# - runs::scope is the ONE scope (runs + POST /api/variables/resolve), lowest
+#   first: registry handles (all ws, then run ws) < template.* < globals <
+#   recipe vars < request vars < step results/extracts. The web UI's
+#   client-side vars::substitute is gone.
+# - Send one request = POST /api/runs {recipe_id, step_ids:[id]}; the web
+#   editor saves the step first (save_step re-reads the recipe so collection
+#   vars written by extracts aren't clobbered).
+# - Builders that round-trip steps (TUI RecipeStep, old web Step) must carry
+#   `extract`, or a save from them drops the rules.
+# - TUI playground still uses its own builder + PlaygroundSnapshot; moving it
+#   onto collections is the next PR (user: web first, TUI after).
+# - Smoke: bundle the UI with CARGO_TARGET_DIR=<worktree>/target so the
+#   user's live 7676 bridge assets aren't replaced; walkthrough script in the
+#   session scratchpad (collections_smoke.py).
+
 # Spec facts the tests rely on (moved from the deleted herdmcp.toml)
 #
 # - extract_variables always prefixes keys with "result." (input

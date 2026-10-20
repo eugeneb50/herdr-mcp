@@ -1,24 +1,19 @@
 //! Every herdr socket API method, straight from the installed herdr's schema
-//! (`GET /api/herdr/schema`): pick a method, fill its params, run it through
-//! the `herdr_api` tool, see herdr's response. Nothing here is hand-listed,
-//! so it always matches the herdr version that is running.
+//! (`GET /api/herdr/schema`), for the `herdr_api` request form. Nothing here
+//! is hand-listed, so it always matches the herdr version that is running.
 
-use dioxus::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-use super::forms::{DynamicForm, ResponseViewer, build_params};
-use crate::client::use_api;
-
 #[derive(Clone, PartialEq)]
-struct Method {
-    name: String,
-    props: HashMap<String, Value>,
-    required: HashSet<String>,
+pub struct Method {
+    pub name: String,
+    pub props: HashMap<String, Value>,
+    pub required: HashSet<String>,
 }
 
 /// The methods in herdr's request schema, with flattened params.
-fn methods(schema: &Value) -> Vec<Method> {
+pub fn methods(schema: &Value) -> Vec<Method> {
     let request = &schema["schemas"]["request"];
     let defs = &request["$defs"];
     let Some(variants) = request["oneOf"].as_array() else {
@@ -120,136 +115,19 @@ fn flatten(prop: &Value, defs: &Value) -> Value {
     Value::Object(out)
 }
 
-#[component]
-pub fn HerdrApi() -> Element {
-    let client = use_api();
-    let schema = use_resource(move || {
-        let client = client();
-        async move { client.herdr_schema().await.map(|s| methods(&s)) }
-    });
-    let mut filter = use_signal(String::new);
-    let mut selected = use_signal(|| "workspace.list".to_string());
-    let mut values: Signal<HashMap<String, String>> = use_signal(HashMap::new);
-    let mut response: Signal<Option<Value>> = use_signal(|| None);
-    let mut error: Signal<Option<String>> = use_signal(|| None);
-    let mut running = use_signal(|| false);
-
-    let all = match &*schema.read() {
-        None => return rsx! { p { class: "muted", "Loading herdr's API schema…" } },
-        Some(Err(e)) => {
-            return rsx! { div { class: "alert alert-error", "Cannot read herdr's API schema: {e}" } };
-        }
-        Some(Ok(m)) => m.clone(),
-    };
-    let needle = filter.read().to_lowercase();
-    let shown: Vec<&Method> = all
-        .iter()
-        .filter(|m| needle.is_empty() || m.name.contains(&needle))
-        .collect();
+/// Method names containing `filter`, grouped by their prefix (`pane`,
+/// `tab`, …) in schema order.
+pub fn method_groups(methods: &[Method], filter: &str) -> Vec<(String, Vec<String>)> {
+    let needle = filter.to_lowercase();
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-    for m in &shown {
+    for m in methods.iter().filter(|m| m.name.contains(&needle)) {
         let group = m.name.split('.').next().unwrap_or("").to_string();
         match groups.iter_mut().find(|(g, _)| *g == group) {
             Some((_, names)) => names.push(m.name.clone()),
             None => groups.push((group, vec![m.name.clone()])),
         }
     }
-    let current = all.iter().find(|m| m.name == *selected.read()).cloned();
-
-    let run = {
-        let current = current.clone();
-        move |_| {
-            let Some(method) = current.clone() else {
-                return;
-            };
-            let client = client();
-            let params = build_params(&method.props, &values.read(), str::to_string);
-            spawn(async move {
-                running.set(true);
-                error.set(None);
-                response.set(None);
-                let body = serde_json::json!({ "method": method.name, "params": params });
-                match client.call_tool("herdr_api", &body).await {
-                    Ok(v) => response.set(Some(v)),
-                    Err(e) => error.set(Some(e.to_string())),
-                }
-                running.set(false);
-            });
-        }
-    };
-
-    rsx! {
-        p { class: "muted",
-            "All {all.len()} methods of the running herdr, read from its own API schema."
-        }
-        div { class: "runner-grid",
-            div { class: "runner-left",
-                div { class: "form-row",
-                    div { class: "form-col",
-                        label { class: "form-label", "Method" }
-                        input {
-                            class: "input",
-                            r#type: "text",
-                            placeholder: "filter, e.g. pane.read",
-                            value: "{filter}",
-                            oninput: move |e| filter.set(e.value()),
-                        }
-                        select {
-                            class: "input",
-                            size: "10",
-                            onchange: move |e| {
-                                selected.set(e.value());
-                                values.set(HashMap::new());
-                                response.set(None);
-                                error.set(None);
-                            },
-                            for (group, names) in groups {
-                                optgroup { label: "{group}",
-                                    for name in names {
-                                        option {
-                                            value: "{name}",
-                                            selected: *selected.read() == name,
-                                            "{name}"
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if let Some(m) = current.clone() {
-                    h3 { class: "card-title mono", "{m.name}" }
-                    if m.props.is_empty() {
-                        p { class: "muted", "No parameters" }
-                    } else {
-                        DynamicForm {
-                            key: "{m.name}",
-                            properties: m.props.clone(),
-                            required: m.required.clone(),
-                            values: values.read().clone(),
-                            on_change: move |next| values.set(next),
-                            preview: HashMap::new(),
-                        }
-                    }
-                    button {
-                        class: "btn btn-primary btn-block",
-                        disabled: *running.read(),
-                        onclick: run,
-                        if *running.read() { "Running…" } else { "Run" }
-                    }
-                }
-                if let Some(e) = error.read().as_deref() {
-                    div { class: "alert alert-error mono pre-wrap", "{e}" }
-                }
-            }
-            div { class: "runner-right",
-                match response.read().clone() {
-                    Some(v) => rsx! { ResponseViewer { data: v } },
-                    None => rsx! { p { class: "muted", "Run a method to see herdr's response" } },
-                }
-            }
-        }
-    }
+    groups
 }
 
 #[cfg(test)]

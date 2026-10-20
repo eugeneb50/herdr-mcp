@@ -9,13 +9,12 @@ use std::collections::{HashMap, HashSet};
 use crate::components::pane_options::pane_list;
 use herdr_mcp_api::schema_type;
 
-/// Tool arguments from raw form values: each `resolve`d (variable
-/// substitution) and converted per its schema type. Blank fields are left
-/// out, so optional params fall back to their defaults.
+/// Tool arguments from raw form values, each converted per its schema type
+/// (`{{ }}` placeholders stay strings for the server to resolve). Blank
+/// fields are left out, so optional params fall back to their defaults.
 pub fn build_params(
     properties: &HashMap<String, Value>,
     values: &HashMap<String, String>,
-    resolve: impl Fn(&str) -> String,
 ) -> Value {
     let mut map = serde_json::Map::new();
     for (k, raw) in values {
@@ -23,7 +22,7 @@ pub fn build_params(
             continue;
         }
         let stype = properties.get(k).map(schema_type).unwrap_or("string");
-        map.insert(k.clone(), convert_param(stype, &resolve(raw)));
+        map.insert(k.clone(), convert_param(stype, raw));
     }
     Value::Object(map)
 }
@@ -309,11 +308,11 @@ mod tests {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-        let params = build_params(&props, &values, |raw| raw.replace("{{x}}", "hi"));
+        // Placeholders stay as written: the server resolves them.
         assert_eq!(
-            params,
+            build_params(&props, &values),
             serde_json::json!({
-                "lines": 5, "check": true, "keys": ["Enter"], "command": "echo hi"
+                "lines": 5, "check": true, "keys": ["Enter"], "command": "echo {{x}}"
             })
         );
     }
