@@ -1,3 +1,15 @@
+# Unreleased
+
+- **Chaining across requests.** A recipe step can carry `extract` rules
+  (`{path, var, scope}`) that save part of its result as a global or a
+  collection (recipe) variable; later steps and later runs resolve it.
+- **One resolver.** Runs resolve `{{ }}` in one scope: live agents < globals
+  < the recipe's variables < the request's < step results. Registry handles
+  no longer override recipe variables. `POST /api/variables/resolve` previews
+  a value in that scope.
+- **Send one request.** `POST /api/runs` takes `step_ids` to run only those
+  steps of a recipe.
+
 # 0.2.0
 
 Installable as a herdr plugin, one Home page for sending to panes, sessions,

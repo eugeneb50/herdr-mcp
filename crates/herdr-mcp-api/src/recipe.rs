@@ -23,12 +23,40 @@ pub struct Recipe {
     pub triggers: Vec<RecipeTrigger>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One request in a collection (recipe): a tool call, plus the variables
+/// its result sets for later requests.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RecipeStep {
     pub id: String,
     pub tool: String,
     pub params: serde_json::Value,
     pub description: Option<String>,
+    /// Applied in order once the step succeeds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extract: Vec<Extract>,
+}
+
+/// Save part of a step's result as a variable: `path` is followed into the
+/// result like a `{{ step.path }}` placeholder (`panes[0].pane_id`; empty
+/// for the whole text the tool returned).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Extract {
+    pub path: String,
+    pub var: String,
+    #[serde(default)]
+    pub scope: VarScope,
+}
+
+/// Where an [`Extract`] saves its variable. Either way, later steps of the
+/// same run see it at once.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VarScope {
+    /// `/api/variables`: every run and request sees it.
+    #[default]
+    Global,
+    /// The recipe's own `variables` (needs a saved recipe).
+    Collection,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -470,6 +470,7 @@ async fn handle_picker(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Resu
                     tool: tool_name,
                     params: Map::new(),
                     description: Some(tool_desc),
+                    ..Default::default()
                 };
                 pg.builder_steps.push(step);
                 pg.builder_step_focus = pg.builder_steps.len().saturating_sub(1);

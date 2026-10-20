@@ -322,6 +322,8 @@ pub struct RecipeStep {
     pub tool: String,
     pub params: Map<String, Value>,
     pub description: Option<String>,
+    /// Kept as loaded so a save from the TUI doesn't drop them.
+    pub extract: Vec<herdr_mcp_api::Extract>,
 }
 
 impl Default for RecipeStep {
@@ -331,6 +333,7 @@ impl Default for RecipeStep {
             tool: String::new(),
             params: Map::new(),
             description: None,
+            extract: Vec::new(),
         }
     }
 }
@@ -343,6 +346,7 @@ impl From<&herdr_mcp_api::RecipeStep> for RecipeStep {
             tool: s.tool.clone(),
             params: s.params.as_object().cloned().unwrap_or_default(),
             description: s.description.clone(),
+            extract: s.extract.clone(),
         }
     }
 }
@@ -355,6 +359,7 @@ impl RecipeStep {
             tool: self.tool.clone(),
             params: Value::Object(self.params.clone()),
             description: self.description.clone(),
+            extract: self.extract.clone(),
         }
     }
 }

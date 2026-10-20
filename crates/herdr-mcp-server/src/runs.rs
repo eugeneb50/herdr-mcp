@@ -12,9 +12,11 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use herdr_mcp_api::{
-    RecipeStep, RunAction, RunEvent, RunEventKind, RunRecord, RunStatus, StartRunRequest,
+    Extract, RecipeStep, RunAction, RunEvent, RunEventKind, RunRecord, RunStatus, StartRunRequest,
+    VarScope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,7 +24,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::server::{HerdrMcpServer, dispatch_tool, resolve_variables};
+use crate::server::{HerdrMcpServer, dispatch_tool, navigate, resolve_variables, step_text};
 
 /// The immutable start of a run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +168,9 @@ pub fn apply(run: &mut RunRecord, event: &RunEvent) {
             run.results
                 .insert(step.clone(), serde_json::json!({ "error": "cancelled" }));
         }
+        RunEventKind::VariableSet { var, value, .. } => {
+            run.variables.insert(var.clone(), value.clone());
+        }
     }
 }
 
@@ -268,6 +273,8 @@ pub fn event_stream(
 #[derive(Debug)]
 pub enum StartError {
     RecipeNotFound,
+    /// A `step_ids` entry the recipe has no step for.
+    UnknownStep(String),
     Persist(anyhow::Error),
 }
 
@@ -285,7 +292,7 @@ pub(crate) async fn start_with(
     req: StartRunRequest,
     initial: Control,
 ) -> Result<(RunRecord, JoinHandle<RunRecord>), StartError> {
-    let (recipe_id, name, steps, mut seed) = match req.recipe_id {
+    let (recipe_id, name, mut steps, collection) = match req.recipe_id {
         Some(id) => {
             let recipe = server
                 .persistence
@@ -302,9 +309,18 @@ pub(crate) async fn start_with(
             HashMap::new(),
         ),
     };
-    seed.extend(req.variables);
-    let session_id = workspace_for(req.session_id, &seed);
-    seed_scope(server, &session_id, &mut seed).await;
+    if let Some(id) = req
+        .step_ids
+        .iter()
+        .find(|id| !steps.iter().any(|s| &s.id == *id))
+    {
+        return Err(StartError::UnknownStep(id.clone()));
+    }
+    if !req.step_ids.is_empty() {
+        steps.retain(|s| req.step_ids.contains(&s.id));
+    }
+    let session_id = run_workspace(req.session_id, &collection, &req.variables);
+    let seed = scope(server, &session_id, collection, req.variables).await;
     let header = RunHeader {
         id: Uuid::new_v4(),
         recipe_id,
@@ -336,6 +352,18 @@ pub(crate) async fn start_with(
     Ok((first, tokio::spawn(exec.execute())))
 }
 
+/// The workspace a run is scoped to: the requested one, else a hint in the
+/// request's or the recipe's variables, else `w1`.
+pub(crate) fn run_workspace(
+    requested: Option<String>,
+    collection: &HashMap<String, Value>,
+    request: &HashMap<String, Value>,
+) -> String {
+    let mut hints = collection.clone();
+    hints.extend(request.iter().map(|(k, v)| (k.clone(), v.clone())));
+    workspace_for(requested, &hints)
+}
+
 /// The workspace a run is scoped to: the requested one, else a hint saved in
 /// the recipe's variables, else `w1`. Unresolved `{{ }}` placeholders never
 /// count (they would end up in file names).
@@ -358,19 +386,39 @@ fn workspace_for(requested: Option<String>, scope: &HashMap<String, Value>) -> S
         .unwrap_or_else(|| "w1".to_string())
 }
 
-/// Starting interpolation scope: `{{template.session_id}}` /
-/// `{{template.workspace_id}}`, the workspace's agent handles, and every
-/// other live handle by pane id / role as a fallback.
-async fn seed_scope(server: &HerdrMcpServer, ws: &str, scope: &mut HashMap<String, Value>) {
-    for key in ["template.session_id", "template.workspace_id"] {
-        scope
-            .entry(key.to_string())
-            .or_insert_with(|| Value::String(ws.to_string()));
-    }
+/// The scope a run starts with (and `/api/variables/resolve` resolves in),
+/// lowest priority first: live agent handles by pane id / role (every
+/// workspace's, then `ws`'s), `template.session_id` / `template.workspace_id`
+/// = `ws`, globals, the recipe's variables, the request's. Step results and
+/// extracted variables go on top as the run goes.
+pub(crate) async fn scope(
+    server: &HerdrMcpServer,
+    ws: &str,
+    collection: HashMap<String, Value>,
+    request: HashMap<String, Value>,
+) -> HashMap<String, Value> {
+    let mut scope = server.registry.seed(None).await;
     scope.extend(server.registry.seed(Some(ws)).await);
-    for (key, obj) in server.registry.seed(None).await {
-        scope.entry(key).or_insert(obj);
+    for key in ["template.session_id", "template.workspace_id"] {
+        scope.insert(key.to_string(), Value::String(ws.to_string()));
     }
+    match server.persistence.globals().await {
+        Ok(globals) => scope.extend(globals),
+        Err(e) => tracing::warn!("run scope: reading global variables: {e:#}"),
+    }
+    scope.extend(collection);
+    scope.extend(request);
+    scope
+}
+
+/// What an [`Extract`] reads: `path` followed into the step's result, else
+/// into the JSON its tool returned as text; an empty path is that text.
+fn extract_value(result: &Value, path: &str) -> Option<Value> {
+    let path = path.trim();
+    if path.is_empty() {
+        return Some(step_text(result));
+    }
+    navigate(result, path).or_else(|| navigate(&herdr_mcp_api::tool_payload(result)?, path))
 }
 
 /// A run being executed: its record so far (the fold of what it emitted).
@@ -423,11 +471,25 @@ impl Executor {
                 r = dispatch_tool(&self.server, &step.tool, params) => Some(r),
                 () = cancelled(&mut self.ctl) => None,
             };
+            let def = step;
             let step = step.id.clone();
             match outcome {
                 Some(Ok(result)) => {
                     let result = serde_json::to_value(&result).unwrap_or_default();
-                    self.emit(RunEventKind::StepFinished { step, result }).await;
+                    self.emit(RunEventKind::StepFinished {
+                        step: step.clone(),
+                        result: result.clone(),
+                    })
+                    .await;
+                    if let Err(error) = self.extract(def, &result).await {
+                        self.emit(RunEventKind::StepFailed {
+                            step,
+                            error,
+                            status_code: 422,
+                        })
+                        .await;
+                        return RunStatus::Failed;
+                    }
                 }
                 Some(Err((code, error))) => {
                     self.emit(RunEventKind::StepFailed {
@@ -445,6 +507,52 @@ impl Executor {
             }
         }
         RunStatus::Completed
+    }
+
+    /// Save each of `step`'s [`Extract`]s from its `result`, in order. `Err`
+    /// says which one failed and why.
+    async fn extract(&mut self, step: &RecipeStep, result: &Value) -> Result<(), String> {
+        if !step.extract.is_empty() && herdr_mcp_api::tool_is_error(result) {
+            return Err(format!(
+                "nothing extracted: the tool failed: {}",
+                herdr_mcp_api::tool_text(result)
+            ));
+        }
+        for x in &step.extract {
+            let value = extract_value(result, &x.path)
+                .ok_or_else(|| format!("extract {}: no `{}` in the result", x.var, x.path))?;
+            self.save(x, &value)
+                .await
+                .map_err(|e| format!("extract {}: {e:#}", x.var))?;
+            self.emit(RunEventKind::VariableSet {
+                step: step.id.clone(),
+                var: x.var.clone(),
+                scope: x.scope,
+                value,
+            })
+            .await;
+        }
+        Ok(())
+    }
+
+    async fn save(&self, x: &Extract, value: &Value) -> anyhow::Result<()> {
+        let store = &self.server.persistence;
+        match x.scope {
+            VarScope::Global => store.set_global(&x.var, value.clone()).await,
+            VarScope::Collection => {
+                let id = self
+                    .run
+                    .recipe_id
+                    .context("a collection variable needs a saved recipe")?;
+                let mut recipe = store
+                    .load_recipe(&id)
+                    .await?
+                    .context("the recipe was deleted")?;
+                recipe.variables.insert(x.var.clone(), value.clone());
+                recipe.updated_at = Utc::now();
+                store.save_recipe(&recipe).await
+            }
+        }
     }
 
     /// Block while paused (recording pause/resume). False if cancelled.
@@ -504,6 +612,7 @@ mod tests {
             tool: tool.into(),
             params: serde_json::json!({}),
             description: None,
+            extract: Vec::new(),
         }
     }
 
@@ -529,6 +638,151 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("run {id} never reached the expected state");
+    }
+
+    fn var_set(id: &str, value: &str, extract: Vec<Extract>) -> RecipeStep {
+        RecipeStep {
+            params: serde_json::json!({ "session_id": "w1", "key": id, "value": value }),
+            extract,
+            ..step(id, "var_set")
+        }
+    }
+
+    fn rule(path: &str, var: &str, scope: VarScope) -> Extract {
+        Extract {
+            path: path.into(),
+            var: var.into(),
+            scope,
+        }
+    }
+
+    async fn save_recipe(
+        server: &HerdrMcpServer,
+        steps: Vec<RecipeStep>,
+        vars: &[(&str, &str)],
+    ) -> Uuid {
+        let recipe = crate::variables::Recipe {
+            id: Uuid::new_v4(),
+            name: "collection".into(),
+            description: None,
+            steps,
+            variables: vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+                .collect(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            is_template: false,
+            category: None,
+            triggers: Vec::new(),
+        };
+        server.persistence.save_recipe(&recipe).await.unwrap();
+        recipe.id
+    }
+
+    /// Extract rules save into globals and the recipe, and later steps of
+    /// the same run see them; the recipe's variables beat globals.
+    #[tokio::test]
+    async fn extract_chains_through_globals_and_collection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let store = &server.persistence;
+        store
+            .set_global("greeting", "from-global".into())
+            .await
+            .unwrap();
+        let id = save_recipe(
+            &server,
+            vec![
+                var_set(
+                    "first",
+                    "{{ greeting }}",
+                    vec![
+                        rule("value", "said", VarScope::Global),
+                        rule("key", "step_key", VarScope::Collection),
+                    ],
+                ),
+                var_set("second", "{{ said }}/{{ step_key }}", Vec::new()),
+            ],
+            &[("greeting", "hi")],
+        )
+        .await;
+        let req = StartRunRequest {
+            recipe_id: Some(id),
+            ..Default::default()
+        };
+        let done = start_run(&server, req).await.unwrap().1.await.unwrap();
+        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+        let second = herdr_mcp_api::tool_payload(&done.results["second"]).unwrap();
+        assert_eq!(second["value"], "hi/first");
+
+        assert_eq!(store.globals().await.unwrap()["said"], "hi");
+        let recipe = store.load_recipe(&id).await.unwrap().unwrap();
+        assert_eq!(recipe.variables["step_key"], "first");
+        let sets = store
+            .load_run_events(&done.id, 0)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|e| matches!(e.kind, RunEventKind::VariableSet { .. }))
+            .count();
+        assert_eq!(sets, 2);
+    }
+
+    /// `step_ids` sends single requests of a collection; unknown ids are
+    /// refused before anything runs.
+    #[tokio::test]
+    async fn step_ids_run_only_those_steps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let id = save_recipe(
+            &server,
+            vec![var_set("a", "1", Vec::new()), var_set("b", "2", Vec::new())],
+            &[],
+        )
+        .await;
+        let req = |ids: &[&str]| StartRunRequest {
+            recipe_id: Some(id),
+            step_ids: ids.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        let done = start_run(&server, req(&["b"]))
+            .await
+            .unwrap()
+            .1
+            .await
+            .unwrap();
+        assert_eq!(done.status, RunStatus::Completed);
+        assert_eq!(done.results.keys().collect::<Vec<_>>(), ["b"]);
+        assert!(matches!(
+            start_run(&server, req(&["b", "nope"])).await,
+            Err(StartError::UnknownStep(s)) if s == "nope"
+        ));
+    }
+
+    /// A rule whose path isn't in the result, or a collection variable with
+    /// no saved recipe, fails its step with the reason.
+    #[tokio::test]
+    async fn failed_extracts_fail_the_step() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        for (rule, want) in [
+            (
+                rule("nope", "x", VarScope::Global),
+                "no `nope` in the result",
+            ),
+            (
+                rule("value", "x", VarScope::Collection),
+                "needs a saved recipe",
+            ),
+        ] {
+            let run = adhoc(vec![var_set("a", "1", vec![rule])]);
+            let done = start_run(&server, run).await.unwrap().1.await.unwrap();
+            assert_eq!(done.status, RunStatus::Failed);
+            assert_eq!(done.failed_step.as_deref(), Some("a"));
+            let error = done.error.unwrap_or_default();
+            assert!(error.contains(want), "{error}");
+        }
     }
 
     #[tokio::test]

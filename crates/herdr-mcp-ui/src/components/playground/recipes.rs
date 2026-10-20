@@ -32,6 +32,8 @@ pub struct Step {
     pub tool: String,
     pub params: HashMap<String, String>,
     pub description: String,
+    /// Kept as loaded so a save doesn't drop them.
+    pub extract: Vec<herdr_mcp_api::Extract>,
 }
 
 fn step_from_api(i: usize, s: &RecipeStep) -> Step {
@@ -59,6 +61,7 @@ fn step_from_api(i: usize, s: &RecipeStep) -> Step {
         tool: s.tool.clone(),
         params,
         description: s.description.clone().unwrap_or_default(),
+        extract: s.extract.clone(),
     }
 }
 
@@ -76,6 +79,7 @@ fn step_to_api(s: &Step, tools: &[ToolInfo]) -> RecipeStep {
         tool: s.tool.clone(),
         params: build_params(&props, &s.params, str::to_string),
         description: Some(s.description.clone()),
+        extract: s.extract.clone(),
     }
 }
 
@@ -295,6 +299,7 @@ pub fn RecipeBuilder(initial: Loaded, on_saved: EventHandler<()>) -> Element {
                                         tool: tool.clone(),
                                         params: HashMap::new(),
                                         description: String::new(),
+                                        extract: Vec::new(),
                                     });
                                     picker_open.set(false);
                                 }

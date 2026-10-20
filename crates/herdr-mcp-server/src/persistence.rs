@@ -129,6 +129,46 @@ impl Persistence {
         Ok(())
     }
 
+    /// Set global variable `key`, keeping its id and creation time when it
+    /// exists.
+    pub async fn set_global(&self, key: &str, value: serde_json::Value) -> anyhow::Result<()> {
+        let now = chrono::Utc::now();
+        let existing = self
+            .load_variables(None, None)
+            .await?
+            .into_iter()
+            .find(|v| v.key == key);
+        let var = match existing {
+            Some(v) => VariableStore {
+                value,
+                updated_at: now,
+                ..v
+            },
+            None => VariableStore {
+                id: Uuid::new_v4(),
+                session_id: None,
+                execution_id: None,
+                key: key.to_string(),
+                value,
+                created_at: now,
+                updated_at: now,
+            },
+        };
+        self.save_variable(&var).await
+    }
+
+    /// Every global variable's value by key.
+    pub async fn globals(
+        &self,
+    ) -> anyhow::Result<std::collections::HashMap<String, serde_json::Value>> {
+        Ok(self
+            .load_variables(None, None)
+            .await?
+            .into_iter()
+            .map(|v| (v.key, v.value))
+            .collect())
+    }
+
     pub async fn delete_variable(&self, key: &str) -> anyhow::Result<bool> {
         let path = self
             .data_dir
@@ -418,6 +458,7 @@ mod tests {
                 tool: "status".into(),
                 params: serde_json::json!({}),
                 description: None,
+                extract: Vec::new(),
             }],
             variables: HashMap::new(),
             created_at: chrono::Utc::now(),
@@ -691,6 +732,7 @@ mod tests {
                 tool: "list_panes".into(),
                 params: serde_json::json!({}),
                 description: None,
+                extract: Vec::new(),
             }],
             updated_at: chrono::Utc::now(),
         };
