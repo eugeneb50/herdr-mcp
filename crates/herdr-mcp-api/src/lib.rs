@@ -23,12 +23,13 @@ pub use herdr::{
 };
 pub use profile::AgentProfile;
 pub use recipe::{
-    CreateRecipeRequest, InstantiateTemplateRequest, Recipe, RecipeStep, RecipeTemplate,
-    TemplateVariable, UpdateRecipeRequest,
+    CreateRecipeRequest, Extract, InstantiateTemplateRequest, Recipe, RecipeStep, RecipeTemplate,
+    TemplateVariable, UpdateRecipeRequest, VarScope,
 };
 pub use run::{RunAction, RunEvent, RunEventKind, RunRecord, RunStatus, StartRunRequest};
 /// Re-exported so clients name recipe/execution ids without their own uuid dep.
 pub use uuid::Uuid;
 pub use variables::{
-    AutoVariablesResponse, PlaygroundSnapshot, SaveVariableRequest, ToolsResponse, VariableStore,
+    AutoVariablesResponse, PlaygroundSnapshot, ResolveRequest, ResolveResponse,
+    SaveVariableRequest, ToolsResponse, VariableStore,
 };

@@ -98,6 +98,7 @@ mod tests {
                 tool: "read_pane".into(),
                 params: json!({"pane_id": "{{herdr.pane_id}}"}),
                 description: None,
+                extract: Vec::new(),
             }],
             variables: HashMap::new(),
             created_at: now,
@@ -161,6 +162,7 @@ mod tests {
             tool: "var_set".into(),
             params: json!({"key": "seen", "value": "{{herdr.pane_id}}", "session_id": "w2"}),
             description: None,
+            extract: Vec::new(),
         }];
         let req = triggered_run(&r, &done_event()).unwrap();
         server.persistence.save_recipe(&r).await.unwrap();

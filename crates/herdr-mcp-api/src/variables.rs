@@ -42,6 +42,30 @@ pub struct AutoVariablesResponse {
     pub variables: HashMap<String, serde_json::Value>,
 }
 
+/// `POST /api/variables/resolve` body: `value` with its `{{ }}` placeholders
+/// resolved in the scope a run would start with — `variables`, then the
+/// recipe's (`recipe_id`), then globals, then live agents.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResolveRequest {
+    #[serde(default)]
+    pub recipe_id: Option<Uuid>,
+    /// herdr workspace id, as for a run.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub variables: HashMap<String, serde_json::Value>,
+    pub value: serde_json::Value,
+}
+
+/// `POST /api/variables/resolve` response.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResolveResponse {
+    pub value: serde_json::Value,
+    /// Placeholders nothing in scope resolves (left as written), e.g. a
+    /// step result that only exists during a run.
+    pub unresolved: Vec<String>,
+}
+
 /// Playground last-used UI state (tool selection + field values + builder).
 /// Source of truth: `data/sessions/{ws}.playground.json` on the server.
 /// TUI and web resolve it on demand via `GET /api/playground`; never cached.

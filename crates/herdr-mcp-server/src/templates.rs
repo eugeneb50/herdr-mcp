@@ -34,6 +34,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     tool: "list_panes".to_string(),
                     params: serde_json::json!({}),
                     description: Some("List available panes".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "send".to_string(),
@@ -43,6 +44,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "text": "Files in {{ template.directory }} changed"
                     }),
                     description: Some("Notify the agent".to_string()),
+                    extract: Vec::new(),
                 },
             ],
         },
@@ -81,6 +83,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "label": "{{ template.agent }}"
                     }),
                     description: Some("Close existing pane".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "start".to_string(),
@@ -90,6 +93,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "agent": "{{ template.agent }}"
                     }),
                     description: Some("Start a fresh agent (profile or herdr agent kind)".to_string()),
+                    extract: Vec::new(),
                 },
             ],
         },
@@ -227,24 +231,28 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     tool: "status".to_string(),
                     params: serde_json::json!({}),
                     description: Some("Server status".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "workspaces".to_string(),
                     tool: "list_workspaces".to_string(),
                     params: serde_json::json!({}),
                     description: Some("List workspaces".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "panes".to_string(),
                     tool: "list_panes".to_string(),
                     params: serde_json::json!({}),
                     description: Some("List panes".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "agents".to_string(),
                     tool: "list_agents".to_string(),
                     params: serde_json::json!({}),
                     description: Some("List agents".to_string()),
+                    extract: Vec::new(),
                 },
             ],
         },
@@ -273,6 +281,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     tool: "list_panes".to_string(),
                     params: serde_json::json!({}),
                     description: Some("List panes (ids + labels)".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "agents".to_string(),
@@ -281,6 +290,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "workspace_id": "{{ template.workspace_id }}"
                     }),
                     description: Some("List registry agents".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "store_panes".to_string(),
@@ -291,6 +301,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "value": "{{ panes.panes }}"
                     }),
                     description: Some("Store pane labels/ids".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "store_agents".to_string(),
@@ -301,6 +312,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "value": "{{ agents.result }}"
                     }),
                     description: Some("Store agent labels/ids".to_string()),
+                    extract: Vec::new(),
                 },
             ],
         },
@@ -332,6 +344,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "text": "{{ template.message }}"
                     }),
                     description: Some("Message the agent".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "read".to_string(),
@@ -340,6 +353,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "target": "{{ template.target }}"
                     }),
                     description: Some("Read its output".to_string()),
+                    extract: Vec::new(),
                 },
             ],
         },
@@ -383,6 +397,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "text": "{{ template.message }}"
                     }),
                     description: Some("Message agent A".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "send_b".to_string(),
@@ -392,6 +407,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "text": "{{ template.message }}"
                     }),
                     description: Some("Message agent B".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "read_a".to_string(),
@@ -400,6 +416,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "target": "{{ template.target_a }}"
                     }),
                     description: Some("Read agent A output".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "read_b".to_string(),
@@ -408,6 +425,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "target": "{{ template.target_b }}"
                     }),
                     description: Some("Read agent B output".to_string()),
+                    extract: Vec::new(),
                 },
                 RecipeStep {
                     id: "collect".to_string(),
@@ -418,6 +436,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                         "value": "{{ read_a.result }}"
                     }),
                     description: Some("Store collected output".to_string()),
+                    extract: Vec::new(),
                 },
             ],
         },
@@ -439,6 +458,7 @@ fn step(id: &str, tool: &str, params: serde_json::Value, description: &str) -> R
         tool: tool.to_string(),
         params,
         description: Some(description.to_string()),
+        extract: Vec::new(),
     }
 }
 

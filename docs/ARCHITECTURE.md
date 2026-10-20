@@ -18,7 +18,7 @@ dashboard, and a recipe engine for chaining tool calls with variable
 interpolation.
 
 **License:** AGPL v3
-**Current test suite:** run `cargo nextest run --workspace` (220 passing)
+**Current test suite:** run `cargo nextest run --workspace` (223 passing)
 **Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---
@@ -286,6 +286,7 @@ Both go through `clipboard.rs` (see §14.6).
 | `POST` | `/api/variables` | Save variable |
 | `GET` | `/api/variables/{key}` | Get variable |
 | `DELETE` | `/api/variables/{key}` | Delete variable |
+| `POST` | `/api/variables/resolve` | Resolve `{{ }}` placeholders in a value, in the scope a run would start with |
 
 ### 5.4 Frontend Serving
 
@@ -331,35 +332,45 @@ and extend the contract test.
 Variables use `{{ path }}` syntax with dot/bracket navigation:
 
 ```
-{{ step1.result.content[0].text }}
-{{ pane_id.output }}
-{{ role.output }}
-{{ template.variable_name }}
+{{ greeting }}                       a variable in scope
+{{ step1.panes[0].pane_id }}         a step's result (or the JSON its tool returned)
+{{ step1 }} / {{ step1.text }}       the text a step's tool returned
+{{ pane_id.output }} {{ role.output }}
 ```
 
-**Resolution order:**
-1. Agent registry seed: `{{pane_id.output}}` and `{{role.output}}` from live agent registry
-2. Accumulated step results: `{{stepId.result.path}}` from prior steps
-3. Template variables: `{{template.var}}` from template instantiation
+**Scope** (`runs::scope`, lowest priority first): live agent handles by pane
+id and role (every workspace's, then the run's), `template.session_id` /
+`template.workspace_id` (the run's workspace), globals (`/api/variables`),
+the recipe's `variables`, the run request's `variables`. Step results and
+extracted variables go on top as the run proceeds. `POST
+/api/variables/resolve` resolves in the same scope, so a preview never
+disagrees with a run.
+
+**Extract rules** chain requests: a step's `extract: [{path, var, scope}]`
+saves `path` of its result (`""` = the text it returned) as `var` once the
+step succeeds — `scope: "global"` into `/api/variables`, `"collection"` into
+the recipe's `variables` (needs a saved recipe). Later steps of the same run
+see it at once (`variable_set` run event). A path that isn't in the result
+fails the step.
 
 **Key spec facts:**
-- `extract_variables` always prefixes keys with `result.` (e.g., `{"result":"hello"}` → `"result.result"`)
-- `extract_variables` ignores arrays
-- `resolve_json_path` requires a dotted path (`step.field`); bare single keys return `None`
+- `extract_variables` always prefixes keys with `result.` (e.g., `{"result":"hello"}` → `"result.result"`) and ignores arrays
+- an exact scope key wins over `step.path` navigation
 - Unknown `{{ path }}` placeholders are left unchanged
 
 ### 6.2 Recipe Lifecycle
 
 ```
-1. HTTP POST /api/runs (or the scheduler)
-2. Seed accumulated from agent registry (for session_id workspace)
+1. POST /api/runs (or the scheduler / a trigger / the plugin picker):
+   a recipe (optionally only `step_ids`) or ad-hoc `steps`
+2. Build the scope (6.1); persist the run header
 3. For each step:
-   a. resolve_variables() in params from accumulated
-   b. dispatch_tool() — calls the tool through rmcp's router (in-process MCP session)
-   c. extract_variables() from result → accumulated
-   d. Insert step result under both step.id AND pane_id/role
-4. Persist ExecutionResult
-5. Return RecipeResponse with results + status
+   a. resolve_variables() in its params
+   b. dispatch_tool() — the tool through rmcp's router (in-process MCP session)
+   c. record the result (step_finished) under the step id, flattened, and
+      under pane_id/role for agent handles
+   d. apply its extract rules (variable_set), or fail the step
+4. The event log is the run; RunRecord is its fold
 ```
 
 ### 6.3 Bundled Templates
@@ -521,7 +532,7 @@ Cron-based recipe scheduling using the `cron` crate:
 
 | Route | Component | Description |
 |---|---|---|
-| `/` | `Home` | Landing page: send to a pane by `pane_id` and/or `label` (typed, or picked from dropdowns of the panes and labels/roles in `GET /api/variables/auto`; `ApiClient::send_to_pane` → `send_text` / `run_command`, `pane_id` wins), remembers the last target in `localStorage`; collapsed getting-started notes; pane table at the bottom from the same auto variables (click a row to target it) |
+| `/` | `Home` | Landing page: send to a pane by `pane_id` and/or `label` (typed, or picked from dropdowns of the panes and labels in `GET /api/variables/auto`; `ApiClient::send_to_pane` → `send_text` / `run_command`, `pane_id` wins), remembers the last target in `localStorage`; collapsed getting-started notes; pane table at the bottom from the same auto variables (click a row to target it) |
 | `/overview` | `Overview` | Pane browser: `GET /api/herdr/panes` with session/status/label filters, grouped by workspace and tab |
 | `/playground` | `Playground` | Tool runner (schema-driven form) + recipe builder/library; `pane_id` / `label` fields offer the same auto-variable pane dropdowns as Home (`components/pane_options.rs`) |
 | `/variables` | `Variables` | User variables (CRUD/import) + auto variables |

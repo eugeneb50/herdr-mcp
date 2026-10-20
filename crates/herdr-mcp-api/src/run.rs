@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::RecipeStep;
+use crate::{RecipeStep, VarScope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +68,10 @@ pub struct StartRunRequest {
     /// (a plugin invocation or trigger passes `herdr` = its context).
     #[serde(default)]
     pub variables: HashMap<String, serde_json::Value>,
+    /// Run only these steps of the recipe, in recipe order (sending one
+    /// request of a collection); empty runs them all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub step_ids: Vec<String>,
 }
 
 /// `pause` / `resume` / `cancel` for `POST /api/runs/{id}/{action}`.
@@ -123,6 +127,13 @@ pub enum RunEventKind {
     },
     StepCancelled {
         step: String,
+    },
+    /// An [`Extract`](crate::Extract) of `step` saved `var`.
+    VariableSet {
+        step: String,
+        var: String,
+        scope: VarScope,
+        value: serde_json::Value,
     },
 }
 
