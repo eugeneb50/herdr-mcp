@@ -133,7 +133,7 @@ herdr-mcp/
 │   ├── herdr-mcp-ui/        # Dioxus web UI (served by the HTTP bridge)
 │   └── herdr-mcp-cli/       # Binaries: herdr-mcp (serve, plugin) + herdr-trim (trim, dashboard, folder-key)
 ├── data/                    # Runtime persistence (recipes, runs, variables, schedules, sessions, …)
-└── docs/                    # Architecture, PRD, swarm design
+└── docs/                    # Architecture, swarm design
 ```
 
 The web UI and the TUI both talk to the bridge through `herdr-mcp-api`, so
@@ -146,7 +146,6 @@ every `/api/*` shape is defined once.
 | Document | Description |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full reference: data flow, tools, HTTP API, recipe engine, triggers, trim system, agent registry, persistence, scheduler, web UI, plugin, build/run, design decisions, gotchas |
-| [docs/PRD.md](docs/PRD.md) | Product requirements document |
 | [docs/SWARMS.md](docs/SWARMS.md) | Swarm / flow engine design (proposal) |
 | [AGENTS.md](AGENTS.md) | Instructions for AI coding assistants (conventions, risk tiers, workflow, anti-patterns) |
 | [CHANGES.md](CHANGES.md) | Notable changes |

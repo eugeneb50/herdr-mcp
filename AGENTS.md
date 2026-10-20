@@ -160,7 +160,7 @@ through deliberate team decision.
 - `crates/herdr-mcp-cli/` — `src/bin/herdr-mcp.rs` (serve, plugin), `src/bin/herdr-trim.rs` (trim/dashboard/folder-key), `src/common.rs` (`serve_core`: the one server instance + background tasks), `src/plugin.rs` (herdr plugin), `tests/cli.rs`
 - `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the tool runner, herdr API, recipe builder and herdr events tabs; served by the HTTP bridge from `http.web-dir`
 - `data/` — runtime persistence (recipes, runs, variables, schedules, sessions, profiles, pfc1 memory, folder keys)
-- `docs/` — `ARCHITECTURE.md` (reference), `PRD.md`, `SWARMS.md` (flow-engine proposal)
+- `docs/` — `ARCHITECTURE.md` (reference), `SWARMS.md` (flow-engine proposal)
 - `herdr-mcp-context.toml` — project's evolving memory for resuming sessions
 
 ## Risk Tiers
@@ -235,7 +235,6 @@ AI coding assistant skills live in `~/.config/opencode/skills/`. Useful here:
 
 - `@herdr-mcp-context.toml` — evolving project memory: architecture, spec facts tests rely on, known non-determinism, gotchas. Read first when resuming work.
 - `@docs/ARCHITECTURE.md` — comprehensive architecture reference (data flow, tool reference, HTTP API, recipe engine, triggers, trim system, agent registry, persistence, scheduler, web UI, plugin, build/run, design decisions, known gotchas).
-- `@docs/PRD.md` — product requirements document.
 - `@docs/SWARMS.md` — swarm / flow engine design (proposal).
 - `@CHANGES.md` — notable changes.
 
