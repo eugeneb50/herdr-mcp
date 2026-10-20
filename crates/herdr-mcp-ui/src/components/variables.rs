@@ -9,7 +9,7 @@ use crate::client::use_api;
 use crate::vars::{display_value, group_auto};
 use herdr_mcp_api::{AutoVariablesResponse, SaveVariableRequest, VariableStore};
 
-fn user_entries(vars: &[VariableStore]) -> Vec<(String, String)> {
+pub(crate) fn user_entries(vars: &[VariableStore]) -> Vec<(String, String)> {
     vars.iter()
         .map(|v| (v.key.clone(), display_value(&v.value)))
         .collect()
@@ -101,7 +101,7 @@ pub fn Variables() -> Element {
 }
 
 #[component]
-fn UserTable(
+pub(crate) fn UserTable(
     entries: Vec<(String, String)>,
     search: String,
     on_changed: EventHandler<()>,

@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::RecipeTrigger;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
     pub id: Uuid,
     pub name: String,
@@ -113,4 +113,6 @@ pub struct UpdateRecipeRequest {
     pub steps: Option<Vec<RecipeStep>>,
     pub variables: Option<HashMap<String, serde_json::Value>>,
     pub triggers: Option<Vec<RecipeTrigger>>,
+    /// The folder the playground files it under; `""` clears it.
+    pub category: Option<String>,
 }

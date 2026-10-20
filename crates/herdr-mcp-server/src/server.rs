@@ -3330,6 +3330,9 @@ async fn update_recipe_handler(
     if let Some(triggers) = req.triggers {
         recipe.triggers = triggers;
     }
+    if let Some(category) = req.category {
+        recipe.category = Some(category).filter(|c| !c.trim().is_empty());
+    }
     recipe.updated_at = chrono::Utc::now();
 
     server
@@ -4639,12 +4642,14 @@ esac
                 &herdr_mcp_api::UpdateRecipeRequest {
                     name: Some("r2".into()),
                     triggers: Some(vec![trigger.clone()]),
+                    category: Some("smoke".into()),
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
         assert_eq!(updated.name, "r2");
+        assert_eq!(updated.category.as_deref(), Some("smoke"));
         assert_eq!(
             api.get_recipe(created.id).await.unwrap().triggers,
             vec![trigger]
