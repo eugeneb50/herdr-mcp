@@ -158,7 +158,7 @@ through deliberate team decision.
 - `crates/herdr-mcp-tui/` — TUI dashboard (`lib.rs` app loop, `tabs/`, `theme.rs`, `http.rs` bridge discovery); talks to the bridge through `herdr-mcp-api::ApiClient`
 - `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers), `runs.rs` (run engine), `triggers.rs`, `scheduler.rs`, `herdr_client.rs` (socket client, event subscriber, agent registry), `panes.rs` (herdr panes + sessions, the one pane fetch), `agents.rs` / `profiles.rs` (agent profiles), `persistence.rs`, `templates.rs`, `variables.rs`
 - `crates/herdr-mcp-cli/` — `src/bin/herdr-mcp.rs` (serve, plugin), `src/bin/herdr-trim.rs` (trim/dashboard/folder-key), `src/common.rs` (`serve_core`: the one server instance + background tasks), `src/plugin.rs` (herdr plugin), `tests/cli.rs`
-- `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the tool runner, herdr API, recipe builder and herdr events tabs; served by the HTTP bridge from `http.web-dir`
+- `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the tool runner, herdr API, recipe builder and herdr events tabs; built into `herdr-mcp` and served by the HTTP bridge
 - `data/` — runtime persistence (recipes, runs, variables, schedules, sessions, profiles, pfc1 memory, folder keys)
 - `docs/` — `ARCHITECTURE.md` (reference), `SWARMS.md` (flow-engine proposal)
 - `herdr-mcp-context.toml` — project's evolving memory for resuming sessions
@@ -205,7 +205,7 @@ When uncertain, classify as higher risk.
 - **Stdout = MCP, Stderr = logs** — prevents log output from corrupting the MCP protocol stream.
 - **One server instance** — `serve_core` builds one `HerdrMcpServer` and starts the background tasks once; stdio reuses it.
 - **One daemon per data dir** — many herdr-mcp processes can share a data dir (MCP clients, the plugin's bridge, the dashboard). Only the holder of `<data_dir>/daemon.lock` fires schedules and triggers and pushes trim badges; the others retry every 15 s and take over when it exits. `Scheduler::schedule_one` only saves; the daemon's `Scheduler::run` picks saved schedules up within 5 s.
-- **One web UI** — the Dioxus app (`crates/herdr-mcp-ui`) is the only web frontend. The bridge serves its `dx bundle` output from `http.web-dir` (env `HERDR_MCP_WEB_DIR`) with SPA fallback to `index.html`; no CORS layer since the UI is same-origin (or proxied by `dx serve`).
+- **One web UI** — the Dioxus app (`crates/herdr-mcp-ui`) is the only web frontend. `herdr-mcp-server/build.rs` compiles its `dx bundle` output into the binary (bundle first, then `cargo build`), so one `herdr-mcp` file is the deployment; `http.web-dir` (env `HERDR_MCP_WEB_DIR`) serves a directory from disk instead. SPA fallback to `index.html`; no CORS layer since the UI is same-origin (or proxied by `dx serve`).
 - **Non-colliding compressors** — `caveman` operates on ASCII/Latin prose (U+0000–U+007F); `pfc1` uses Cherokee syllabary (U+13A0–U+13FF). The two cannot interfere, making composition trivially safe.
 - **Adaptive gate (never expand)** — if `candidate.len() >= current.len()`, pass through unchanged. Prevents short messages from drowning in PFC1 headers.
 - **Lossy vs. lossless split** — style compression is inherently lossy; dictionary compression must be reversible for a2a comms.

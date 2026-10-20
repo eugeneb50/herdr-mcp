@@ -10,6 +10,7 @@ pub mod server;
 pub mod templates;
 pub mod triggers;
 pub mod variables;
+pub mod web;
 
 // Convenience re-exports so consumers don't need deep paths
 pub use herdr_client::{AgentRegistry, HerdrClient};

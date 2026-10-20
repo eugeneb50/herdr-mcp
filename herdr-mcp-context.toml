@@ -148,8 +148,11 @@
 #   (web_dir/index.html) for Dioxus router deep links. No `/` route, no
 #   index_html_handler, AppState holds only `server`.
 # - web_dir source of truth: HttpConfig.web_dir (toml `http.web-dir`, env
-#   HERDR_MCP_WEB_DIR); unset -> HttpConfig::resolved_web_dir() =
-#   <workspace>/target/dx/herdr-mcp-ui/release/web/public (dx bundle output).
+#   HERDR_MCP_WEB_DIR); unset -> the web UI built into the binary (0.2.0:
+#   herdr-mcp-server/build.rs include_bytes! every file of
+#   <target>/dx/herdr-mcp-ui/release/web/public; web.rs serves them). Order:
+#   dx bundle, then cargo build. build.rs creates the bundle dir empty so
+#   rerun-if-changed works before the first bundle. resolved_web_dir is gone.
 # - start_http(server, bind, port, web_dir) now honors http.bind-addr
 #   (default 127.0.0.1); previously hard-coded 0.0.0.0.
 # - CorsLayer removed (tower-http feature cors -> fs): UI is same-origin, and
@@ -270,10 +273,8 @@
 # - Known, not fixed: a cron with no future fire (year-bounded) is respawned
 #   and re-warned every 5 s by Scheduler::sync; startup + workspace.created
 #   can race and open a second bridge tab before the first binds its port.
-# - Smoke gotcha: the bridge's default web dir is compile-time
-#   CARGO_MANIFEST_DIR/../../target/dx/... — a worktree build with a shared
-#   CARGO_TARGET_DIR looks in the worktree; pass HERDR_MCP_WEB_DIR. dx bundle
-#   into the shared target replaces what the user's live 7676 bridge serves.
+# - Smoke gotcha: a dx bundle into a shared target dir changes what the next
+#   herdr-mcp build embeds; the user's running 7676 bridge keeps its copy.
 
 # Spec facts the tests rely on (moved from the deleted herdmcp.toml)
 #

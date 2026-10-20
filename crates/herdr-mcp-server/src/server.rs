@@ -2747,20 +2747,34 @@ fn host_allowed(host: &str, bind: &str) -> bool {
         || name == bind.to_ascii_lowercase()
 }
 
-/// Build the Axum router: `/api/*` plus the Dioxus web UI served from
-/// `web_dir`, with unknown paths falling back to `index.html` so client-side
-/// routes resolve. Requests with a foreign `Host` are refused ([`host_allowed`]).
-fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path, bind: &str) -> Router {
-    let index = web_dir.join("index.html");
-    if index.is_file() {
-        tracing::info!("serving web UI from {}", web_dir.display());
-    } else {
-        tracing::warn!(
-            "web UI not built: {} missing; run `dx bundle --platform web --release` \
-             in crates/herdr-mcp-ui (or set http.web-dir). /api/* still available.",
-            index.display()
-        );
-    }
+/// Build the Axum router: `/api/*` plus the Dioxus web UI — from `web_dir`
+/// when set, else the copy built into the binary ([`crate::web`]). Unknown
+/// paths fall back to `index.html` so client-side routes resolve. Requests
+/// with a foreign `Host` are refused ([`host_allowed`]).
+fn http_router(server: HerdrMcpServer, web_dir: Option<&std::path::Path>, bind: &str) -> Router {
+    let ui: axum::routing::MethodRouter = match web_dir {
+        Some(dir) => {
+            let index = dir.join("index.html");
+            if !index.is_file() {
+                tracing::warn!(
+                    "web UI: {} missing; /api/* still available",
+                    index.display()
+                );
+            }
+            tracing::info!("serving web UI from {}", dir.display());
+            axum::routing::get_service(ServeDir::new(dir).fallback(ServeFile::new(index)))
+        }
+        None => {
+            if !crate::web::embedded() {
+                tracing::warn!(
+                    "web UI not built into this binary: run `dx bundle --platform web \
+                     --release` in crates/herdr-mcp-ui before `cargo build`, or set \
+                     http.web-dir. /api/* still available."
+                );
+            }
+            get(crate::web::serve)
+        }
+    };
     let state = AppState { server };
 
     Router::new()
@@ -2822,7 +2836,7 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path, bind: &str) ->
             "/api/trim/dashboard/open",
             post(trim_dashboard_open_http_handler),
         )
-        .fallback_service(ServeDir::new(web_dir).fallback(ServeFile::new(index)))
+        .fallback_service(ui)
         .with_state(state)
         .layer(axum::middleware::from_fn({
             let bind = bind.to_string();
@@ -2855,7 +2869,7 @@ pub async fn start_http(
     server: HerdrMcpServer,
     bind: &str,
     port: u16,
-    web_dir: &std::path::Path,
+    web_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let app = http_router(server, web_dir, bind);
 
@@ -4270,7 +4284,7 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = http_router(server, &web_dir, "127.0.0.1");
+        let app = http_router(server, Some(&web_dir), "127.0.0.1");
         tokio::spawn(async move { axum::serve(listener, app).await });
         let api = ApiClient::new(&format!("http://{addr}")).unwrap();
 

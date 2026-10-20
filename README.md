@@ -38,8 +38,9 @@ cargo build --release
 Requires the `herdr` CLI on `PATH` ([install](https://herdr.dev)), 0.9 or newer.
 
 Running without any subcommand starts the MCP stdio server and the HTTP bridge
-on `127.0.0.1:7676` — open http://localhost:7676/ for the web playground (build
-it first, see [Install & build](#install--build)).
+on `127.0.0.1:7676` — open http://localhost:7676/ for the web playground. The
+web UI is built into the `herdr-mcp` binary, so the binary alone is the whole
+deployment (see [Install & build](#install--build)).
 
 ### Other entry points
 
@@ -167,12 +168,17 @@ every `/api/*` shape is defined once.
 git clone <repo-url>
 cd herdr-mcp
 
-# Build the binaries (herdr-mcp, herdr-trim)
-cargo build --release
+# Build the web UI first (optional) → target/dx/herdr-mcp-ui/release/web/public
+(cd crates/herdr-mcp-ui && dx bundle --platform web --release)
 
-# Build the web UI (optional) → target/dx/herdr-mcp-ui/release/web/public
-cd crates/herdr-mcp-ui && dx bundle --platform web --release
+# Build the binaries (herdr-mcp, herdr-trim); herdr-mcp embeds the bundle
+cargo build --release
 ```
+
+`herdr-mcp`'s build compiles whatever `dx bundle` left in
+`target/dx/herdr-mcp-ui/release/web/public` into the binary, so copy
+`target/release/herdr-mcp` anywhere and the web UI comes with it. Built without
+a bundle, the bridge serves only `/api/*`.
 
 ### Binaries
 
@@ -238,8 +244,8 @@ port = 7676
 ```
 
 Starts MCP stdio **and** the HTTP bridge on `127.0.0.1:7676`. The web
-playground is served from `http.web-dir` / `HERDR_MCP_WEB_DIR`, defaulting to
-the in-repo `dx bundle` output.
+playground is the copy built into the binary; `http.web-dir` /
+`HERDR_MCP_WEB_DIR` serves a `dx bundle` directory from disk instead.
 
 Add to your MCP client config:
 
@@ -271,8 +277,9 @@ sh scripts/plugin-build.sh && herdr plugin link .
 ```
 
 herdr reads the repo's `herdr-plugin.toml`; its build step
-(`scripts/plugin-build.sh`) compiles `herdr-mcp` and `herdr-trim` into the
-plugin's `bin/` (and bundles the web UI when `dx` is installed). Port and data
+(`scripts/plugin-build.sh`) bundles the web UI when `dx` is installed, then
+compiles `herdr-mcp` (with the web UI built in) and `herdr-trim` into the
+plugin's `bin/`. Port and data
 dir come from herdr-mcp's config when each command runs; with no `data_dir`
 configured the plugin keeps its state in herdr's state dir for the plugin. Set
 `data_dir` in `~/.config/herdr-mcp/config.toml` to share one store with the
@@ -399,7 +406,7 @@ watched and `idle` when it was.
 | `HERDR_MCP_HTTP_PORT` | 7676 | HTTP bridge port |
 | `HERDR_MCP_HTTP_ONLY` | — | Set to disable MCP stdio |
 | `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
-| `HERDR_MCP_WEB_DIR` | in-repo `dx bundle` output | Directory of the built web UI |
+| `HERDR_MCP_WEB_DIR` | the web UI built into the binary | Serve a `dx bundle` directory from disk instead |
 | `HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` | built-in | Clipboard commands (both set: used instead of the OS clipboard) |
 
 Socket resolution: `--herdr-socket` > `HERDR_SOCKET_PATH` > config file >

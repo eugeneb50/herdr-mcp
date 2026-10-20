@@ -299,7 +299,7 @@ Both go through `clipboard.rs` (see §14.10).
 
 | Method | Path | Handler | Description |
 |---|---|---|---|---|
-| `GET` | `/*` | `ServeDir` fallback | Serves the Dioxus web UI from `http.web-dir` (see §5.5) |
+| `GET` | `/*` | `web::serve` / `ServeDir` fallback | Serves the Dioxus web UI built into the binary, or from `http.web-dir` (see §5.5) |
 | `GET` | `/api/health` | `health_handler` | Returns `"ok"` |
 | `GET` | `/api/tools` | `list_tools_handler` | Lists all tools with JSON schemas |
 | `POST` | `/api/tools/{name}` | `call_tool_handler` | Dispatch tool by name |
@@ -340,11 +340,14 @@ Both go through `clipboard.rs` (see §14.10).
 
 ### 5.5 Frontend Serving
 
-The bridge serves the Dioxus bundle with `tower_http::services::ServeDir`:
+The bridge serves the Dioxus bundle built into the binary:
 
-- Directory: `http.web-dir` (TOML) / `HERDR_MCP_WEB_DIR` (env); unset →
-  `HttpConfig::resolved_web_dir()` = `<workspace>/target/dx/herdr-mcp-ui/release/web/public`
-  (the `dx bundle --platform web --release` output)
+- `herdr-mcp-server/build.rs` turns every file of the `dx bundle --platform web
+  --release` output (`<target>/dx/herdr-mcp-ui/release/web/public`) into an
+  `include_bytes!` entry; `web.rs` serves them. Build order: `dx bundle`, then
+  `cargo build`. No bundle at build time → no entries.
+- `http.web-dir` (TOML) / `HERDR_MCP_WEB_DIR` (env) serves a bundle directory
+  from disk with `tower_http::services::ServeDir` instead (UI development)
 - Any path that isn't an `/api/*` route or a file falls back to `index.html`,
   so Dioxus router deep links (`/playground`, `/trim`, …) load the app
 - A missing `index.html` logs a `tracing::warn!` with the build command;
@@ -859,7 +862,7 @@ Bind one in herdr's config: `[[keys.command]] key = "prefix+r"`,
 | `HERDR_MCP_HTTP_PORT` | — | HTTP port override |
 | `HERDR_MCP_HTTP_ONLY` | — | HTTP-only mode |
 | `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
-| `HERDR_MCP_WEB_DIR` | in-repo `dx bundle` output | Built web UI directory |
+| `HERDR_MCP_WEB_DIR` | the web UI built into the binary | Serve a `dx bundle` directory from disk instead |
 | `HERDR_MCP_CONFIG` | — | Config file path |
 | `HERDR_MCP_CLIPBOARD_COPY` | — | `clipboard.copy-command` |
 | `HERDR_MCP_CLIPBOARD_PASTE` | — | `clipboard.paste-command` |

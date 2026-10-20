@@ -66,10 +66,10 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
             .bind_addr
             .clone()
             .unwrap_or_else(|| "127.0.0.1".into());
-        let web_dir = config.http.resolved_web_dir();
+        let web_dir = config.http.web_dir.clone();
         tracing::info!("HTTP playground listening on http://{bind}:{port}");
         tokio::spawn(async move {
-            if let Err(e) = start_http(server, &bind, port, &web_dir).await {
+            if let Err(e) = start_http(server, &bind, port, web_dir.as_deref()).await {
                 tracing::error!("HTTP server failed: {e}");
             }
         });

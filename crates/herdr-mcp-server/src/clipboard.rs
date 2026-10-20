@@ -75,14 +75,17 @@ async fn run_copy(cmd: &str, text: &str) -> Result<()> {
         .stderr(std::process::Stdio::null())
         .spawn()
         .with_context(|| format!("running `{cmd}`"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes()).await?;
-    }
+    let written = match child.stdin.take() {
+        Some(mut stdin) => stdin.write_all(text.as_bytes()).await,
+        None => Ok(()),
+    };
+    // A command that exits early breaks the pipe; its exit status is the
+    // error worth reporting.
     let status = child.wait().await?;
     if !status.success() {
         bail!("`{cmd}` failed ({status})");
     }
-    Ok(())
+    Ok(written?)
 }
 
 /// The paste command's stdout.
