@@ -18,10 +18,10 @@ use uuid::Uuid;
 use crate::persistence::Persistence;
 use crate::variables::ScheduledRecipe;
 
-/// Runs a recipe by id to completion.
 /// How often [`Scheduler::run`] picks up schedules saved since the last look.
 const SYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Runs a recipe by id to completion.
 pub type ExecutorFn = Arc<dyn Fn(Uuid) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 #[derive(Clone)]

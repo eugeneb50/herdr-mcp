@@ -17,7 +17,8 @@ and a built-in OS clipboard. Breaking changes are marked **(breaking)**.
 - **One daemon per data dir.** Every process sharing a data dir used to run
   the scheduler, triggers and trim poller, so schedules and triggers fired
   twice. `<data_dir>/daemon.lock` now elects one; the others take over when
-  it exits.
+  it exits. The daemon fires against its own herdr session, so give each herdr
+  session that uses triggers or schedules its own data dir.
 - **Sessions + one typed pane list.** New `list_sessions` tool and
   `GET /api/herdr/sessions`; Discovery/Read tools take `session`.
   `list_panes` takes filters and returns `{"panes": [...]}`
@@ -30,7 +31,9 @@ and a built-in OS clipboard. Breaking changes are marked **(breaking)**.
   the same dropdowns. The TUI opens on a Send tab (tabs are now Ctrl+1-6).
 - **Built-in clipboard.** `clipboard_set` / `clipboard_get` use the OS
   clipboard (macOS, Windows, X11, Wayland) unless both `[clipboard]`
-  commands are set; Settings gets a "built-in" choice.
+  commands are set; Settings gets a "built-in" choice. The commands live only
+  in the config file: `HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` are gone
+  **(breaking)**, as they overrode a saved Settings choice on every restart.
 - **One settings file** **(breaking)**. `herdmcp.toml` / `[persistent]` are
   gone: settings come from the config file, env and flags. Bare `herdr-mcp`
   no longer forces port 7676 over the config, and bridge discovery only

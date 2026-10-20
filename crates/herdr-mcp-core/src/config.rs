@@ -206,14 +206,6 @@ impl Config {
             self.http.web_dir = Some(PathBuf::from(v)).filter(|d| !d.as_os_str().is_empty());
         }
 
-        // clipboard
-        if let Ok(v) = env::var("HERDR_MCP_CLIPBOARD_COPY") {
-            self.clipboard.copy_command = Some(v);
-        }
-        if let Ok(v) = env::var("HERDR_MCP_CLIPBOARD_PASTE") {
-            self.clipboard.paste_command = Some(v);
-        }
-
         // herdr
         if let Ok(v) = env::var("HERDR_SOCKET_PATH") {
             self.herdr.socket_path = Some(PathBuf::from(v));
@@ -692,24 +684,6 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(!content.contains("clipboard"), "{content}");
         assert!(content.contains("# keep") && content.contains("port = 9999"));
-    }
-
-    #[test]
-    fn test_clipboard_env_vars_set_the_commands() {
-        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", "my-copy");
-            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", "my-paste");
-        }
-        let cfg = Config::default().apply_env_overrides();
-        unsafe {
-            std::env::remove_var("HERDR_MCP_CLIPBOARD_COPY");
-            std::env::remove_var("HERDR_MCP_CLIPBOARD_PASTE");
-        }
-        assert_eq!(
-            cfg.unwrap().clipboard.commands(),
-            Some(("my-copy", "my-paste"))
-        );
     }
 
     #[test]

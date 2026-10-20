@@ -447,8 +447,9 @@ pub struct TrimState {
 
 /// Send tab state: what the user is typing and where it goes.
 pub struct SendState {
-    /// Selected row of `tabs::send::targets` (labeled panes first).
-    pub pane_index: usize,
+    /// The picked pane's id; `None` = the first of `tabs::send::targets`.
+    /// An id, not a row: the list re-sorts on every refresh.
+    pub pane: Option<String>,
     pub text: TextArea<'static>,
     /// Send with `run_command` (text + Enter) instead of `send_text`.
     pub enter: bool,
@@ -651,7 +652,7 @@ impl App {
                 focused_frame: 0,
             },
             send: SendState {
-                pane_index: 0,
+                pane: None,
                 text: TextArea::default(),
                 enter: true,
                 msg: String::new(),
@@ -1266,10 +1267,12 @@ impl App {
             self.status_msg = msg;
             return;
         }
-        let pane_id = match self.herdr.focused() {
-            Some(p) => p.pane_id.clone(),
-            None => {
-                self.status_msg = "no focused herdr pane".into();
+        // The Send tab's pane, not herdr's focused one: right-clicking the
+        // dashboard focuses the dashboard's own pane.
+        let pane_id = match tabs::send::target(self) {
+            Ok(p) => p.pane_id.clone(),
+            Err(msg) => {
+                self.status_msg = msg;
                 return;
             }
         };

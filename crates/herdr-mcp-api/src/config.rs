@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 /// Clipboard backend commands for the `clipboard_set` / `clipboard_get` tools.
 /// When both are set (non-empty) the server runs them instead of its built-in
 /// OS clipboard (e.g. to force `xsel`); otherwise it uses the built-in one.
-/// `HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` set them through the config's env layer.
+/// Settings (web/TUI) saves them; there is no env override, so what Settings
+/// shows is what runs.
 ///
 /// Also the `[clipboard]` table of the config file (`herdr-mcp-core` re-exports
 /// it), hence the kebab-case keys on the wire too.

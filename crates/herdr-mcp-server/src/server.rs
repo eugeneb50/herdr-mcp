@@ -2028,12 +2028,15 @@ impl HerdrMcpServer {
             ..Default::default()
         };
         let panes = crate::panes::panes(&filter).await?;
-        let target =
-            dashboard_split_target(&panes, workspace_id.is_some()).ok_or_else(|| McpError {
-                code: rmcp::model::ErrorCode(-32000),
-                message: "trim: no pane to split for the dashboard".into(),
-                data: None,
-            })?;
+        let target = dashboard_split_target(
+            &panes,
+            workspace_id.as_deref().is_some_and(|w| !w.is_empty()),
+        )
+        .ok_or_else(|| McpError {
+            code: rmcp::model::ErrorCode(-32000),
+            message: "trim: no pane to split for the dashboard".into(),
+            data: None,
+        })?;
         let raw = herdr_cli(&[
             "pane",
             "split",
@@ -3630,6 +3633,8 @@ async fn auto_variables_handler(
 
 /// Live panes (by pane id) with the registry handles (by pane id and role,
 /// from `AgentRegistry::seed`) laid over them, non-empty fields winning.
+/// Handles of panes herdr no longer lists are left out: the registry keeps
+/// them after a pane closes.
 fn pane_vars(
     mut panes: HashMap<String, serde_json::Value>,
     handles: HashMap<String, serde_json::Value>,
@@ -3637,10 +3642,9 @@ fn pane_vars(
     let mut merged = HashMap::new();
     for (key, handle) in handles {
         let pane_id = handle["pane_id"].as_str().unwrap_or_default();
-        let mut obj = panes
-            .get(pane_id)
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
+        let Some(mut obj) = panes.get(pane_id).cloned() else {
+            continue;
+        };
         if let (Some(obj), Some(fields)) = (obj.as_object_mut(), handle.as_object()) {
             for (k, v) in fields {
                 if v.as_str() != Some("") {
@@ -3785,9 +3789,12 @@ mod tests {
             ("w1:p2".to_string(), json!({"pane_id": "w1:p2"})),
         ]);
         let handle = json!({"pane_id": "w1:p1", "role": "builder", "agent": "", "output": "ok"});
+        let closed = json!({"pane_id": "w1:p9", "role": "gone", "tab_id": "w1:t9"});
         let handles = HashMap::from([
             ("w1:p1".to_string(), handle.clone()),
             ("builder".to_string(), handle),
+            ("w1:p9".to_string(), closed.clone()),
+            ("gone".to_string(), closed),
         ]);
         let vars = pane_vars(panes, handles);
         let want = json!({

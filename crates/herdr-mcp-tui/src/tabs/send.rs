@@ -20,6 +20,29 @@ pub fn targets(panes: &[HerdrPane]) -> Vec<&HerdrPane> {
     out
 }
 
+/// Row of the picked pane in `list`; the first row when none is picked or
+/// the picked pane is gone.
+fn row(list: &[&HerdrPane], picked: Option<&str>) -> usize {
+    picked
+        .and_then(|id| list.iter().position(|p| p.pane_id == id))
+        .unwrap_or(0)
+}
+
+/// The pane a send goes to: the picked one, else the first listed.
+pub fn target(app: &App) -> Result<&HerdrPane, String> {
+    let list = targets(&app.herdr.panes);
+    match app.send.pane.as_deref() {
+        Some(id) => list
+            .into_iter()
+            .find(|p| p.pane_id == id)
+            .ok_or_else(|| format!("pane {id} is gone; pick another on the Send tab")),
+        None => list
+            .first()
+            .copied()
+            .ok_or_else(|| "no pane to send to".to_string()),
+    }
+}
+
 fn pane_line(p: &HerdrPane) -> String {
     [Some(pane_name(p)), p.agent.as_deref(), p.cwd.as_deref()]
         .into_iter()
@@ -40,7 +63,7 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         .split(area);
 
     let list = targets(&app.herdr.panes);
-    let selected = app.send.pane_index.min(list.len().saturating_sub(1));
+    let selected = row(&list, app.send.pane.as_deref());
     let block = panel_block(&format!(
         " Pane — {} ({}) · ↑/↓ pick ",
         app.herdr.session_name(),
@@ -99,16 +122,16 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 /// Keyboard handler: the text box always has focus.
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
-    let count = app.herdr.panes.len();
     match code {
-        KeyCode::Up => {
-            app.send.pane_index = app.send.pane_index.saturating_sub(1);
-            Ok(true)
-        }
-        KeyCode::Down => {
-            if count > 0 {
-                app.send.pane_index = (app.send.pane_index + 1).min(count - 1);
-            }
+        KeyCode::Up | KeyCode::Down => {
+            let list = targets(&app.herdr.panes);
+            let at = row(&list, app.send.pane.as_deref());
+            let next = if code == KeyCode::Up {
+                at.saturating_sub(1)
+            } else {
+                (at + 1).min(list.len().saturating_sub(1))
+            };
+            app.send.pane = list.get(next).map(|p| p.pane_id.clone());
             Ok(true)
         }
         KeyCode::Enter => {
@@ -154,11 +177,12 @@ async fn send(app: &mut App) {
         app.send.msg = "bridge not connected".into();
         return;
     };
-    let list = targets(&app.herdr.panes);
-    let selected = app.send.pane_index.min(list.len().saturating_sub(1));
-    let Some(pane) = list.get(selected).copied() else {
-        app.send.msg = "no pane to send to".into();
-        return;
+    let pane = match target(app) {
+        Ok(p) => p,
+        Err(msg) => {
+            app.send.msg = msg;
+            return;
+        }
     };
     let name = pane_name(pane).to_string();
     let pane_id = pane.pane_id.clone();
@@ -201,5 +225,25 @@ mod tests {
         assert_eq!(order, ["w1:p2", "w1:p1", "w1:p3"]);
         assert_eq!(pane_line(&panes[1]), "builder · claude · /w");
         assert_eq!(pane_line(&panes[0]), "w1:p1 · claude · /w");
+    }
+
+    #[test]
+    fn the_pick_follows_its_pane_across_a_resort() {
+        let mut app = App::new(crate::DashboardOptions {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            http_port: 1,
+        });
+        app.herdr.panes = vec![
+            pane("w1:p1", ""),
+            pane("w1:p2", "builder"),
+            pane("w1:p3", ""),
+        ];
+        app.send.pane = Some("w1:p3".into());
+        assert_eq!(target(&app).unwrap().pane_id, "w1:p3");
+        // w1:p1 gets a label: rows shift, the pick doesn't.
+        app.herdr.panes[0].label = Some("tester".into());
+        assert_eq!(target(&app).unwrap().pane_id, "w1:p3");
+        app.herdr.panes.remove(2);
+        assert!(target(&app).unwrap_err().contains("w1:p3 is gone"));
     }
 }
