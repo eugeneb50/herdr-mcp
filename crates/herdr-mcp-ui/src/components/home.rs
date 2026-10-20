@@ -2,11 +2,13 @@
 //! and the live pane list. The pane is addressed like the tool runner
 //! addresses it — `pane_id` and/or `label`, typed or picked from the panes
 //! and names the auto variables hold (`GET /api/variables/auto`), which also
-//! fill the pane list.
+//! fill the pane list. The sent text stays in the box for re-sending; with
+//! highlighting on, a `<pre>` drawn under the transparent textarea colors it.
 
 use dioxus::prelude::*;
 use herdr_mcp_api::HerdrPane;
 
+use super::highlight::tokens;
 use super::pane_options::{PaneOptions, pane_list};
 use crate::client::use_api;
 use crate::vars::auto_panes;
@@ -14,6 +16,10 @@ use crate::vars::auto_panes;
 /// Browser-local keys for the last target sent to, as typed.
 const LAST_PANE_ID: &str = "herdr-mcp.send.pane_id";
 const LAST_LABEL: &str = "herdr-mcp.send.label";
+/// Browser-local "highlight code" toggle, `"1"` when on.
+const HIGHLIGHT: &str = "herdr-mcp.send.highlight";
+/// The highlight layer, scrolled along with the textarea.
+const HIGHLIGHT_ID: &str = "send-highlight";
 
 fn storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok().flatten()
@@ -52,6 +58,7 @@ pub fn Home() -> Element {
     let mut label: Signal<String> = use_signal(|| remembered(LAST_LABEL));
     let mut text: Signal<String> = use_signal(String::new);
     let mut enter: Signal<bool> = use_signal(|| true);
+    let mut highlight: Signal<bool> = use_signal(|| remembered(HIGHLIGHT) == "1");
     let mut status: Signal<Option<Result<String, String>>> = use_signal(|| None);
     let mut busy: Signal<bool> = use_signal(|| false);
     let mut refresh: Signal<u32> = use_signal(|| 0);
@@ -96,7 +103,6 @@ pub fn Home() -> Element {
                         "sent {} chars{how} to {to}",
                         body.chars().count()
                     ))));
-                    text.set(String::new());
                     *refresh.write() += 1;
                 }
                 Err(e) => status.set(Some(Err(format!("send failed: {e}")))),
@@ -157,9 +163,20 @@ pub fn Home() -> Element {
                     }
                 }
             }
+            div { class: if highlight() { "editor editor-hl" } else { "editor" },
+                if highlight() {
+                    pre { id: HIGHLIGHT_ID, class: "input textarea hl-layer", "aria-hidden": "true",
+                        for (kind , run) in tokens(&text.read()) {
+                            span { class: kind.class(), "{run}" }
+                        }
+                        // A trailing newline needs a following char to take up a line.
+                        " "
+                    }
+                }
             textarea {
                 class: "input textarea",
                 rows: "3",
+                spellcheck: !highlight(),
                 autofocus: true,
                 placeholder: "run the tests again",
                 value: "{text}",
@@ -170,6 +187,16 @@ pub fn Home() -> Element {
                         send();
                     }
                 },
+                onscroll: move |e| {
+                    if let Some(layer) = web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.get_element_by_id(HIGHLIGHT_ID))
+                    {
+                        layer.set_scroll_top(e.scroll_top() as i32);
+                        layer.set_scroll_left(e.scroll_left() as i32);
+                    }
+                },
+            }
             }
             div { class: "send-row",
                 label { class: "check-row",
@@ -180,10 +207,30 @@ pub fn Home() -> Element {
                     }
                     span { class: "muted", "press Enter after" }
                 }
+                label { class: "check-row",
+                    input {
+                        r#type: "checkbox",
+                        checked: highlight(),
+                        onchange: move |_| {
+                            highlight.toggle();
+                            remember(HIGHLIGHT, if highlight() { "1" } else { "" });
+                        },
+                    }
+                    span { class: "muted", "highlight code" }
+                }
                 match &*status.read() {
                     Some(Ok(msg)) => rsx! { span { class: "send-status", "{msg}" } },
                     Some(Err(msg)) => rsx! { span { class: "send-status send-error", "{msg}" } },
                     None => rsx! {},
+                }
+                button {
+                    class: "btn",
+                    disabled: text.read().is_empty(),
+                    onclick: move |_| {
+                        text.set(String::new());
+                        status.set(None);
+                    },
+                    "Clear"
                 }
                 button {
                     class: "btn btn-primary",
