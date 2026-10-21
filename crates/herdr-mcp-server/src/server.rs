@@ -25,15 +25,17 @@ use herdr_mcp_trim::stats;
 pub struct ListTabsParams {
     /// Filter by workspace ID (e.g., "1").
     pub workspace_id: Option<String>,
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
-/// Parameters for listing panes.
+/// Parameters for tools that only pick a herdr session.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 #[serde(deny_unknown_fields)]
-pub struct ListPanesParams {
-    /// Filter by workspace ID (e.g., "1").
-    pub workspace_id: Option<String>,
+pub struct SessionParams {
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
 /// Parameters for getting a specific pane by ID or label.
@@ -45,6 +47,8 @@ pub struct GetPaneParams {
     pub pane_id: Option<String>,
     /// Pane label (alternative to pane_id).
     pub label: Option<String>,
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
 /// Parameters for getting details about a specific agent.
@@ -54,6 +58,8 @@ pub struct GetPaneParams {
 pub struct GetAgentParams {
     /// Agent target: terminal ID, agent name, or pane ID.
     pub target: String,
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
 /// Parameters for creating a new workspace.
@@ -123,6 +129,8 @@ pub struct ReadPaneParams {
     pub source: Option<String>,
     /// Number of lines to read.
     pub lines: Option<u32>,
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
 /// Parameters for reading text output from an agent.
@@ -136,6 +144,8 @@ pub struct ReadAgentParams {
     pub source: Option<String>,
     /// Number of lines to read.
     pub lines: Option<u32>,
+    /// herdr session name (see `list_sessions`); default: this server's.
+    pub session: Option<String>,
 }
 
 /// Parameters for sending text to a pane.
@@ -650,26 +660,27 @@ impl HerdrMcpServer {
             .clone()
     }
 
-    /// Save clipboard commands to the config file at `path` and apply them to
-    /// the running server. The file is written first, so a failed write
-    /// leaves the live config unchanged.
+    /// Save clipboard commands to the config file at `path` (`None`: the
+    /// built-in OS clipboard) and apply them to the running server. The file
+    /// is written first, so a failed write leaves the live config unchanged.
     pub async fn save_clipboard_config(
         &self,
         path: std::path::PathBuf,
-        copy: String,
-        paste: String,
+        commands: Option<(String, String)>,
     ) -> anyhow::Result<()> {
-        let (c, p) = (copy.clone(), paste.clone());
+        let saved = commands.clone();
         tokio::task::spawn_blocking(move || {
-            herdr_mcp_core::upsert_clipboard_in_file(&path, &c, &p)
+            let commands = saved.as_ref().map(|(c, p)| (c.as_str(), p.as_str()));
+            herdr_mcp_core::set_clipboard_in_file(&path, commands)
         })
         .await??;
+        let (copy_command, paste_command) = commands.unzip();
         *self
             .clipboard
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = herdr_mcp_core::ClipboardConfig {
-            copy_command: Some(copy),
-            paste_command: Some(paste),
+            copy_command,
+            paste_command,
         };
         Ok(())
     }
@@ -908,47 +919,64 @@ impl HerdrMcpServer {
         Ok(CallToolResult::success(vec![content]))
     }
 
-    #[tool(meta = category("Discovery"), description = "List all workspaces in the current session")]
-    async fn list_workspaces(&self) -> Result<CallToolResult, McpError> {
-        run_herdr_json(&["workspace", "list"]).await
+    #[tool(meta = category("Discovery"), description = "List every named herdr session: name, running, default, socket. Pass a name as `session` to the Discovery and Read tools to look inside it.")]
+    async fn list_sessions(&self) -> Result<CallToolResult, McpError> {
+        let sessions = crate::panes::sessions().await?;
+        json_result(&herdr_mcp_api::SessionsResponse { sessions })
+    }
+
+    #[tool(meta = category("Discovery"), description = "List all workspaces in a herdr session (default: this server's)")]
+    async fn list_workspaces(
+        &self,
+        Parameters(SessionParams { session }): Parameters<SessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        herdr_json_in(session.as_deref(), &["workspace", "list"]).await
     }
 
     #[tool(meta = category("Discovery"), description = "List tabs, optionally filtered by workspace_id (e.g. '1')")]
     async fn list_tabs(
         &self,
-        Parameters(ListTabsParams { workspace_id }): Parameters<ListTabsParams>,
+        Parameters(ListTabsParams {
+            workspace_id,
+            session,
+        }): Parameters<ListTabsParams>,
     ) -> Result<CallToolResult, McpError> {
         let mut args = vec!["tab", "list"];
         if let Some(ref wid) = workspace_id {
             args.extend(["--workspace", wid]);
         }
-        run_herdr_json(&args).await
+        herdr_json_in(session.as_deref(), &args).await
     }
 
-    #[tool(meta = category("Discovery"), description = "List panes, optionally filtered by workspace_id (e.g. '1')")]
+    #[tool(meta = category("Discovery"), description = "List panes as {panes: [...]}: id, workspace, tab, focus, agent + status, label, cwd. Every filter narrows: session, workspace_id, tab_id, agent_status, focused, label (case-insensitive substring of label or agent).")]
     async fn list_panes(
         &self,
-        Parameters(ListPanesParams { workspace_id }): Parameters<ListPanesParams>,
+        Parameters(filter): Parameters<herdr_mcp_api::PaneFilter>,
     ) -> Result<CallToolResult, McpError> {
-        let mut args = vec!["pane", "list"];
-        if let Some(ref wid) = workspace_id {
-            args.extend(["--workspace", wid]);
-        }
-        run_herdr_json(&args).await
+        let panes = crate::panes::panes(&filter).await?;
+        json_result(&herdr_mcp_api::PanesResponse { panes })
     }
 
-    #[tool(meta = category("Discovery"), description = "List all detected agents in the session")]
-    async fn list_agents(&self) -> Result<CallToolResult, McpError> {
-        run_herdr_json(&["agent", "list"]).await
+    #[tool(meta = category("Discovery"), description = "List all detected agents in a herdr session (default: this server's)")]
+    async fn list_agents(
+        &self,
+        Parameters(SessionParams { session }): Parameters<SessionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        herdr_json_in(session.as_deref(), &["agent", "list"]).await
     }
 
     #[tool(meta = category("Discovery"), description = "Get details about a specific pane by pane_id or label")]
     async fn get_pane(
         &self,
-        Parameters(GetPaneParams { pane_id, label }): Parameters<GetPaneParams>,
+        Parameters(GetPaneParams {
+            pane_id,
+            label,
+            session,
+        }): Parameters<GetPaneParams>,
     ) -> Result<CallToolResult, McpError> {
-        let pid = resolve_pane_id(pane_id, label).await?;
-        run_herdr_json(&["pane", "get", &pid]).await
+        let session = session.as_deref();
+        let pid = resolve_pane_id_in(session, pane_id, label).await?;
+        herdr_json_in(session, &["pane", "get", &pid]).await
     }
 
     #[tool(
@@ -957,9 +985,9 @@ impl HerdrMcpServer {
     )]
     async fn get_agent(
         &self,
-        Parameters(GetAgentParams { target }): Parameters<GetAgentParams>,
+        Parameters(GetAgentParams { target, session }): Parameters<GetAgentParams>,
     ) -> Result<CallToolResult, McpError> {
-        run_herdr_json(&["agent", "get", &target]).await
+        herdr_json_in(session.as_deref(), &["agent", "get", &target]).await
     }
 
     // ── Lifecycle ──────────────────────────────────────────────────────
@@ -1058,9 +1086,11 @@ impl HerdrMcpServer {
             label,
             source,
             lines,
+            session,
         }): Parameters<ReadPaneParams>,
     ) -> Result<CallToolResult, McpError> {
-        let pid = resolve_pane_id(pane_id, label).await?;
+        let session = session.as_deref();
+        let pid = resolve_pane_id_in(session, pane_id, label).await?;
         let lines_str = lines.map(|n| n.to_string());
         let mut args = vec!["pane", "read", &pid];
         if let Some(ref src) = source {
@@ -1069,7 +1099,7 @@ impl HerdrMcpServer {
         if let Some(ref n) = lines_str {
             args.extend(["--lines", n]);
         }
-        run_herdr_text(&args).await
+        herdr_text_in(session, &args).await
     }
 
     #[tool(
@@ -1082,6 +1112,7 @@ impl HerdrMcpServer {
             target,
             source,
             lines,
+            session,
         }): Parameters<ReadAgentParams>,
     ) -> Result<CallToolResult, McpError> {
         let lines_str = lines.map(|n| n.to_string());
@@ -1092,7 +1123,7 @@ impl HerdrMcpServer {
         if let Some(ref n) = lines_str {
             args.extend(["--lines", n]);
         }
-        run_herdr_text(&args).await
+        herdr_text_in(session.as_deref(), &args).await
     }
 
     // ── Write ──────────────────────────────────────────────────────────
@@ -1987,11 +2018,27 @@ impl HerdrMcpServer {
         &self,
         Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
     ) -> Result<CallToolResult, McpError> {
-        let mut cli = vec!["pane", "split"];
-        if let Some(ref w) = workspace_id {
-            cli.extend(["--workspace", w]);
-        }
-        let raw = herdr_cli(&cli).await?;
+        // `pane split` takes a pane, not a workspace: split the focused one.
+        let filter = herdr_mcp_api::PaneFilter {
+            workspace_id: workspace_id.clone(),
+            ..Default::default()
+        };
+        let panes = crate::panes::panes(&filter).await?;
+        let target =
+            dashboard_split_target(&panes, workspace_id.is_some()).ok_or_else(|| McpError {
+                code: rmcp::model::ErrorCode(-32000),
+                message: "trim: no pane to split for the dashboard".into(),
+                data: None,
+            })?;
+        let raw = herdr_cli(&[
+            "pane",
+            "split",
+            &target,
+            "--direction",
+            "right",
+            "--no-focus",
+        ])
+        .await?;
         let value: serde_json::Value =
             serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
         let pane_id = extract_pane_id(&value).unwrap_or_default();
@@ -2003,9 +2050,16 @@ impl HerdrMcpServer {
             });
         }
         // The dashboard lives in the `herdr-trim` binary (`herdr-mcp` is
-        // serve-only). The pane runs a shell, so single-quote the path.
-        let data_dir = self.data_dir.display().to_string().replace('\'', r"'\''");
-        let cmd = format!("herdr-trim dashboard --data-dir '{data_dir}'");
+        // serve-only): the sibling of this binary, as `plugin link` finds it,
+        // else whatever PATH has. The pane runs a shell, so single-quote.
+        let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
+        let trim = std::env::current_exe()
+            .ok()
+            .map(|exe| exe.with_file_name("herdr-trim"))
+            .filter(|p| p.exists())
+            .map_or_else(|| "herdr-trim".into(), |p| quote(&p.display().to_string()));
+        let data_dir = quote(&self.data_dir.display().to_string());
+        let cmd = format!("{trim} dashboard --data-dir {data_dir}");
         let _ = herdr_cli(&["pane", "send-text", &pane_id, &cmd]).await;
         let _ = herdr_cli(&["pane", "send-keys", &pane_id, "Enter"]).await;
         Ok(CallToolResult::success(vec![
@@ -2286,61 +2340,39 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Clipboard"),
-        description = "Write text to the system clipboard. Requires a clipboard utility on the host (pbcopy on macOS, wl-copy on Wayland, xclip/xsel on X11). Text only."
+        description = "Write text to the system clipboard (the OS clipboard, or the configured [clipboard] commands). Text only."
     )]
     async fn clipboard_set(
         &self,
         Parameters(ClipboardSetParams { text }): Parameters<ClipboardSetParams>,
     ) -> Result<CallToolResult, McpError> {
-        let (copy_cmd, _paste_cmd) = detect_clipboard(&self.clipboard_config())?;
-        eprintln!(
-            "[clipboard] set: running `{copy_cmd}` ({} chars)",
-            text.len()
-        );
-        match shell_with_stdin(copy_cmd, &text).await {
-            Ok(out) => {
-                eprintln!("[clipboard] set: ok (stdout={out:?})");
-                Ok(CallToolResult::success(vec![
-                    Content::json(serde_json::json!({
-                        "ok": true,
-                        "length": text.len(),
-                    }))
-                    .map_err(to_mcp_err)?,
-                ]))
-            }
-            Err(e) => {
-                eprintln!("[clipboard] set: FAILED: {e}");
-                Err(e)
-            }
-        }
+        let length = text.len();
+        crate::clipboard::set(&self.clipboard_config(), text)
+            .await
+            .map_err(|e| to_mcp_err(format!("{e:#}")))?;
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({ "ok": true, "length": length }))
+                .map_err(to_mcp_err)?,
+        ]))
     }
 
     #[tool(
         meta = category("Clipboard"),
-        description = "Read the current text content of the system clipboard. Requires a clipboard utility on the host (pbpaste on macOS, wl-paste on Wayland, xclip/xsel on X11). Returns empty string if the clipboard contains no text. Text only."
+        description = "Read the system clipboard's text (the OS clipboard, or the configured [clipboard] commands). Returns an empty string when it holds no text. Text only."
     )]
     async fn clipboard_get(
         &self,
         Parameters(_): Parameters<ClipboardGetParams>,
     ) -> Result<CallToolResult, McpError> {
-        let (_copy_cmd, paste_cmd) = detect_clipboard(&self.clipboard_config())?;
-        eprintln!("[clipboard] get: running `{paste_cmd}`");
-        match shell_output(paste_cmd).await {
-            Ok(text) => {
-                eprintln!("[clipboard] get: ok ({} chars)", text.len());
-                Ok(CallToolResult::success(vec![Content::text(text)]))
-            }
-            Err(e) => {
-                eprintln!("[clipboard] get: FAILED: {e}");
-                Err(e)
-            }
-        }
+        let text = crate::clipboard::get(&self.clipboard_config())
+            .await
+            .map_err(|e| to_mcp_err(format!("{e:#}")))?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
 
 #[tool_handler(
     name = "herdr-mcp",
-    version = "0.1.0",
     instructions = "Control herdr — a terminal-native agent multiplexer. \
                     Manage workspaces, tabs, and panes; spawn agents; \
                     read output; send text, keys, and commands; \
@@ -2401,6 +2433,17 @@ pub(crate) fn extract_pane_id(value: &serde_json::Value) -> Option<String> {
 
 pub(crate) fn as_strs(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
+}
+
+/// Pane `trim_dashboard_open` splits: the focused pane, or — when the list
+/// is one workspace's panes and none of them has focus — its first pane.
+fn dashboard_split_target(
+    panes: &[herdr_mcp_api::HerdrPane],
+    one_workspace: bool,
+) -> Option<String> {
+    let focused = panes.iter().find(|p| p.focused);
+    let pane = focused.or(if one_workspace { panes.first() } else { None })?;
+    Some(pane.pane_id.clone())
 }
 
 /// Submit `text` (+ Enter) to an agent: `agent prompt` (0.9 has no `agent send`).
@@ -2503,7 +2546,12 @@ async fn read_pane_text(pane_id: &str) -> anyhow::Result<String> {
 
 /// Run `herdr` CLI args and return stdout as a JSON-pretty-printed `CallToolResult`.
 async fn run_herdr_json(args: &[&str]) -> Result<CallToolResult, McpError> {
-    let output = herdr_cli(args).await?;
+    herdr_json_in(None, args).await
+}
+
+/// [`run_herdr_json`] in herdr `session` (`None`: this server's).
+async fn herdr_json_in(session: Option<&str>, args: &[&str]) -> Result<CallToolResult, McpError> {
+    let output = crate::panes::herdr_in(session, args).await?;
 
     match serde_json::from_str::<serde_json::Value>(&output) {
         Ok(value) => {
@@ -2521,165 +2569,19 @@ async fn run_herdr_json(args: &[&str]) -> Result<CallToolResult, McpError> {
     }
 }
 
-/// Run `herdr` CLI args and return stdout as plain text.
-async fn run_herdr_text(args: &[&str]) -> Result<CallToolResult, McpError> {
-    let output = herdr_cli(args).await?;
+/// Run `herdr` CLI args in `session` (`None`: this server's) and return
+/// stdout as plain text.
+async fn herdr_text_in(session: Option<&str>, args: &[&str]) -> Result<CallToolResult, McpError> {
+    let output = crate::panes::herdr_in(session, args).await?;
     Ok(CallToolResult::success(vec![Content::text(output)]))
 }
 
-// ── Clipboard helpers ────────────────────────────────────────────────
-
-/// Detect the platform clipboard command pair (copy, paste).
-///
-/// Resolution order (highest precedence first):
-/// 1. `HERDR_MCP_CLIPBOARD_COPY` / `HERDR_MCP_CLIPBOARD_PASTE` env vars (both set).
-/// 2. The `clipboard.copy-command` / `clipboard.paste-command` config settings
-///    (both set) — lets Linux users force e.g. `xsel` instead of `wl-copy`.
-/// 3. Platform auto-detection (pbcopy / wl-copy / xclip / xsel).
-///
-/// The leaked `&'static str` pairs are used for the process lifetime; this
-/// avoids threading an allocator through the call sites.
-fn detect_clipboard(
-    cfg: &herdr_mcp_core::ClipboardConfig,
-) -> Result<(&'static str, &'static str), McpError> {
-    if let (Ok(copy), Ok(paste)) = (
-        std::env::var("HERDR_MCP_CLIPBOARD_COPY"),
-        std::env::var("HERDR_MCP_CLIPBOARD_PASTE"),
-    ) && !copy.trim().is_empty()
-        && !paste.trim().is_empty()
-    {
-        // Leak intentionally: the returned pair is 'static and used for the
-        // process lifetime; this avoids threading an allocator through the
-        // call sites.
-        let copy: &'static str = Box::leak(copy.into_boxed_str());
-        let paste: &'static str = Box::leak(paste.into_boxed_str());
-        return Ok((copy, paste));
-    }
-    if let (Some(copy), Some(paste)) = (&cfg.copy_command, &cfg.paste_command)
-        && !copy.trim().is_empty()
-        && !paste.trim().is_empty()
-    {
-        let copy: &'static str = Box::leak(copy.clone().into_boxed_str());
-        let paste: &'static str = Box::leak(paste.clone().into_boxed_str());
-        return Ok((copy, paste));
-    }
-    match std::env::consts::OS {
-        "macos" => Ok(("pbcopy", "pbpaste")),
-        "windows" => Ok(("clip", "powershell -command Get-Clipboard")),
-        "linux" => {
-            // Prefer xsel/xclip (work headless) over wl-copy (requires Wayland).
-            if command_exists("xsel") {
-                Ok(("xsel --clipboard --input", "xsel --clipboard --output"))
-            } else if command_exists("xclip") {
-                Ok((
-                    "xclip -selection clipboard",
-                    "xclip -selection clipboard -o",
-                ))
-            } else if command_exists("wl-copy") {
-                Ok(("wl-copy", "wl-paste"))
-            } else {
-                Err(McpError {
-                    code: rmcp::model::ErrorCode(-32603),
-                    message:
-                        "No clipboard utility found. Install xclip, xsel, or wl-clipboard (e.g. `apt install xclip`).".into(),
-                    data: None,
-                })
-            }
-        }
-        _ => Err(McpError {
-            code: rmcp::model::ErrorCode(-32603),
-            message: "Unsupported platform for clipboard operations.".into(),
-            data: None,
-        }),
-    }
-}
-
-/// True if `cmd` resolves on PATH.
-fn command_exists(cmd: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(cmd)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Shell out to a command, piping `stdin_text` to its stdin (clipboard copy).
-async fn shell_with_stdin(cmd: &str, stdin_text: &str) -> Result<String, McpError> {
-    tracing::debug!("clipboard copy via: {cmd}");
-    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-    let bin = parts[0];
-    let args: Vec<&str> = parts
-        .get(1)
-        .map(|a| a.split_whitespace().collect())
-        .unwrap_or_default();
-
-    let mut child = tokio::process::Command::new(bin)
-        .args(&args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| McpError {
-            code: rmcp::model::ErrorCode(-32603),
-            message: format!("Clipboard utility '{bin}' not found: {e}").into(),
-            data: None,
-        })?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin
-            .write_all(stdin_text.as_bytes())
-            .await
-            .map_err(|e| McpError {
-                code: rmcp::model::ErrorCode(-32603),
-                message: format!("Failed to write to clipboard utility stdin: {e}").into(),
-                data: None,
-            })?;
-    }
-
-    let output = child.wait_with_output().await.map_err(|e| McpError {
-        code: rmcp::model::ErrorCode(-32603),
-        message: format!("Clipboard utility failed: {e}").into(),
-        data: None,
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.trim().is_empty() {
-            return Err(McpError {
-                code: rmcp::model::ErrorCode(-32000),
-                message: format!("Clipboard write failed: {}", stderr.trim()).into(),
-                data: None,
-            });
-        }
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Shell out to a command, capturing stdout (clipboard paste).
-async fn shell_output(cmd: &str) -> Result<String, McpError> {
-    tracing::debug!("clipboard paste via: {cmd}");
-    let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
-    let bin = parts[0];
-    let args: Vec<&str> = parts
-        .get(1)
-        .map(|a| a.split_whitespace().collect())
-        .unwrap_or_default();
-
-    let output = tokio::process::Command::new(bin)
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| McpError {
-            code: rmcp::model::ErrorCode(-32603),
-            message: format!("Clipboard utility '{bin}' not found: {e}").into(),
-            data: None,
-        })?;
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+/// A typed value as a tool's JSON result.
+fn json_result(value: &impl Serialize) -> Result<CallToolResult, McpError> {
+    let value = serde_json::to_value(value).map_err(to_mcp_err)?;
+    Ok(CallToolResult::success(vec![
+        Content::json(value).map_err(to_mcp_err)?,
+    ]))
 }
 
 /// Spawn a background task that refreshes trim badges for all workspaces
@@ -2696,18 +2598,24 @@ pub fn spawn_trim_poller(server: std::sync::Arc<HerdrMcpServer>) {
 
 /// Execute the `herdr` CLI binary with the given arguments.
 pub(crate) async fn herdr_cli(args: &[&str]) -> Result<String, McpError> {
+    herdr_cli_at(None, args).await
+}
+
+/// [`herdr_cli`] against another session's API socket (`None`: this
+/// server's own, exported at startup).
+pub(crate) async fn herdr_cli_at(socket: Option<&str>, args: &[&str]) -> Result<String, McpError> {
     tracing::debug!("herdr {}", args.join(" "));
 
     let binary = herdr_mcp_core::herdr_bin();
-    let output = tokio::process::Command::new(binary)
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| McpError {
-            code: rmcp::model::ErrorCode(-32603),
-            message: format!("Failed to execute herdr: {e}").into(),
-            data: None,
-        })?;
+    let mut cmd = tokio::process::Command::new(binary);
+    if let Some(socket) = socket {
+        cmd.env("HERDR_SOCKET_PATH", socket);
+    }
+    let output = cmd.args(args).output().await.map_err(|e| McpError {
+        code: rmcp::model::ErrorCode(-32603),
+        message: format!("Failed to execute herdr: {e}").into(),
+        data: None,
+    })?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -2729,26 +2637,17 @@ pub(crate) async fn herdr_cli(args: &[&str]) -> Result<String, McpError> {
     }
 }
 
-/// Given a parsed `herdr pane list` panes array and a label, find the
-/// matching pane_id. Handles both `pane_id` and `id` JSON keys (herdr CLI
-/// output can use either). Returns `Ok(pane_id)` on exact match, `Err` with
-/// a human-readable diagnostic on no match or ambiguity.
-fn resolve_label_in_panes(panes: &[serde_json::Value], label: &str) -> Result<String, String> {
-    let labels: Vec<String> = panes
+/// The pane whose label is exactly `label`. `Err` is a human-readable
+/// diagnostic on no match (listing the labels there are) or ambiguity.
+fn resolve_label_in_panes(
+    panes: &[herdr_mcp_api::HerdrPane],
+    label: &str,
+) -> Result<String, String> {
+    let labels: Vec<&str> = panes.iter().filter_map(|p| p.label.as_deref()).collect();
+    let matched: Vec<&str> = panes
         .iter()
-        .filter_map(|p| p.get("label").and_then(|l| l.as_str()))
-        .map(|l| l.to_string())
-        .collect();
-
-    let matched: Vec<String> = panes
-        .iter()
-        .filter(|p| p.get("label").and_then(|l| l.as_str()) == Some(label))
-        .filter_map(|p| {
-            p.get("pane_id")
-                .or_else(|| p.get("id"))
-                .and_then(|id| id.as_str())
-        })
-        .map(|id| id.to_string())
+        .filter(|p| p.label.as_deref() == Some(label))
+        .map(|p| p.pane_id.as_str())
         .collect();
 
     match matched.len() {
@@ -2760,38 +2659,37 @@ fn resolve_label_in_panes(panes: &[serde_json::Value], label: &str) -> Result<St
             };
             Err(format!("No pane found with label '{label}'. {available}"))
         }
-        1 => Ok(matched[0].clone()),
+        1 => Ok(matched[0].to_string()),
         _ => Err(format!(
             "Multiple panes found with label '{label}'. Use pane_id instead."
         )),
     }
 }
 
-/// Resolve a pane_id from an optional pane_id or label.
-/// If pane_id is provided, returns it directly.
-/// If label is provided, queries herdr pane list to find the matching pane.
+/// Resolve a pane_id from an optional pane_id or label (looked up in
+/// this server's session).
 async fn resolve_pane_id(
+    pane_id: Option<String>,
+    label: Option<String>,
+) -> Result<String, McpError> {
+    resolve_pane_id_in(None, pane_id, label).await
+}
+
+/// [`resolve_pane_id`] with the label looked up in `session`.
+async fn resolve_pane_id_in(
+    session: Option<&str>,
     pane_id: Option<String>,
     label: Option<String>,
 ) -> Result<String, McpError> {
     match (pane_id, label) {
         (Some(pid), _) => Ok(pid),
         (None, Some(lbl)) => {
-            let output = herdr_cli(&["pane", "list"]).await?;
-            let value: serde_json::Value = serde_json::from_str(&output).map_err(|e| McpError {
-                code: rmcp::model::ErrorCode(-32603),
-                message: format!("Failed to parse pane list: {e}").into(),
-                data: None,
-            })?;
-            let panes = value["result"]["panes"]
-                .as_array()
-                .ok_or_else(|| McpError {
-                    code: rmcp::model::ErrorCode(-32603),
-                    message: "Unexpected pane list format".into(),
-                    data: None,
-                })?;
-
-            resolve_label_in_panes(panes, &lbl).map_err(|msg| McpError {
+            let filter = herdr_mcp_api::PaneFilter {
+                session: session.map(str::to_string),
+                ..Default::default()
+            };
+            let panes = crate::panes::panes(&filter).await?;
+            resolve_label_in_panes(&panes, &lbl).map_err(|msg| McpError {
                 code: rmcp::model::ErrorCode(-32000),
                 message: msg.into(),
                 data: None,
@@ -2849,20 +2747,34 @@ fn host_allowed(host: &str, bind: &str) -> bool {
         || name == bind.to_ascii_lowercase()
 }
 
-/// Build the Axum router: `/api/*` plus the Dioxus web UI served from
-/// `web_dir`, with unknown paths falling back to `index.html` so client-side
-/// routes resolve. Requests with a foreign `Host` are refused ([`host_allowed`]).
-fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path, bind: &str) -> Router {
-    let index = web_dir.join("index.html");
-    if index.is_file() {
-        tracing::info!("serving web UI from {}", web_dir.display());
-    } else {
-        tracing::warn!(
-            "web UI not built: {} missing; run `dx bundle --platform web --release` \
-             in crates/herdr-mcp-ui (or set http.web-dir). /api/* still available.",
-            index.display()
-        );
-    }
+/// Build the Axum router: `/api/*` plus the Dioxus web UI — from `web_dir`
+/// when set, else the copy built into the binary ([`crate::web`]). Unknown
+/// paths fall back to `index.html` so client-side routes resolve. Requests
+/// with a foreign `Host` are refused ([`host_allowed`]).
+fn http_router(server: HerdrMcpServer, web_dir: Option<&std::path::Path>, bind: &str) -> Router {
+    let ui: axum::routing::MethodRouter = match web_dir {
+        Some(dir) => {
+            let index = dir.join("index.html");
+            if !index.is_file() {
+                tracing::warn!(
+                    "web UI: {} missing; /api/* still available",
+                    index.display()
+                );
+            }
+            tracing::info!("serving web UI from {}", dir.display());
+            axum::routing::get_service(ServeDir::new(dir).fallback(ServeFile::new(index)))
+        }
+        None => {
+            if !crate::web::embedded() {
+                tracing::warn!(
+                    "web UI not built into this binary: run `dx bundle --platform web \
+                     --release` in crates/herdr-mcp-ui before `cargo build`, or set \
+                     http.web-dir. /api/* still available."
+                );
+            }
+            get(crate::web::serve)
+        }
+    };
     let state = AppState { server };
 
     Router::new()
@@ -2884,6 +2796,8 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path, bind: &str) ->
                 .delete(delete_recipe_handler),
         )
         .route("/api/herdr/schema", get(herdr_schema_handler))
+        .route("/api/herdr/sessions", get(herdr_sessions_handler))
+        .route("/api/herdr/panes", get(herdr_panes_handler))
         .route("/api/herdr/events", get(herdr_events_handler))
         .route("/api/templates", get(list_templates_handler))
         .route(
@@ -2922,7 +2836,7 @@ fn http_router(server: HerdrMcpServer, web_dir: &std::path::Path, bind: &str) ->
             "/api/trim/dashboard/open",
             post(trim_dashboard_open_http_handler),
         )
-        .fallback_service(ServeDir::new(web_dir).fallback(ServeFile::new(index)))
+        .fallback_service(ui)
         .with_state(state)
         .layer(axum::middleware::from_fn({
             let bind = bind.to_string();
@@ -2955,7 +2869,7 @@ pub async fn start_http(
     server: HerdrMcpServer,
     bind: &str,
     port: u16,
-    web_dir: &std::path::Path,
+    web_dir: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let app = http_router(server, web_dir, bind);
 
@@ -2988,21 +2902,26 @@ async fn config_handler(State(AppState { server, .. }): State<AppState>) -> Json
     Json(config_response(&server))
 }
 
-/// `PUT /api/config/clipboard` — persist clipboard commands and apply them live.
+/// `PUT /api/config/clipboard` — persist clipboard commands and apply them
+/// live. Both empty switches back to the built-in OS clipboard.
 async fn set_clipboard_config_handler(
     State(AppState { server, .. }): State<AppState>,
     Json(cfg): Json<herdr_mcp_core::ClipboardConfig>,
 ) -> Result<Json<ConfigResponse>, (StatusCode, String)> {
-    let non_empty = |s: Option<String>| s.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
-    let (Some(copy), Some(paste)) = (non_empty(cfg.copy_command), non_empty(cfg.paste_command))
-    else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "copy-command and paste-command must both be non-empty".into(),
-        ));
+    let blank = |s: &Option<String>| s.as_deref().is_none_or(|s| s.trim().is_empty());
+    let commands = match cfg.commands() {
+        Some((copy, paste)) => Some((copy.to_string(), paste.to_string())),
+        None if blank(&cfg.copy_command) && blank(&cfg.paste_command) => None,
+        None => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "set both copy-command and paste-command, or neither for the built-in clipboard"
+                    .into(),
+            ));
+        }
     };
     server
-        .save_clipboard_config(herdr_mcp_core::config_file_or_default(), copy, paste)
+        .save_clipboard_config(herdr_mcp_core::config_file_or_default(), commands)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
     Ok(Json(config_response(&server)))
@@ -3276,6 +3195,26 @@ fn json_value_to_string(v: &serde_json::Value) -> String {
 
 async fn list_templates_handler() -> Result<Json<Vec<tmpl::RecipeTemplate>>, (StatusCode, String)> {
     Ok(Json(tmpl::list_templates()))
+}
+
+/// `GET /api/herdr/sessions` — every named herdr session.
+async fn herdr_sessions_handler()
+-> Result<Json<herdr_mcp_api::SessionsResponse>, (StatusCode, String)> {
+    let sessions = crate::panes::sessions().await.map_err(bad_gateway)?;
+    Ok(Json(herdr_mcp_api::SessionsResponse { sessions }))
+}
+
+/// `GET /api/herdr/panes?session=&workspace_id=&tab_id=&agent_status=&focused=&label=`
+/// — herdr's panes, narrowed like `list_panes`.
+async fn herdr_panes_handler(
+    Query(filter): Query<herdr_mcp_api::PaneFilter>,
+) -> Result<Json<herdr_mcp_api::PanesResponse>, (StatusCode, String)> {
+    let panes = crate::panes::panes(&filter).await.map_err(bad_gateway)?;
+    Ok(Json(herdr_mcp_api::PanesResponse { panes }))
+}
+
+fn bad_gateway(e: McpError) -> (StatusCode, String) {
+    (StatusCode::BAD_GATEWAY, e.message.to_string())
 }
 
 /// `GET /api/herdr/schema` — the installed herdr's API schema
@@ -3651,57 +3590,66 @@ async fn list_variables_handler(
 
 /// `GET /api/variables/auto[?workspace_id=w1]` — variables resolved on
 /// request, never stored: every live herdr pane under its pane id (from
-/// `herdr pane list`), overlaid by the agent registry (by pane id and role),
-/// plus the workspace's `var_set` session variables when one is given.
+/// `herdr pane list`), with its agent registry handle's non-empty fields laid
+/// over it (and the merged pane also under the handle's role), then the
+/// workspace's `var_set` session variables when one is given.
 async fn auto_variables_handler(
     State(AppState { server, .. }): State<AppState>,
     Query(params): Query<TrimStatusParams>,
 ) -> Json<AutoVariablesResponse> {
     let ws = params.workspace_id.filter(|s| !s.trim().is_empty());
-    let mut merged = HashMap::new();
-    if let Some(ws) = &ws {
-        merged.extend(server.registry.seed(ws).await);
-        if let Ok(bag) = server.persistence.load_session_vars(ws).await {
-            merged.extend(bag.variables);
+    let filter = herdr_mcp_api::PaneFilter {
+        workspace_id: ws.clone(),
+        ..Default::default()
+    };
+    let panes: HashMap<String, serde_json::Value> = match crate::panes::panes(&filter).await {
+        Ok(panes) => panes
+            .into_iter()
+            .filter_map(|p| Some((p.pane_id.clone(), serde_json::to_value(p).ok()?)))
+            .collect(),
+        Err(e) => {
+            tracing::debug!("auto variables: herdr pane list: {}", e.message);
+            HashMap::new()
         }
-    }
-    for handle in server.registry.inner_snapshot().await {
-        if ws.as_ref().is_some_and(|ws| *ws != handle.workspace_id) {
-            continue;
-        }
-        let obj = serde_json::json!({
-            "pane_id": handle.pane_id,
-            "workspace_id": handle.workspace_id,
-            "tab_id": handle.tab_id,
-            "agent": handle.agent,
-            "role": handle.role,
-            "status": handle.status,
-            "output": handle.output,
-        });
-        merged.entry(handle.pane_id.clone()).or_insert(obj.clone());
-        if !handle.role.is_empty() {
-            merged.entry(handle.role.clone()).or_insert(obj);
-        }
-    }
-    let mut args = vec!["pane", "list"];
-    if let Some(ws) = &ws {
-        args.extend(["--workspace", ws.as_str()]);
-    }
-    match herdr_cli(&args).await {
-        Ok(out) => {
-            let list: serde_json::Value = serde_json::from_str(&out).unwrap_or_default();
-            for pane in list["result"]["panes"].as_array().into_iter().flatten() {
-                if let Some(id) = pane["pane_id"].as_str() {
-                    merged.entry(id.to_string()).or_insert_with(|| pane.clone());
-                }
-            }
-        }
-        Err(e) => tracing::debug!("auto variables: herdr pane list: {}", e.message),
+    };
+    let mut merged = pane_vars(panes, server.registry.seed(ws.as_deref()).await);
+    if let Some(ws) = &ws
+        && let Ok(bag) = server.persistence.load_session_vars(ws).await
+    {
+        merged.extend(bag.variables);
     }
     Json(AutoVariablesResponse {
         workspace_id: ws.unwrap_or_default(),
         variables: merged,
     })
+}
+
+/// Live panes (by pane id) with the registry handles (by pane id and role,
+/// from `AgentRegistry::seed`) laid over them, non-empty fields winning.
+fn pane_vars(
+    mut panes: HashMap<String, serde_json::Value>,
+    handles: HashMap<String, serde_json::Value>,
+) -> HashMap<String, serde_json::Value> {
+    let mut merged = HashMap::new();
+    for (key, handle) in handles {
+        let pane_id = handle["pane_id"].as_str().unwrap_or_default();
+        let mut obj = panes
+            .get(pane_id)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        if let (Some(obj), Some(fields)) = (obj.as_object_mut(), handle.as_object()) {
+            for (k, v) in fields {
+                if v.as_str() != Some("") {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+        }
+        merged.insert(key, obj);
+    }
+    for (pane_id, obj) in panes.drain() {
+        merged.entry(pane_id).or_insert(obj);
+    }
+    merged
 }
 
 /// `GET /api/playground?workspace_id=w1` — load last-used playground values.
@@ -3804,6 +3752,7 @@ mod tests {
     use super::*;
     use crate::variables::RecipeStep;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
     use std::collections::HashMap;
 
     fn sample_results() -> HashMap<String, serde_json::Value> {
@@ -3820,6 +3769,31 @@ mod tests {
             serde_json::json!({ "output": "world", "n": 42 }),
         );
         m
+    }
+
+    #[test]
+    fn pane_vars_overlays_handles_on_live_panes() {
+        let panes = HashMap::from([
+            (
+                "w1:p1".to_string(),
+                json!({"pane_id": "w1:p1", "label": "builder", "cwd": "/w", "agent": "claude"}),
+            ),
+            ("w1:p2".to_string(), json!({"pane_id": "w1:p2"})),
+        ]);
+        let handle = json!({"pane_id": "w1:p1", "role": "builder", "agent": "", "output": "ok"});
+        let handles = HashMap::from([
+            ("w1:p1".to_string(), handle.clone()),
+            ("builder".to_string(), handle),
+        ]);
+        let vars = pane_vars(panes, handles);
+        let want = json!({
+            "pane_id": "w1:p1", "label": "builder", "cwd": "/w", "agent": "claude",
+            "role": "builder", "output": "ok"
+        });
+        assert_eq!(vars["w1:p1"], want);
+        assert_eq!(vars["builder"], want);
+        assert_eq!(vars["w1:p2"], json!({"pane_id": "w1:p2"}));
+        assert_eq!(vars.len(), 3);
     }
 
     #[test]
@@ -4017,7 +3991,7 @@ mod tests {
         std::fs::write(&path, "# keep me\n[http]\nport = 1\n").unwrap();
 
         server
-            .save_clipboard_config(path.clone(), "wl-copy".into(), "wl-paste".into())
+            .save_clipboard_config(path.clone(), Some(("wl-copy".into(), "wl-paste".into())))
             .await
             .unwrap();
 
@@ -4031,182 +4005,98 @@ mod tests {
         std::fs::write(&path, "[http\n").unwrap();
         assert!(
             server
-                .save_clipboard_config(path.clone(), "a".into(), "b".into())
+                .save_clipboard_config(path.clone(), Some(("a".into(), "b".into())))
                 .await
                 .is_err()
         );
         assert_eq!(server.clipboard_config(), live);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "[http\n");
+
+        // None clears the override: back to the built-in clipboard.
+        std::fs::write(
+            &path,
+            "[clipboard]\ncopy-command = \"a\"\npaste-command = \"b\"\n",
+        )
+        .unwrap();
+        server
+            .save_clipboard_config(path.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(server.clipboard_config().commands(), None);
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("clipboard")
+        );
     }
 
-    // Single test touching process-global env vars so the assertions don't
-    // race with each other when tests run in parallel.
+    // The tools run the configured commands (the built-in OS clipboard needs
+    // a display, so it is not exercised here).
     #[tokio::test]
-    async fn test_clipboard_env_override_and_roundtrip() {
-        let server = clipboard_test_server();
-        // --- detection override ---
-        unsafe {
-            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", "mycopy");
-            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", "mypaste");
-        }
-        let (copy, paste) =
-            detect_clipboard(&server.clipboard_config()).expect("override should be used");
-        assert_eq!(copy, "mycopy");
-        assert_eq!(paste, "mypaste");
-
-        // Override beats platform detection (even if a real backend exists).
-        unsafe {
-            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", "forced-copy");
-            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", "forced-paste");
-        }
-        let (copy, _) = detect_clipboard(&server.clipboard_config()).unwrap();
-        assert_eq!(copy, "forced-copy");
-
-        // --- roundtrip via a fake backend driven by the override ---
+    async fn clipboard_tools_use_configured_commands() {
         let tmp = tempfile::tempdir().unwrap();
         let clip = tmp.path().join("clip.txt");
-        let copy_sh = tmp.path().join("fake_copy.sh");
-        let paste_sh = tmp.path().join("fake_paste.sh");
-        std::fs::write(&copy_sh, "#!/bin/sh\ncat > \"$1\"\n").unwrap();
-        std::fs::write(&paste_sh, "#!/bin/sh\ncat \"$1\"\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = 0o755;
-            std::fs::set_permissions(&copy_sh, std::fs::Permissions::from_mode(mode)).unwrap();
-            std::fs::set_permissions(&paste_sh, std::fs::Permissions::from_mode(mode)).unwrap();
-        }
+        let mut cfg = herdr_mcp_core::Config::default();
+        cfg.clipboard.copy_command = Some(format!("tee {}", clip.display()));
+        cfg.clipboard.paste_command = Some(format!("cat {}", clip.display()));
+        let reg = AgentRegistry::new(std::sync::Arc::new(Persistence::new(tmp.path().join("d1"))));
+        let server =
+            HerdrMcpServer::with_config(Persistence::new(tmp.path().join("d2")), reg, &cfg);
 
-        let copy_cmd = format!("{} {}", copy_sh.display(), clip.display());
-        let paste_cmd = format!("{} {}", paste_sh.display(), clip.display());
-        unsafe {
-            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", &copy_cmd);
-            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", &paste_cmd);
-        }
-
-        let data_dir = tmp.path().join("data");
-        let pers = Persistence::new(data_dir.clone());
-        let pers_arc = std::sync::Arc::new(pers);
-        let registry = AgentRegistry::new(pers_arc);
-        let server = HerdrMcpServer::new(Persistence::new(data_dir), registry);
-
-        let set_res = server
+        server
             .clipboard_set(Parameters(ClipboardSetParams {
                 text: "hello clipboard".into(),
             }))
-            .await;
-        assert!(set_res.is_ok(), "clipboard_set should succeed via override");
-        // The backend file proves the text was actually written through.
-        let written = std::fs::read_to_string(&clip).unwrap();
-        assert_eq!(written, "hello clipboard");
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&clip).unwrap(), "hello clipboard");
 
         let got = server
             .clipboard_get(Parameters(ClipboardGetParams {}))
             .await
-            .expect("clipboard_get should succeed");
-        // Extract text via the rmcp API (Content derefs to RawContent).
-        let mut text = String::new();
-        for c in &got.content {
-            if let Some(tc) = c.as_text() {
-                text = tc.text.clone();
-            }
-        }
-        assert_eq!(text, "hello clipboard");
-
-        unsafe {
-            std::env::remove_var("HERDR_MCP_CLIPBOARD_COPY");
-            std::env::remove_var("HERDR_MCP_CLIPBOARD_PASTE");
-        }
-
-        // --- config override beats platform detection (env now cleared) ---
-        let mut cfg = herdr_mcp_core::Config::default();
-        cfg.clipboard.copy_command = Some("cfg-copy".into());
-        cfg.clipboard.paste_command = Some("cfg-paste".into());
-        let cc_tmp = tempfile::tempdir().unwrap();
-        let cc_pers = Persistence::new(cc_tmp.path().join("data"));
-        let cc_reg = AgentRegistry::new(std::sync::Arc::new(cc_pers));
-        let cfg_server = HerdrMcpServer::with_config(
-            Persistence::new(cc_tmp.path().join("data2")),
-            cc_reg,
-            &cfg,
-        );
-        let (copy, paste) = detect_clipboard(&cfg_server.clipboard_config()).unwrap();
-        assert_eq!(copy, "cfg-copy");
-        assert_eq!(paste, "cfg-paste");
+            .unwrap();
+        let text = got
+            .content
+            .iter()
+            .find_map(|c| c.as_text())
+            .map(|t| t.text.as_str());
+        assert_eq!(text, Some("hello clipboard"));
     }
 
     // ── resolve_label_in_panes tests ──────────────────────────────────
 
+    fn pane(id: &str, label: Option<&str>) -> herdr_mcp_api::HerdrPane {
+        serde_json::from_value(serde_json::json!({
+            "pane_id": id, "workspace_id": "w1", "tab_id": "w1:t1", "label": label
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn test_resolve_label_matches_pane_id() {
-        let panes = vec![serde_json::json!({
-            "label": "foo",
-            "pane_id": "p1"
-        })];
-        assert_eq!(resolve_label_in_panes(&panes, "foo"), Ok("p1".into()));
-    }
-
-    #[test]
-    fn test_resolve_label_matches_id_field() {
-        let panes = vec![serde_json::json!({
-            "label": "foo",
-            "id": "p1"
-        })];
-        assert_eq!(resolve_label_in_panes(&panes, "foo"), Ok("p1".into()));
-    }
-
-    #[test]
-    fn test_resolve_label_has_both_id_and_pane_id() {
-        let panes = vec![serde_json::json!({
-            "label": "foo",
-            "id": "pX",
-            "pane_id": "p1"
-        })];
+        let panes = [pane("p0", Some("bar")), pane("p1", Some("foo"))];
         assert_eq!(resolve_label_in_panes(&panes, "foo"), Ok("p1".into()));
     }
 
     #[test]
     fn test_resolve_label_no_match() {
-        let panes = vec![serde_json::json!({
-            "label": "bar",
-            "pane_id": "p1"
-        })];
-        let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
+        let err = resolve_label_in_panes(&[pane("p1", Some("bar"))], "foo").unwrap_err();
         assert!(err.contains("available labels: bar"), "{err}");
     }
 
     #[test]
     fn test_resolve_label_duplicate() {
-        let panes = vec![
-            serde_json::json!({ "label": "foo", "pane_id": "p1" }),
-            serde_json::json!({ "label": "foo", "pane_id": "p2" }),
-        ];
+        let panes = [pane("p1", Some("foo")), pane("p2", Some("foo"))];
         let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
         assert!(err.contains("Multiple panes"), "{err}");
     }
 
     #[test]
     fn test_resolve_label_no_labels_at_all() {
-        let panes = vec![serde_json::json!({
-            "pane_id": "p1"
-        })];
-        let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
+        let err = resolve_label_in_panes(&[pane("p1", None)], "foo").unwrap_err();
         assert!(err.contains("no labeled panes found"), "{err}");
-    }
-
-    #[test]
-    fn test_resolve_label_empty_panes() {
-        let panes = vec![];
-        let err = resolve_label_in_panes(&panes, "foo").unwrap_err();
+        let err = resolve_label_in_panes(&[], "foo").unwrap_err();
         assert!(err.contains("no labeled panes found"), "{err}");
-    }
-
-    #[test]
-    fn detect_clipboard_empty_config_does_not_panic() {
-        let cfg = herdr_mcp_core::ClipboardConfig::default();
-        // With no env and no config, detection falls through to platform auto-detect.
-        // On a real system this returns a tool or an error — but it must not panic.
-        let _ = detect_clipboard(&cfg);
     }
 
     /// Contract test: the shared `herdr_mcp_api::ApiClient` (used by the web
@@ -4322,6 +4212,27 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_splits_the_focused_pane() {
+        let p = |id: &str, focused: bool| -> herdr_mcp_api::HerdrPane {
+            let ws = id.split(':').next().unwrap_or_default();
+            serde_json::from_value(serde_json::json!({
+                "pane_id": id, "workspace_id": ws, "tab_id": "t", "focused": focused
+            }))
+            .unwrap()
+        };
+        let panes = [p("w1:p1", false), p("w1:p2", true)];
+        assert_eq!(
+            dashboard_split_target(&panes, false).as_deref(),
+            Some("w1:p2")
+        );
+        // A background workspace has no focused pane: use its first.
+        let bg = [p("w2:p1", false), p("w2:p3", false)];
+        assert_eq!(dashboard_split_target(&bg, true).as_deref(), Some("w2:p1"));
+        assert_eq!(dashboard_split_target(&bg, false), None);
+        assert_eq!(dashboard_split_target(&[], true), None);
+    }
+
+    #[test]
     fn herdr_09_argv() {
         assert_eq!(
             agent_submit_args("w1:p2", "hi"),
@@ -4373,21 +4284,90 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = http_router(server, &web_dir, "127.0.0.1");
+        let app = http_router(server, Some(&web_dir), "127.0.0.1");
         tokio::spawn(async move { axum::serve(listener, app).await });
         let api = ApiClient::new(&format!("http://{addr}")).unwrap();
+
+        // A fake herdr (nextest runs each test in its own process, so the
+        // env var stays here). Its pane labels echo the socket it was given.
+        let fake = tmp.path().join("herdr");
+        std::fs::write(
+            &fake,
+            r#"#!/bin/sh
+case "$1 $2" in
+"session list") echo '{"sessions":[{"name":"default","default":true,"running":true,"socket_path":"/s/d.sock","session_dir":"/s/d"},{"name":"work","default":false,"running":true,"socket_path":"/s/w.sock","session_dir":"/s/w"},{"name":"old","default":false,"running":false,"socket_path":"/s/o.sock","session_dir":"/s/o"}]}' ;;
+"pane list") echo "{\"result\":{\"panes\":[{\"pane_id\":\"w1:p1\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t1\",\"focused\":true,\"agent_status\":\"idle\",\"agent\":\"claude\",\"label\":\"$HERDR_SOCKET_PATH\"},{\"pane_id\":\"w1:p2\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t2\",\"focused\":false,\"agent_status\":\"unknown\"}]}}" ;;
+*) echo "fake herdr: $*" >&2; exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        // SAFETY: this test owns its process (nextest); nothing else reads env concurrently.
+        unsafe {
+            std::env::set_var("HERDR_BIN", &fake);
+            std::env::set_var("HERDR_SOCKET_PATH", "/s/d.sock");
+        }
+
+        let sessions = api.list_sessions().await.unwrap();
+        assert_eq!(sessions.len(), 3);
+        assert!(sessions[0].default && !sessions[2].running);
+        assert_eq!(sessions.iter().filter(|s| s.current).count(), 1);
+        assert!(sessions[0].current);
+        let all = api.list_panes(&Default::default()).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].label.as_deref(), Some("/s/d.sock"));
+        let filter = |v: serde_json::Value| -> herdr_mcp_api::PaneFilter {
+            serde_json::from_value(v).unwrap()
+        };
+        let idle = api
+            .list_panes(&filter(
+                serde_json::json!({"agent_status": "idle", "focused": true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(idle.len(), 1);
+        assert_eq!(idle[0].agent.as_deref(), Some("claude"));
+        assert!(
+            api.list_panes(&filter(serde_json::json!({"tab_id": "w1:t9"})))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let work = api
+            .list_panes(&filter(serde_json::json!({"session": "work"})))
+            .await
+            .unwrap();
+        assert_eq!(work[0].label.as_deref(), Some("/s/w.sock"));
+        for bad in ["old", "nope"] {
+            assert!(matches!(
+                api.list_panes(&filter(serde_json::json!({"session": bad})))
+                    .await,
+                Err(ApiError::Status { status: 502, .. })
+            ));
+        }
+        // The tool returns the same typed list.
+        let tool = api
+            .call_tool("list_panes", &serde_json::json!({"label": "CLAUDE"}))
+            .await
+            .unwrap();
+        let listed: herdr_mcp_api::PanesResponse = herdr_mcp_api::tool_payload(&tool)
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap();
+        assert_eq!(listed.panes.len(), 1);
 
         api.health().await.unwrap();
         let cfg = api.config().await.unwrap();
         assert!(cfg.data_dir.ends_with("data"));
         assert!(!cfg.config_path.is_empty());
         // Validation runs before any file write, so this never touches disk.
-        let empty = herdr_mcp_api::ClipboardConfig {
+        let half = herdr_mcp_api::ClipboardConfig {
             copy_command: Some("  ".into()),
             paste_command: Some("xsel -o".into()),
         };
         assert!(matches!(
-            api.set_clipboard_config(&empty).await,
+            api.set_clipboard_config(&half).await,
             Err(ApiError::Status { status: 400, .. })
         ));
         assert!(!api.list_tools().await.unwrap().is_empty());

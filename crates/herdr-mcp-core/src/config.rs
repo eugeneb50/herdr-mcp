@@ -3,49 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
 
-/// Persistent runtime configuration loaded from CWD `herdmcp.toml`.
-/// This is applied BEFORE CLI overrides but AFTER defaults.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct PersistentConfig {
-    /// HTTP bridge port (default: 7676). CLI flag --http overrides this.
-    #[serde(default)]
-    pub http_port: Option<u16>,
-
-    /// Data directory for recipes, sessions, trim stats, PFC1 memory (default: ./data)
-    #[serde(default)]
-    pub data_dir: Option<PathBuf>,
-
-    /// herdr daemon socket path (default: ~/.config/herdr/herdr.sock)
-    #[serde(default)]
-    pub herdr_socket: Option<PathBuf>,
-}
-
-impl PersistentConfig {
-    /// Load persistent config from CWD `herdmcp.toml` if it exists.
-    /// Only parses the `[persistent]` section.
-    pub fn load_from_cwd() -> Result<Self> {
-        let cwd = std::env::current_dir()?;
-        let path = cwd.join("herdmcp.toml");
-        if path.exists() {
-            let content = std::fs::read_to_string(&path)
-                .with_context(|| format!("failed to read persistent config: {}", path.display()))?;
-            // Parse only the [persistent] section
-            let table: toml::Table = toml::from_str(&content).with_context(|| {
-                format!("failed to parse persistent config: {}", path.display())
-            })?;
-            if let Some(persistent) = table.get("persistent") {
-                let cfg: PersistentConfig = toml::from_str(&toml::to_string(persistent)?)
-                    .with_context(|| {
-                        format!("failed to parse [persistent] section: {}", path.display())
-                    })?;
-                return Ok(cfg);
-            }
-        }
-        Ok(Self::default())
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
@@ -98,10 +55,39 @@ fn expand_home(path: &std::path::Path) -> PathBuf {
     }
 }
 
-/// Where state lives when nothing else says: `./data`.
+/// Where state lives when nothing else says: herdr's state dir for this
+/// plugin when herdr runs us as the `herdr-mcp` plugin (our working directory
+/// is then the plugin checkout, replaced on update), else `./data`.
 fn default_data_dir() -> PathBuf {
-    PathBuf::from("./data")
+    plugin_state_dir(
+        env::var("HERDR_PLUGIN_ID").ok().as_deref(),
+        env::var_os("HERDR_PLUGIN_STATE_DIR"),
+    )
+    .unwrap_or_else(|| PathBuf::from("./data"))
 }
+
+/// The directory a project-local `herdr-mcp.toml` is read from: the working directory, except when herdr runs us as the
+/// `herdr-mcp` plugin — the working directory is then the plugin checkout,
+/// whose files are not the user's config.
+fn project_dir() -> Option<PathBuf> {
+    if env::var("HERDR_PLUGIN_ID").as_deref() == Ok(PLUGIN_ID) {
+        return None;
+    }
+    env::current_dir().ok()
+}
+
+fn plugin_state_dir(
+    plugin_id: Option<&str>,
+    state_dir: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    (plugin_id == Some(PLUGIN_ID))
+        .then_some(state_dir)
+        .flatten()
+        .map(PathBuf::from)
+}
+
+/// herdr-mcp's id as a herdr plugin (`herdr-plugin.toml`).
+pub const PLUGIN_ID: &str = "herdr-mcp";
 
 impl Default for Config {
     fn default() -> Self {
@@ -121,21 +107,9 @@ pub struct HttpConfig {
     pub bind_addr: Option<String>,
     pub http_only: bool,
     /// Directory holding the built Dioxus web UI (`dx bundle` output).
-    /// Unset → [`HttpConfig::resolved_web_dir`] falls back to the workspace
-    /// bundle path.
+    /// Unset → the web UI built into the binary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_dir: Option<PathBuf>,
-}
-
-impl HttpConfig {
-    /// Web UI directory: explicit `web_dir`, else the in-repo
-    /// `dx bundle --platform web --release` output for `herdr-mcp-ui`.
-    pub fn resolved_web_dir(&self) -> PathBuf {
-        self.web_dir.clone().unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/dx/herdr-mcp-ui/release/web/public")
-        })
-    }
 }
 
 impl Default for HttpConfig {
@@ -169,7 +143,7 @@ impl Default for HerdrConfig {
 
 impl Config {
     /// Load configuration with full precedence chain:
-    /// Defaults < Config file < Persistent (CWD herdmcp.toml) < Env vars < CLI args
+    /// Defaults < Config file < Env vars < CLI args
     pub fn load(cli_overrides: Option<CliOverrides>) -> Result<Self> {
         let mut config = Config::default();
 
@@ -182,14 +156,10 @@ impl Config {
             config = config.merge(file_config);
         }
 
-        // 2. Load persistent runtime config from CWD herdmcp.toml
-        let persistent = PersistentConfig::load_from_cwd()?;
-        config = config.apply_persistent(persistent);
-
-        // 3. Apply environment variable overrides
+        // 2. Apply environment variable overrides
         config = config.apply_env_overrides()?;
 
-        // 4. Apply CLI overrides
+        // 3. Apply CLI overrides
         if let Some(cli) = cli_overrides {
             config = config.apply_cli_overrides(cli);
         }
@@ -198,7 +168,7 @@ impl Config {
         config.data_dir = expand_home(&config.data_dir);
         config.herdr.socket_path = config.herdr.socket_path.as_deref().map(expand_home);
 
-        // 5. Validate
+        // 4. Validate
         config.validate()?;
 
         Ok(config)
@@ -212,20 +182,6 @@ impl Config {
             herdr: other.herdr,
             clipboard: other.clipboard,
         }
-    }
-
-    /// Apply persistent config from CWD herdmcp.toml (wins over defaults, loses to env/CLI)
-    fn apply_persistent(mut self, persistent: PersistentConfig) -> Self {
-        if let Some(v) = persistent.http_port {
-            self.http.port = Some(v);
-        }
-        if let Some(v) = persistent.data_dir {
-            self.data_dir = v;
-        }
-        if let Some(v) = persistent.herdr_socket {
-            self.herdr.socket_path = Some(v);
-        }
-        self
     }
 
     /// Apply environment variable overrides
@@ -246,7 +202,16 @@ impl Config {
             self.http.bind_addr = Some(v);
         }
         if let Ok(v) = env::var("HERDR_MCP_WEB_DIR") {
-            self.http.web_dir = Some(PathBuf::from(v));
+            // Empty = unset: the web UI built into the binary.
+            self.http.web_dir = Some(PathBuf::from(v)).filter(|d| !d.as_os_str().is_empty());
+        }
+
+        // clipboard
+        if let Ok(v) = env::var("HERDR_MCP_CLIPBOARD_COPY") {
+            self.clipboard.copy_command = Some(v);
+        }
+        if let Ok(v) = env::var("HERDR_MCP_CLIPBOARD_PASTE") {
+            self.clipboard.paste_command = Some(v);
         }
 
         // herdr
@@ -331,8 +296,9 @@ pub fn find_config_file() -> Option<PathBuf> {
     }
 
     // 2. Current directory
-    let local = PathBuf::from("herdr-mcp.toml");
-    if local.exists() {
+    if let Some(local) = project_dir().map(|d| d.join("herdr-mcp.toml"))
+        && local.exists()
+    {
         return Some(local);
     }
 
@@ -348,16 +314,21 @@ pub fn find_config_file() -> Option<PathBuf> {
 }
 
 /// Resolve the config file path the loader *would* read, or — if none exists —
-/// the default location in the current working directory (`herdr-mcp.toml`).
+/// the first place it looks that a save can create: `herdr-mcp.toml` in the
+/// project dir, or the XDG config file when there is none (as the plugin).
 /// Used by the Settings tab's Save so it always has a concrete target.
 pub fn config_file_or_default() -> PathBuf {
-    find_config_file().unwrap_or_else(|| PathBuf::from("herdr-mcp.toml"))
+    find_config_file()
+        .or_else(|| project_dir().map(|d| d.join("herdr-mcp.toml")))
+        .or_else(|| dirs::config_dir().map(|d| d.join("herdr-mcp/config.toml")))
+        .unwrap_or_else(|| PathBuf::from("herdr-mcp.toml"))
 }
 
-/// Upsert the `[clipboard]` table's `copy-command` / `paste-command` keys in
-/// the config file at `path`, preserving all other content (comments, tables,
-/// formatting). Creates the file if absent.
-pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str) -> Result<()> {
+/// Write the `[clipboard]` table's `copy-command` / `paste-command` keys in the
+/// config file at `path` (`None` removes them: the built-in clipboard),
+/// preserving all other content (comments, tables, formatting). Creates the
+/// file if absent.
+pub fn set_clipboard_in_file(path: &std::path::Path, commands: Option<(&str, &str)>) -> Result<()> {
     use std::io::Write;
 
     let content = if path.exists() {
@@ -372,7 +343,6 @@ pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str)
         .parse::<toml_edit::DocumentMut>()
         .with_context(|| format!("{} is not valid TOML; fix it first", path.display()))?;
 
-    // Ensure the `[clipboard]` table exists.
     if !doc.contains_table("clipboard") {
         doc.insert("clipboard", toml_edit::table());
     }
@@ -380,8 +350,19 @@ pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str)
         .get_mut("clipboard")
         .and_then(|item| item.as_table_mut())
         .context("[clipboard] is not a table")?;
-    tbl.insert("copy-command", toml_edit::value(copy));
-    tbl.insert("paste-command", toml_edit::value(paste));
+    match commands {
+        Some((copy, paste)) => {
+            tbl.insert("copy-command", toml_edit::value(copy));
+            tbl.insert("paste-command", toml_edit::value(paste));
+        }
+        None => {
+            tbl.remove("copy-command");
+            tbl.remove("paste-command");
+            if tbl.is_empty() {
+                doc.remove("clipboard");
+            }
+        }
+    }
 
     let out = doc.to_string();
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -403,6 +384,18 @@ pub fn upsert_clipboard_in_file(path: &std::path::Path, copy: &str, paste: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_runs_keep_state_in_herdrs_state_dir() {
+        let state = || Some(std::ffi::OsString::from("/state"));
+        assert_eq!(
+            plugin_state_dir(Some(PLUGIN_ID), state()),
+            Some(PathBuf::from("/state"))
+        );
+        assert_eq!(plugin_state_dir(Some("other.plugin"), state()), None);
+        assert_eq!(plugin_state_dir(None, state()), None);
+        assert_eq!(plugin_state_dir(Some(PLUGIN_ID), None), None);
+    }
     use std::sync::{Mutex, OnceLock};
 
     /// Env vars are process-global; serialize tests that touch them.
@@ -629,7 +622,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_clipboard_preserves_other_sections() {
+    fn test_set_clipboard_preserves_other_sections() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("herdr-mcp.toml");
         // Seed with an [http] section + a comment; [clipboard] absent.
@@ -639,7 +632,7 @@ mod tests {
         )
         .unwrap();
 
-        upsert_clipboard_in_file(&path, "xsel -i", "xsel").unwrap();
+        set_clipboard_in_file(&path, Some(("xsel -i", "xsel"))).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         // [http] preserved.
@@ -656,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_clipboard_overwrites_existing_keys() {
+    fn test_set_clipboard_overwrites_existing_keys() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("herdr-mcp.toml");
         std::fs::write(
@@ -665,7 +658,7 @@ mod tests {
         )
         .unwrap();
 
-        upsert_clipboard_in_file(&path, "wl-copy", "wl-paste").unwrap();
+        set_clipboard_in_file(&path, Some(("wl-copy", "wl-paste"))).unwrap();
 
         let content = std::fs::read_to_string(&path).unwrap();
         let cfg: Config = toml::from_str(&content).unwrap();
@@ -675,20 +668,55 @@ mod tests {
     }
 
     #[test]
-    fn test_upsert_clipboard_refuses_malformed_file() {
+    fn test_set_clipboard_refuses_malformed_file() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("herdr-mcp.toml");
         let broken = "data-dir = \"/keep\"\n[http\nport = 1\n";
         std::fs::write(&path, broken).unwrap();
-        assert!(upsert_clipboard_in_file(&path, "xsel -i", "xsel").is_err());
+        assert!(set_clipboard_in_file(&path, Some(("xsel -i", "xsel"))).is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
     }
 
     #[test]
-    fn test_upsert_clipboard_creates_missing_file() {
+    fn test_set_clipboard_none_removes_the_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("herdr-mcp.toml");
+        std::fs::write(
+            &path,
+            "# keep\n[http]\nport = 9999\n\n[clipboard]\ncopy-command = \"xsel -i\"\npaste-command = \"xsel\"\n",
+        )
+        .unwrap();
+
+        set_clipboard_in_file(&path, None).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(!content.contains("clipboard"), "{content}");
+        assert!(content.contains("# keep") && content.contains("port = 9999"));
+    }
+
+    #[test]
+    fn test_clipboard_env_vars_set_the_commands() {
+        let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("HERDR_MCP_CLIPBOARD_COPY", "my-copy");
+            std::env::set_var("HERDR_MCP_CLIPBOARD_PASTE", "my-paste");
+        }
+        let cfg = Config::default().apply_env_overrides();
+        unsafe {
+            std::env::remove_var("HERDR_MCP_CLIPBOARD_COPY");
+            std::env::remove_var("HERDR_MCP_CLIPBOARD_PASTE");
+        }
+        assert_eq!(
+            cfg.unwrap().clipboard.commands(),
+            Some(("my-copy", "my-paste"))
+        );
+    }
+
+    #[test]
+    fn test_set_clipboard_creates_missing_file() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("nested/deep/herdr-mcp.toml");
-        upsert_clipboard_in_file(&path, "xsel -i", "xsel").unwrap();
+        set_clipboard_in_file(&path, Some(("xsel -i", "xsel"))).unwrap();
         assert!(path.exists());
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("[clipboard]"));

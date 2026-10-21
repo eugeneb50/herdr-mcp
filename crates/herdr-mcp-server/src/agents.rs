@@ -93,22 +93,16 @@ async fn herdr(args: &[String]) -> Result<String, McpError> {
 /// A pane to split for a new agent: the first pane of `tab`, else of
 /// `workspace`, else of the whole session.
 async fn anchor_pane(workspace: Option<&str>, tab: Option<&str>) -> Result<String, McpError> {
-    let mut args = vec!["pane".to_string(), "list".to_string()];
-    if let Some(ws) = workspace {
-        args.extend(["--workspace".to_string(), ws.to_string()]);
-    }
-    let raw = herdr(&args).await?;
-    let json: serde_json::Value = serde_json::from_str(&raw).map_err(to_mcp_err)?;
-    json.pointer("/result/panes")
-        .and_then(|p| p.as_array())
+    let filter = herdr_mcp_api::PaneFilter {
+        workspace_id: workspace.map(str::to_string),
+        tab_id: tab.map(str::to_string),
+        ..Default::default()
+    };
+    crate::panes::panes(&filter)
+        .await?
         .into_iter()
-        .flatten()
-        .filter(|p| tab.is_none_or(|t| p.get("tab_id").and_then(|v| v.as_str()) == Some(t)))
-        .find_map(|p| {
-            p.get("pane_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
-        })
+        .next()
+        .map(|p| p.pane_id)
         .ok_or_else(|| to_mcp_err("no pane to split for the new agent (is herdr running?)"))
 }
 

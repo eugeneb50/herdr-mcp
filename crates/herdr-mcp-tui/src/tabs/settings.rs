@@ -192,12 +192,15 @@ async fn run_clipboard_test(app: &mut App) {
     match http.clipboard_get().await {
         Ok(got) => {
             if got == nonce {
-                let unsaved = app.config.as_ref().is_some_and(|c| {
-                    c.clipboard.copy_command.as_deref()
-                        != Some(app.settings.clipboard.copy_cmd.as_str())
-                        || c.clipboard.paste_command.as_deref()
-                            != Some(app.settings.clipboard.paste_cmd.as_str())
-                });
+                let clip = &app.settings.clipboard;
+                let edited = herdr_mcp_api::ClipboardConfig {
+                    copy_command: Some(clip.copy_cmd.clone()),
+                    paste_command: Some(clip.paste_cmd.clone()),
+                };
+                let unsaved = app
+                    .config
+                    .as_ref()
+                    .is_some_and(|c| c.clipboard.commands() != edited.commands());
                 let note = if unsaved {
                     " (active commands; press s to apply edits)"
                 } else {
@@ -541,23 +544,25 @@ fn render_env_and_sidecar(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     lines.push(Line::from(""));
     lines.push(Line::from("Sidecar profiler:"));
-    match &app.herdr.workspace {
-        Some(ws) => lines.push(row(
-            app.settings.selected == 9,
-            "workspace".into(),
-            ws.clone(),
-        )),
-        None => lines.push(row(
-            app.settings.selected == 9,
-            "workspace".into(),
-            "(unknown — not inside herdr?)".into(),
-        )),
-    }
+    lines.push(row(
+        app.settings.selected == 9,
+        "workspace".into(),
+        app.herdr
+            .workspace()
+            .unwrap_or("(unknown — no focused pane)")
+            .into(),
+    ));
+    lines.push(raw_row(format!(
+        "  session:   {}",
+        app.herdr.session_name()
+    )));
     lines.push(raw_row(format!(
         "  pane:      {}",
-        app.herdr.pane_id.as_deref().unwrap_or("(unknown)")
+        app.herdr
+            .focused()
+            .map_or("(unknown)", |p| p.pane_id.as_str())
     )));
-    lines.push(raw_row(format!("  panes:     {}", app.herdr.pane_count)));
+    lines.push(raw_row(format!("  panes:     {}", app.herdr.panes.len())));
 
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

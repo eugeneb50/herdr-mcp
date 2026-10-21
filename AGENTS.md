@@ -81,8 +81,8 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release  # build served by 
 herdr-mcp                                   # MCP stdio + HTTP on 127.0.0.1:7676
 herdr-mcp serve                             # same, with flags (--http, --data-dir, --herdr-socket, …)
 herdr-mcp serve --http 7676 --http-only     # HTTP bridge only
-herdr-mcp plugin link                       # register the herdr plugin (--print shows the manifest)
-herdr-mcp plugin unlink
+herdr-mcp plugin manifest                   # print herdr-plugin.toml (regenerate after changing plugin.rs)
+sh scripts/plugin-build.sh && herdr plugin link .   # the herdr plugin from this checkout
 herdr-trim dashboard                        # TUI dashboard (bridge client)
 herdr-trim trim "text to compress"          # message trim
 herdr-trim folder-key                       # per-folder PFC1 keys
@@ -90,7 +90,7 @@ herdr-trim folder-key                       # per-folder PFC1 keys
 
 **Smoke testing against herdr:** never create panes or link plugins in the
 user's live herdr session. Use an isolated session (`HERDR_SESSION=hmcp-smoke`),
-an explicit `--data-dir` under a temp dir, and, for `plugin link`, a short
+an explicit `--data-dir` under a temp dir, and, for `herdr plugin link`, a short
 `XDG_CONFIG_HOME` under `/tmp` (herdr's plugin registry is global per user).
 
 ## Project Snapshot
@@ -112,7 +112,7 @@ Cargo workspace under `crates/`.
 
 Key subsystems:
 
-- **MCP tool layer** — 54 tools, grouped by `#[tool(meta = category("…"))]`:
+- **MCP tool layer** — 55 tools, grouped by `#[tool(meta = category("…"))]`:
   Discovery, Lifecycle, Read, Write, Synchronize, A2A, Variables, Trim,
   Templates, Scheduler, Folder Key, Clipboard.
 - **HTTP bridge** — Axum server mirroring the tools as REST endpoints plus
@@ -142,7 +142,7 @@ Every workspace crate carries a stability tier.
 | `herdr-mcp-core` | Beta | Config system (`TOML + env + CLI`). Stable schema. |
 | `herdr-mcp-trim` | Experimental | Message-trim compressors (caveman, pfc1), pipeline, policy, stats, folder keys. |
 | `herdr-mcp-tui` | Experimental | Terminal dashboard. Bridge client only — no server deps. |
-| `herdr-mcp-server` | Experimental | MCP server, 54 tools, HTTP bridge, run engine, triggers, event subscriber, scheduler. |
+| `herdr-mcp-server` | Experimental | MCP server, 55 tools, HTTP bridge, run engine, triggers, event subscriber, scheduler. |
 | `herdr-mcp-ui` | Experimental | Dioxus web UI. Bridge client only, must build for `wasm32-unknown-unknown`. |
 | `herdr-mcp-cli` | Experimental | Binaries (`herdr-mcp`: serve/plugin; `herdr-trim`: trim/dashboard/folder-key) + integration tests. |
 
@@ -152,15 +152,15 @@ through deliberate team decision.
 
 ## Repository Map
 
-- `crates/herdr-mcp-api/` — single definition of every `/api/*` request/response type (`agents.rs`, `config.rs`, `herdr.rs` (herdr events + recipe triggers), `profile.rs`, `recipe.rs`, `run.rs`, `trim.rs`, `variables.rs`) + typed `ApiClient` (`client.rs`). Server/trim re-export these; web UI and TUI call the bridge through `ApiClient`. No tokio, no `herdr-mcp-*` deps.
+- `crates/herdr-mcp-api/` — single definition of every `/api/*` request/response type (`agents.rs`, `config.rs`, `herdr.rs` (herdr events, recipe triggers, panes, sessions), `profile.rs`, `recipe.rs`, `run.rs`, `trim.rs`, `variables.rs`) + typed `ApiClient` (`client.rs`). Server/trim re-export these; web UI and TUI call the bridge through `ApiClient`. No tokio, no `herdr-mcp-*` deps.
 - `crates/herdr-mcp-core/` — `config.rs` (full config system: `[http]`, `[herdr]`, `[clipboard]`), `session_context.rs` (inside-herdr / pane id from herdr's env)
 - `crates/herdr-mcp-trim/` — `pfc1.rs`, `caveman.rs`, `code_regions.rs`, `pipeline.rs`, `policy.rs`, `runner.rs`, `stats.rs`, `eval.rs`, `folder_key.rs`
 - `crates/herdr-mcp-tui/` — TUI dashboard (`lib.rs` app loop, `tabs/`, `theme.rs`, `http.rs` bridge discovery); talks to the bridge through `herdr-mcp-api::ApiClient`
-- `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers), `runs.rs` (run engine), `triggers.rs`, `scheduler.rs`, `herdr_client.rs` (socket client, event subscriber, agent registry), `agents.rs` / `profiles.rs` (agent profiles), `persistence.rs`, `templates.rs`, `variables.rs`
+- `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers), `runs.rs` (run engine), `triggers.rs`, `scheduler.rs`, `herdr_client.rs` (socket client, event subscriber, agent registry), `panes.rs` (herdr panes + sessions, the one pane fetch), `agents.rs` / `profiles.rs` (agent profiles), `persistence.rs`, `templates.rs`, `variables.rs`
 - `crates/herdr-mcp-cli/` — `src/bin/herdr-mcp.rs` (serve, plugin), `src/bin/herdr-trim.rs` (trim/dashboard/folder-key), `src/common.rs` (`serve_core`: the one server instance + background tasks), `src/plugin.rs` (herdr plugin), `tests/cli.rs`
-- `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the tool runner, herdr API, recipe builder and herdr events tabs; served by the HTTP bridge from `http.web-dir`
+- `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the tool runner, herdr API, recipe builder and herdr events tabs; built into `herdr-mcp` and served by the HTTP bridge
 - `data/` — runtime persistence (recipes, runs, variables, schedules, sessions, profiles, pfc1 memory, folder keys)
-- `docs/` — `ARCHITECTURE.md` (reference), `PRD.md`, `SWARMS.md` (flow-engine proposal)
+- `docs/` — `ARCHITECTURE.md` (reference), `SWARMS.md` (flow-engine proposal)
 - `herdr-mcp-context.toml` — project's evolving memory for resuming sessions
 
 ## Risk Tiers
@@ -203,19 +203,21 @@ When uncertain, classify as higher risk.
 
 - **Shell-out architecture** — every tool shells out via `tokio::process::Command` with real argv (no shell injection). The CLI is herdr's stable surface. Trade-off: higher latency per call vs. direct socket. The socket is used only for the event subscription and `herdr_api`.
 - **Stdout = MCP, Stderr = logs** — prevents log output from corrupting the MCP protocol stream.
-- **One server instance** — `serve_core` builds one `HerdrMcpServer` and starts the background tasks (trim poller, scheduler, triggers, HTTP) once; stdio reuses it. A second instance would fire every schedule and trigger again.
-- **One web UI** — the Dioxus app (`crates/herdr-mcp-ui`) is the only web frontend. The bridge serves its `dx bundle` output from `http.web-dir` (env `HERDR_MCP_WEB_DIR`) with SPA fallback to `index.html`; no CORS layer since the UI is same-origin (or proxied by `dx serve`).
+- **One server instance** — `serve_core` builds one `HerdrMcpServer` and starts the background tasks once; stdio reuses it.
+- **One daemon per data dir** — many herdr-mcp processes can share a data dir (MCP clients, the plugin's bridge, the dashboard). Only the holder of `<data_dir>/daemon.lock` fires schedules and triggers and pushes trim badges; the others retry every 15 s and take over when it exits. `Scheduler::schedule_one` only saves; the daemon's `Scheduler::run` picks saved schedules up within 5 s.
+- **One web UI** — the Dioxus app (`crates/herdr-mcp-ui`) is the only web frontend. `herdr-mcp-server/build.rs` compiles its `dx bundle` output into the binary (bundle first, then `cargo build`), so one `herdr-mcp` file is the deployment; `http.web-dir` (env `HERDR_MCP_WEB_DIR`) serves a directory from disk instead. SPA fallback to `index.html`; no CORS layer since the UI is same-origin (or proxied by `dx serve`).
 - **Non-colliding compressors** — `caveman` operates on ASCII/Latin prose (U+0000–U+007F); `pfc1` uses Cherokee syllabary (U+13A0–U+13FF). The two cannot interfere, making composition trivially safe.
 - **Adaptive gate (never expand)** — if `candidate.len() >= current.len()`, pass through unchanged. Prevents short messages from drowning in PFC1 headers.
 - **Lossy vs. lossless split** — style compression is inherently lossy; dictionary compression must be reversible for a2a comms.
 - **File-based persistence** — simple, inspectable, no DB dependency. Adequate for single-server deployment.
 - **Workspace-scoped variables** — session variables use herdr workspace ID as scope; they chain across runs in the same workspace but don't leak between workspaces.
 - **herdr from inside or outside a pane** — socket: `--herdr-socket` > `HERDR_SOCKET_PATH` (herdr sets it in panes) > config file > `HERDR_SESSION` > default; binary: `HERDR_BIN` > `HERDR_BIN_PATH` > `herdr`. The resolved socket is exported to child `herdr` processes so CLI calls and the socket client hit the same server.
+- **One pane list, any session** — herdr owns panes and sessions; `panes::panes(&PaneFilter)` (`herdr-mcp-server/src/panes.rs`) is the only fetch, typed as `herdr_mcp_api::HerdrPane`. Discovery/Read tools and `/api/herdr/panes` take `session`, reached by running `herdr` with that session's socket; writes, runs and triggers stay on the server's own session.
 - **Every herdr method** — `herdr_api` + `GET /api/herdr/schema`; the playground's herdr API tab and the trigger editor's event list are generated from the installed herdr's schema, never hand-listed.
 - **herdr events** — herdr reads nothing more on a connection after `events.subscribe`, so the subscriber reconnects (with a fresh pane list) on `pane.created` / `pane.closed` instead of re-subscribing. Global events arrive as `pane_created`; `HerdrEvent::parse` normalizes them to the subscription name `pane.created`.
 - **Triggers live on recipes** — `Recipe.triggers` is the only copy, read from disk on every event; a recipe never has two triggered runs in flight (this also stops self-retriggering).
 - **One tool dispatch** — the bridge and run engine call tools through rmcp's router over an in-process MCP session, never a hand-written match. Tool groups come from each tool's `#[tool(meta = category("…"))]`.
-- **Auto variables are a view** — `GET /api/variables/auto` resolves live herdr panes + registry agents (+ a workspace's `var_set` vars) on request; tool calls never write variables behind the user's back.
+- **Auto variables are a view** — `GET /api/variables/auto` resolves live herdr panes with their registry handles laid over them (by pane id and role, `AgentRegistry::seed`) (+ a workspace's `var_set` vars) on request — the pane dropdowns and the Home pane table read it; tool calls never write variables behind the user's back.
 - **Host allowlist** — the bridge answers only `localhost`, `*.localhost`, IP literals and its bind name (DNS-rebinding guard; it can type into panes).
 - **Default command is `serve`** — running `herdr-mcp` with no arguments starts MCP stdio + HTTP on port 7676 (bound to `127.0.0.1`).
 
@@ -233,7 +235,6 @@ AI coding assistant skills live in `~/.config/opencode/skills/`. Useful here:
 
 - `@herdr-mcp-context.toml` — evolving project memory: architecture, spec facts tests rely on, known non-determinism, gotchas. Read first when resuming work.
 - `@docs/ARCHITECTURE.md` — comprehensive architecture reference (data flow, tool reference, HTTP API, recipe engine, triggers, trim system, agent registry, persistence, scheduler, web UI, plugin, build/run, design decisions, known gotchas).
-- `@docs/PRD.md` — product requirements document.
 - `@docs/SWARMS.md` — swarm / flow engine design (proposal).
 - `@CHANGES.md` — notable changes.
 

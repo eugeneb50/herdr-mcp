@@ -288,7 +288,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     params: serde_json::json!({
                         "session_id": "{{ template.session_id }}",
                         "key": "panes.snapshot",
-                        "value": "{{ panes.result }}"
+                        "value": "{{ panes.panes }}"
                     }),
                     description: Some("Store pane labels/ids".to_string()),
                 },
@@ -653,7 +653,7 @@ mod tests {
         assert!(recipe.steps.iter().any(|s| s.tool == "list_panes"));
         assert!(recipe.steps.iter().any(|s| s.tool == "agent_list"));
         assert!(recipe.steps.iter().any(|s| s.tool == "var_set"));
-        // Template vars are substituted; runtime step refs ({{ panes.result }}) remain.
+        // Template vars are substituted; runtime step refs ({{ panes.panes }}) remain.
         assert!(
             !recipe
                 .steps
@@ -664,7 +664,7 @@ mod tests {
             recipe
                 .steps
                 .iter()
-                .any(|s| s.params.to_string().contains("{{ panes.result }}"))
+                .any(|s| s.params.to_string().contains("{{ panes.panes }}"))
         );
     }
 

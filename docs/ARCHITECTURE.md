@@ -18,8 +18,7 @@ sophisticated message-trim (compression) pipeline, and a recipe engine for
 chaining tool calls with variable interpolation.
 
 **License:** AGPL v3
-**Current test suite:** run `cargo nextest run --workspace` (337 passing after the
-dead-code sweep)
+**Current test suite:** run `cargo nextest run --workspace` (343 passing)
 **Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---
@@ -48,7 +47,7 @@ dead-code sweep)
 │                        ▼                                     │
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │              HerdrMcpServer (server.rs)                  │ │
-│  │  - 54 tool definitions (discovery, lifecycle, read, write, synchronize, a2a, trim, recipes, scheduler, folder-key) │ │
+│  │  - 55 tool definitions (discovery, lifecycle, read, write, synchronize, a2a, trim, recipes, scheduler, folder-key) │ │
 │  │  - Recipe engine with {{ variable }} interpolation      │ │
 │  │  - Outbound trim: apply_outbound_trim()                 │ │
 │  │  - Badge push: push_badge_for_workspace()               │ │
@@ -143,7 +142,7 @@ herdr-mcp/
 │   ├── herdr-mcp-tui/      # TUI dashboard (crossterm + ratatui); bridge client only
 │   │   └── src/
 │   │       ├── lib.rs      # App state, event loop, mouse handling
-│   │       ├── http.rs     # Bridge discovery; every call goes through ApiClient
+│   │       ├── http.rs     # Bridge liveness probe (configured port only); every call goes through ApiClient
 │   │       ├── theme.rs    # Color palette and styles
 │   │       └── tabs/       # overview, playground, trim, variables, settings
 │   ├── herdr-mcp-server/   # MCP server, tools, HTTP bridge
@@ -168,19 +167,25 @@ herdr-mcp/
 
 ---
 
-## 4. MCP Tool Reference (54 tools total)
+## 4. MCP Tool Reference (55 tools total)
 
-### 4.1 Discovery Tools (7)
+### 4.1 Discovery Tools (8)
+
+`session?` (a name from `list_sessions`) points a Discovery or Read tool at
+another herdr session; the label in `get_pane`/`read_pane` is looked up
+there too. Unset: the server's own session. Every other tool, and the run
+engine, always acts on the server's own session.
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `status` | — | Overall herdr server status |
-| `list_workspaces` | — | List all workspaces in session |
-| `list_tabs` | `workspace_id?` | List tabs, optionally by workspace |
-| `list_panes` | `workspace_id?` | List panes, optionally by workspace |
-| `list_agents` | — | List all detected agents |
-| `get_pane` | `pane_id?`, `label?` | Get pane details by ID or label |
-| `get_agent` | `target` | Get agent details by terminal/name/pane |
+| `list_sessions` | — | Every named herdr session; `current` marks the server's own |
+| `list_workspaces` | `session?` | List all workspaces in a session |
+| `list_tabs` | `workspace_id?`, `session?` | List tabs, optionally by workspace |
+| `list_panes` | `session?`, `workspace_id?`, `tab_id?`, `agent_status?`, `focused?`, `label?` | Typed `{panes: [HerdrPane]}`; every filter narrows (`label`: case-insensitive substring of label or agent) |
+| `list_agents` | `session?` | List all detected agents |
+| `get_pane` | `pane_id?`, `label?`, `session?` | Get pane details by ID or label |
+| `get_agent` | `target`, `session?` | Get agent details by terminal/name/pane |
 
 ### 4.2 Lifecycle Tools (4)
 
@@ -195,8 +200,8 @@ herdr-mcp/
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `read_pane` | `pane_id?`, `label?`, `source?`, `lines?` | Read pane output (visible/recent/recent-unwrapped) |
-| `read_agent` | `target`, `source?`, `lines?` | Read agent output |
+| `read_pane` | `pane_id?`, `label?`, `source?`, `lines?`, `session?` | Read pane output (visible/recent/recent-unwrapped) |
+| `read_agent` | `target`, `source?`, `lines?`, `session?` | Read agent output |
 
 ### 4.4 Write Tools (6)
 
@@ -284,6 +289,8 @@ herdr-mcp/
 | `clipboard_set` | `text` | Write text to system clipboard |
 | `clipboard_get` | — | Read text from system clipboard |
 
+Both go through `clipboard.rs` (see §14.10).
+
 ---
 
 ## 5. HTTP Bridge API
@@ -292,12 +299,14 @@ herdr-mcp/
 
 | Method | Path | Handler | Description |
 |---|---|---|---|---|
-| `GET` | `/*` | `ServeDir` fallback | Serves the Dioxus web UI from `http.web-dir` (see §5.5) |
+| `GET` | `/*` | `web::serve` / `ServeDir` fallback | Serves the Dioxus web UI built into the binary, or from `http.web-dir` (see §5.5) |
 | `GET` | `/api/health` | `health_handler` | Returns `"ok"` |
 | `GET` | `/api/tools` | `list_tools_handler` | Lists all tools with JSON schemas |
 | `POST` | `/api/tools/{name}` | `call_tool_handler` | Dispatch tool by name |
 | `GET` | `/api/agents?workspace_id=` | `agents_handler` | Live pane list from AgentRegistry |
 | `GET` | `/api/workspaces` | `workspaces_handler` | Workspace list via herdr CLI |
+| `GET` | `/api/herdr/sessions` | `herdr_sessions_handler` | `SessionsResponse`: every named herdr session, `current` = the bridge's |
+| `GET` | `/api/herdr/panes?session=&workspace_id=&tab_id=&agent_status=&focused=&label=` | `herdr_panes_handler` | `PanesResponse`, filtered like `list_panes`; 502 for an unknown or stopped session |
 | `POST` | `/api/runs` | `start_run_handler` | Start a run; `?wait=true` waits for the final record; `variables` add to the run's scope |
 | `GET` | `/api/herdr/events` | `herdr_events_handler` | SSE: herdr's live event stream (`HerdrEvent` per message) |
 
@@ -331,11 +340,14 @@ herdr-mcp/
 
 ### 5.5 Frontend Serving
 
-The bridge serves the Dioxus bundle with `tower_http::services::ServeDir`:
+The bridge serves the Dioxus bundle built into the binary:
 
-- Directory: `http.web-dir` (TOML) / `HERDR_MCP_WEB_DIR` (env); unset →
-  `HttpConfig::resolved_web_dir()` = `<workspace>/target/dx/herdr-mcp-ui/release/web/public`
-  (the `dx bundle --platform web --release` output)
+- `herdr-mcp-server/build.rs` turns every file of the `dx bundle --platform web
+  --release` output (`<target>/dx/herdr-mcp-ui/release/web/public`) into an
+  `include_bytes!` entry; `web.rs` serves them. Build order: `dx bundle`, then
+  `cargo build`. No bundle at build time → no entries.
+- `http.web-dir` (TOML) / `HERDR_MCP_WEB_DIR` (env) serves a bundle directory
+  from disk with `tower_http::services::ServeDir` instead (UI development)
 - Any path that isn't an `/api/*` route or a file falls back to `index.html`,
   so Dioxus router deep links (`/playground`, `/trim`, …) load the app
 - A missing `index.html` logs a `tracing::warn!` with the build command;
@@ -552,10 +564,11 @@ Per-folder PFC1 keys for domain-specific compression:
 Full-featured terminal dashboard with VS Code-style tabs, mouse + keyboard
 navigation, running as a herdr sidecar pane:
 
-**5 tabs:**
+**6 tabs** (`Ctrl+1`–`Ctrl+6`; opens on Send):
 | Tab | Content |
 |---|---|
-| Overview | Welcome, workspace stats, pane table with agent/status/role |
+| Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "press Enter after" (`Ctrl+t`); addressed by pane id |
+| Overview | Welcome, stats, pane table (tab/label/agent/status/cwd) for the shown session; `s` cycles sessions |
 | Playground | Tool runner + recipe builder (same as web playground) |
 | Trim | Trim savings dashboard + per-pane policy editor |
 | Variables | Workspace-scoped variable editor |
@@ -566,9 +579,10 @@ navigation, running as a herdr sidecar pane:
   bridge + AgentRegistry + event subscriber come up headless, then the TUI
   takes over the terminal. MCP stdio is auto-disabled (`http_only=true`) so
   the TUI owns stdout.
-- Reads pane data from the **live AgentRegistry** via `GET /api/agents`
-  (canonical), falls back to `herdr pane list` CLI (diagnostic) if the bridge
-  is unavailable.
+- Panes come from herdr via `GET /api/herdr/panes` (the shown session),
+  joined by pane id with the registry (`GET /api/agents`, own session only)
+  for role, captured output and trim policy. Writes (Send, paste-to-pane,
+  trim policies) refuse while another session is shown.
 - **Trim policy editor** — select a pane, add/remove/reorder pipeline stages
   (`caveman:lite/full/ultra`, `pfc1`), set direction, Get/Apply via the
   bridge's tool endpoints.
@@ -700,10 +714,9 @@ Cron-based recipe scheduling using the `cron` crate:
 
 | Route | Component | Description |
 |---|---|---|
-| `/` | `Home` | Landing page |
-| `/docs` | `Docs` | Documentation |
-| `/overview` | `Overview` | Live agents from `GET /api/agents` |
-| `/playground` | `Playground` | Tool runner (schema-driven form) + recipe builder/library |
+| `/` | `Home` | Landing page: send to a pane by `pane_id` and/or `label` (typed, or picked from dropdowns of the panes and labels/roles in `GET /api/variables/auto`; `ApiClient::send_to_pane` → `send_text` / `run_command`, `pane_id` wins), remembers the last target in `localStorage`; collapsed getting-started notes; pane table at the bottom from the same auto variables (click a row to target it) |
+| `/overview` | `Overview` | Pane browser: `GET /api/herdr/panes` with session/status/label filters, grouped by workspace and tab |
+| `/playground` | `Playground` | Tool runner (schema-driven form) + recipe builder/library; `pane_id` / `label` fields offer the same auto-variable pane dropdowns as Home (`components/pane_options.rs`) |
 | `/trim` | `Trim` | Trim savings, per-pane bars, active policies, diagnose/summary |
 | `/variables` | `Variables` | User variables (CRUD/import) + auto variables |
 | `/settings` | `Settings` | Runtime config + clipboard round-trip test |
@@ -798,7 +811,7 @@ cargo fmt --all -- --check
 herdr-mcp                         # MCP stdio + HTTP bridge on port 7676
 herdr-mcp serve                   # Explicit MCP + HTTP
 herdr-trim dashboard              # TUI dashboard
-herdr-mcp plugin link             # register herdr-mcp as a herdr plugin (see §13.3)
+herdr-mcp plugin manifest         # print the herdr plugin manifest (see §13.3)
 herdr-mcp trim --stage caveman:full --stage pfc1 "text to compress"
 herdr-mcp trim --decompress "compressed text"
 herdr-mcp trim --file input.txt
@@ -810,10 +823,23 @@ herdr-mcp folder-key decompress ./my-folder "compressed text"
 
 ### 13.3 herdr Plugin
 
-`herdr-mcp plugin link` writes `~/.config/herdr-mcp/herdr-plugin/herdr-plugin.toml`
-(generated in `crates/herdr-mcp-cli/src/plugin.rs`, commands pointing at this
-binary; bridge port and data dir taken from config at link time) and runs
-`herdr plugin link`. `--print` shows the manifest; `plugin unlink` removes it.
+The repo-root `herdr-plugin.toml` is generated from
+`crates/herdr-mcp-cli/src/plugin.rs::manifest` (`herdr-mcp plugin manifest >
+herdr-plugin.toml`; a test fails when they differ), so `herdr plugin install
+eugeneb50/herdr-mcp` works and the repo can carry the `herdr-plugin`
+marketplace topic. `[[build]]` runs `scripts/plugin-build.sh` (release
+`herdr-mcp` + `herdr-trim` into `bin/`, web UI when `dx` exists); every command
+runs `./bin/…` from the plugin directory and resolves port and data dir from
+config at run time. With no `data_dir` configured, a process herdr runs as this
+plugin (`HERDR_PLUGIN_ID=herdr-mcp`) defaults to `HERDR_PLUGIN_STATE_DIR`, not
+the checkout (replaced on update). Project-local config
+(`herdr-mcp.toml` in the working directory) is skipped as the
+plugin: that directory is the checkout. `[[startup]]` and the
+`workspace.created` event hook run `plugin startup`: open the `bridge` pane
+unless a bridge already answers on `http.port` (a fresh server with no
+workspace yet waits for the first one). The recipe picker, web action and TUI
+dashboard only talk to the bridge on the configured port (no fallback ports:
+another bridge may serve another data dir).
 
 | Action (`herdr-mcp.<id>`) | Opens |
 |---|---|
@@ -836,10 +862,10 @@ Bind one in herdr's config: `[[keys.command]] key = "prefix+r"`,
 | `HERDR_MCP_HTTP_PORT` | — | HTTP port override |
 | `HERDR_MCP_HTTP_ONLY` | — | HTTP-only mode |
 | `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
-| `HERDR_MCP_WEB_DIR` | in-repo `dx bundle` output | Built web UI directory |
+| `HERDR_MCP_WEB_DIR` | the web UI built into the binary | Serve a `dx bundle` directory from disk instead |
 | `HERDR_MCP_CONFIG` | — | Config file path |
-| `HERDR_MCP_CLIPBOARD_COPY` | — | Clipboard copy command override |
-| `HERDR_MCP_CLIPBOARD_PASTE` | — | Clipboard paste command override |
+| `HERDR_MCP_CLIPBOARD_COPY` | — | `clipboard.copy-command` |
+| `HERDR_MCP_CLIPBOARD_PASTE` | — | `clipboard.paste-command` |
 
 ---
 
@@ -905,16 +931,22 @@ single-server deployment.
 **Rationale:** Recipes run within a workspace context; variables should chain
 across runs in the same workspace but not leak between workspaces.
 
-### 14.10 Clipboard Detection & Override
+### 14.10 Built-in Clipboard & Command Override
 
-**Decision:** Clipboard commands are auto-detected from the environment
-(pbcopy/pbpaste on macOS, wl-copy/wl-paste on Wayland, xclip/xsel on X11)
-with env-var overrides (`HERDR_MCP_CLIPBOARD_COPY`, `HERDR_MCP_CLIPBOARD_PASTE`)
-and config-file overrides (`clipboard.copy_command`, `clipboard.paste_command`).  
-**Rationale:** The clipboard is needed for the TUI's copy/paste operations; no
-single command works across all platforms and display servers. Env/config
-overrides let users pin a specific tool.  
-**Detection order:** environment override → config override → platform auto-detect.
+**Decision:** `clipboard_set` / `clipboard_get` use the OS clipboard through
+[arboard](https://github.com/1Password/arboard) (macOS, Windows, X11; Wayland
+via the data-control protocol, falling back to XWayland). When both
+`clipboard.copy-command` and `clipboard.paste-command` are set (config file, or
+`HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` through the config's env layer) the
+server runs those commands instead (argv split on whitespace, no shell).
+Saving both empty from Settings removes them.  
+**Rationale:** no tool to install on the common desktops; the commands remain
+for compositors without data-control or a preferred tool.  
+**Handle lifetime:** one arboard handle per process (`clipboard::NATIVE`),
+used on a blocking thread. On X11/Wayland the copying process serves the text
+while the handle lives, so a copy outlives the call but not the process unless
+a clipboard manager takes it. Pure-Rust X11/Wayland backends: no system
+libraries linked.
 
 ---
 
@@ -966,7 +998,10 @@ overrides let users pin a specific tool.
    sockets. On non-Unix platforms, the registry is populated only by explicit
    tool calls.
 
-5. **`pane_id` vs `id` field name:** The `herdr pane list` CLI output may
-   return the pane identifier as either `pane_id` or `id`. The `resolve_pane_id`
-   function in the server and the TUI fallback both handle this via
-   `.or_else(|| p.get("id"))`.
+5. **One pane list:** every caller that needs herdr's panes (label lookup,
+   agent placement, the dashboard split, auto variables, the event
+   subscriber, `list_panes`, `/api/herdr/panes`) goes through
+   `panes::panes(&PaneFilter)` in `herdr-mcp-server/src/panes.rs`, typed as
+   `herdr_mcp_api::HerdrPane`. herdr 0.9 always names the id `pane_id`.
+   Another session is reached by running `herdr` with that session's
+   `HERDR_SOCKET_PATH` (from `herdr session list --json`).

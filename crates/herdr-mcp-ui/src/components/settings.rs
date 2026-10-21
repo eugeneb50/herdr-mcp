@@ -87,20 +87,20 @@ pub fn Settings() -> Element {
         section { class: "card",
             h2 { class: "card-title", "Clipboard backend" }
             p { class: "muted",
-                "Commands used by clipboard_set / clipboard_get. Empty on the server means platform auto-detect. Save writes the [clipboard] table of the config file and applies immediately (HERDR_MCP_CLIPBOARD_* env vars still win)."
+                "clipboard_set / clipboard_get use the built-in OS clipboard unless both commands are set (e.g. xsel). Save writes the [clipboard] table of the config file and applies immediately; save both empty to go back to the built-in clipboard."
             }
             div { class: "form-row",
                 input {
                     class: "input",
                     r#type: "text",
-                    placeholder: "copy command (e.g. wl-copy)",
+                    placeholder: "copy command (empty: built-in)",
                     value: copy_edit.read().clone().or(current().copy_command).unwrap_or_default(),
                     oninput: move |e| copy_edit.set(Some(e.value())),
                 }
                 input {
                     class: "input",
                     r#type: "text",
-                    placeholder: "paste command (e.g. wl-paste)",
+                    placeholder: "paste command (empty: built-in)",
                     value: paste_edit.read().clone().or(current().paste_command).unwrap_or_default(),
                     oninput: move |e| paste_edit.set(Some(e.value())),
                 }

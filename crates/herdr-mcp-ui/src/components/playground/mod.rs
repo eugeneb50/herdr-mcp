@@ -13,6 +13,8 @@ use herdr_api::HerdrApi;
 use recipes::{Loaded, RecipeBuilder, RecipeLibrary};
 use runner::ToolRunner;
 
+use super::pane_options::LivePaneOptions;
+
 #[component]
 pub fn Playground() -> Element {
     let mut tab: Signal<&str> = use_signal(|| "runner");
@@ -29,6 +31,7 @@ pub fn Playground() -> Element {
                 "Run individual tools or chain them into multi-step recipes. Requires the server with HTTP enabled."
             }
         }
+        LivePaneOptions {}
         div { class: "tabs",
             button {
                 class: if *tab.read() == "runner" { "tab tab-active" } else { "tab" },

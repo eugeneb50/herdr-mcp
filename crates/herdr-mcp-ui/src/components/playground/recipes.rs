@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use super::forms::{DynamicForm, ResponseViewer, build_params};
 use super::runner::{ToolInfo, schema_parts, tool_groups, tool_list};
 use crate::client::use_api;
+use crate::components::pane_options::pane_list;
 use crate::vars::substitute;
 use herdr_mcp_api::{
     CreateRecipeRequest, InstantiateTemplateRequest, Recipe, RecipeStep, RecipeTemplate,
@@ -583,7 +584,7 @@ pub fn RecipeLibrary(on_select: EventHandler<Loaded>, refresh_key: u32) -> Eleme
 
 /// Variables of a template, filled in before it loads into the builder.
 /// The server does the substitution (`/api/templates/{id}/instantiate`);
-/// pane fields suggest the live pane ids.
+/// pane fields suggest the live panes (the Playground's `LivePaneOptions`).
 #[component]
 fn TemplateForm(
     template: RecipeTemplate,
@@ -602,10 +603,6 @@ fn TemplateForm(
             .collect()
     });
     let mut error: Signal<Option<String>> = use_signal(|| None);
-    let panes = use_resource(move || {
-        let client = client();
-        async move { live_panes(&client).await }
-    });
     let missing = template.variables.iter().any(|v| {
         v.required
             && values
@@ -639,11 +636,6 @@ fn TemplateForm(
         div { class: "card",
             h3 { class: "card-title", "{template.name}" }
             p { class: "field-desc", "{template.description}" }
-            datalist { id: "live-panes",
-                for (pane, label) in panes.read().clone().unwrap_or_default() {
-                    option { value: "{pane}", "{label}" }
-                }
-            }
             for var in template.variables.iter().cloned() {
                 div { key: "{var.name}", class: "field",
                     label { class: "field-head",
@@ -656,7 +648,7 @@ fn TemplateForm(
                     input {
                         class: "input",
                         r#type: "text",
-                        list: if var.name.contains("pane") { "live-panes" } else { "" },
+                        list: pane_list(&var.name),
                         value: "{values.read().get(&var.name).cloned().unwrap_or_default()}",
                         oninput: move |e| {
                             values.write().insert(var.name.clone(), e.value());
@@ -678,36 +670,6 @@ fn TemplateForm(
             }
         }
     }
-}
-
-/// `(pane_id, "label · cwd")` for every pane herdr reports (empty if the
-/// call fails: suggestions are optional).
-async fn live_panes(client: &crate::client::ApiClient) -> Vec<(String, String)> {
-    let Ok(result) = client.call_tool("list_panes", &serde_json::json!({})).await else {
-        return Vec::new();
-    };
-    let text = herdr_mcp_api::tool_text(&result);
-    let Ok(json) = serde_json::from_str::<Value>(&text) else {
-        return Vec::new();
-    };
-    json.pointer("/result/panes")
-        .and_then(Value::as_array)
-        .map(|panes| {
-            panes
-                .iter()
-                .filter_map(|p| {
-                    let id = p.get("pane_id")?.as_str()?.to_string();
-                    let label = [p.get("label"), p.get("agent"), p.get("cwd")]
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                        .collect::<Vec<_>>()
-                        .join(" · ");
-                    Some((id, label))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// `when` as the editor shows it: `agent_status=done, pane.tab_id=w1:t1`.

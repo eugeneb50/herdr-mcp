@@ -194,6 +194,21 @@ impl ApiClient {
         Self::json::<AgentsResponse>(req).await.map(|r| r.agents)
     }
 
+    /// `GET /api/herdr/sessions` — every named herdr session.
+    pub async fn list_sessions(&self) -> Result<Vec<HerdrSession>, ApiError> {
+        self.get::<SessionsResponse>(&["api", "herdr", "sessions"])
+            .await
+            .map(|r| r.sessions)
+    }
+
+    /// `GET /api/herdr/panes` — herdr's panes, narrowed by `filter`.
+    pub async fn list_panes(&self, filter: &PaneFilter) -> Result<Vec<HerdrPane>, ApiError> {
+        let req = self
+            .request(Method::GET, &["api", "herdr", "panes"])
+            .query(filter);
+        Self::json::<PanesResponse>(req).await.map(|r| r.panes)
+    }
+
     /// `GET /api/workspaces` — passthrough of `herdr workspace list` (JSON or null).
     pub async fn list_workspaces(&self) -> Result<Value, ApiError> {
         self.get(&["api", "workspaces"]).await
@@ -233,6 +248,21 @@ impl ApiClient {
             &serde_json::json!({ "target": target, "policy": policy }),
         )
         .await
+    }
+
+    /// Type `text` into a pane: `send_text`, or `run_command` (text + Enter)
+    /// when `enter`. The pane is addressed like the tools address it:
+    /// `pane_id` and/or `label`, `pane_id` winning when both are set.
+    pub async fn send_to_pane(
+        &self,
+        pane_id: Option<&str>,
+        label: Option<&str>,
+        text: &str,
+        enter: bool,
+    ) -> Result<(), ApiError> {
+        let (tool, params) = send_call(pane_id, label, text, enter);
+        let v = self.call_tool(tool, &params).await?;
+        tool_ok(&v).map(|_| ())
     }
 
     // ── recipes ────────────────────────────────────────────────────────
@@ -505,6 +535,29 @@ pub fn tool_is_error(v: &Value) -> bool {
     v.get("isError").and_then(Value::as_bool).unwrap_or(false)
 }
 
+/// The tool call [`ApiClient::send_to_pane`] makes.
+fn send_call(
+    pane_id: Option<&str>,
+    label: Option<&str>,
+    text: &str,
+    enter: bool,
+) -> (&'static str, Value) {
+    let (tool, key) = if enter {
+        ("run_command", "command")
+    } else {
+        ("send_text", "text")
+    };
+    let mut params = serde_json::Map::new();
+    if let Some(id) = pane_id {
+        params.insert("pane_id".into(), id.into());
+    }
+    if let Some(l) = label {
+        params.insert("label".into(), l.into());
+    }
+    params.insert(key.into(), text.into());
+    (tool, Value::Object(params))
+}
+
 /// Map a tool result with `isError: true` to [`ApiError::Tool`].
 fn tool_ok(v: &Value) -> Result<&Value, ApiError> {
     if tool_is_error(v) {
@@ -522,6 +575,24 @@ fn tool_ok(v: &Value) -> Result<&Value, ApiError> {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn send_call_picks_tool() {
+        assert_eq!(
+            send_call(Some("w1:p2"), None, "hi", false),
+            (
+                "send_text",
+                serde_json::json!({"pane_id": "w1:p2", "text": "hi"})
+            )
+        );
+        assert_eq!(
+            send_call(None, Some("builder"), "make", true),
+            (
+                "run_command",
+                serde_json::json!({"label": "builder", "command": "make"})
+            )
+        );
+    }
 
     #[test]
     fn rejects_relative_base() {

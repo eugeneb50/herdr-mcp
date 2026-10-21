@@ -1,6 +1,6 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
-[![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.1.0--dev-22c55e)](https://github.com/herdr-mcp)
+[![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.2.0-22c55e)](https://github.com/herdr-mcp)
 [![Tests](https://img.shields.io/badge/tests-337%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-7%20crates-22c55e)](https://github.com/herdr-mcp)
 
@@ -38,14 +38,15 @@ cargo build --release
 Requires the `herdr` CLI on `PATH` ([install](https://herdr.dev)), 0.9 or newer.
 
 Running without any subcommand starts the MCP stdio server and the HTTP bridge
-on `127.0.0.1:7676` — open http://localhost:7676/ for the web playground (build
-it first, see [Install & build](#install--build)).
+on `127.0.0.1:7676` — open http://localhost:7676/ for the web playground. The
+web UI is built into the `herdr-mcp` binary, so the binary alone is the whole
+deployment (see [Install & build](#install--build)).
 
 ### Other entry points
 
 ```bash
 herdr-mcp serve          # explicit MCP + HTTP
-herdr-mcp plugin link    # register herdr-mcp as a herdr plugin
+herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 herdr-trim dashboard     # TUI dashboard with mouse + keyboard nav
 herdr-trim trim          # one-shot message compression
 herdr-trim folder-key    # per-folder PFC1 key management
@@ -57,7 +58,7 @@ herdr-trim folder-key    # per-folder PFC1 key management
 
 - **MCP mode** — plug into any MCP client (Claude Desktop, Cursor, Claude Code, Continue, OpenCode) to control herdr workspaces, tabs, panes and agents
 - **54 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, message-trim, recipe templates, scheduler, folder keys and clipboard; `herdr_api` reaches every method the installed herdr exposes
-- **herdr plugin** — `herdr-mcp plugin link` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
+- **herdr plugin** — `herdr plugin install eugeneb50/herdr-mcp` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
 - **Recipe engine** — chain tool calls with variable interpolation (`{{ stepId.result.path }}`); runs are tracked (`/api/runs`) with per-step events, pause/resume/cancel
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
 - **Live herdr events** — the bridge relays herdr's event stream as SSE (`/api/herdr/events`); the playground shows it live
@@ -133,7 +134,7 @@ herdr-mcp/
 │   ├── herdr-mcp-ui/        # Dioxus web UI (served by the HTTP bridge)
 │   └── herdr-mcp-cli/       # Binaries: herdr-mcp (serve, plugin) + herdr-trim (trim, dashboard, folder-key)
 ├── data/                    # Runtime persistence (recipes, runs, variables, schedules, sessions, …)
-└── docs/                    # Architecture, PRD, swarm design
+└── docs/                    # Architecture, swarm design
 ```
 
 The web UI and the TUI both talk to the bridge through `herdr-mcp-api`, so
@@ -146,7 +147,6 @@ every `/api/*` shape is defined once.
 | Document | Description |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full reference: data flow, tools, HTTP API, recipe engine, triggers, trim system, agent registry, persistence, scheduler, web UI, plugin, build/run, design decisions, gotchas |
-| [docs/PRD.md](docs/PRD.md) | Product requirements document |
 | [docs/SWARMS.md](docs/SWARMS.md) | Swarm / flow engine design (proposal) |
 | [AGENTS.md](AGENTS.md) | Instructions for AI coding assistants (conventions, risk tiers, workflow, anti-patterns) |
 | [CHANGES.md](CHANGES.md) | Notable changes |
@@ -168,12 +168,17 @@ every `/api/*` shape is defined once.
 git clone <repo-url>
 cd herdr-mcp
 
-# Build the binaries (herdr-mcp, herdr-trim)
-cargo build --release
+# Build the web UI first (optional) → target/dx/herdr-mcp-ui/release/web/public
+(cd crates/herdr-mcp-ui && dx bundle --platform web --release)
 
-# Build the web UI (optional) → target/dx/herdr-mcp-ui/release/web/public
-cd crates/herdr-mcp-ui && dx bundle --platform web --release
+# Build the binaries (herdr-mcp, herdr-trim); herdr-mcp embeds the bundle
+cargo build --release
 ```
+
+`herdr-mcp`'s build compiles whatever `dx bundle` left in
+`target/dx/herdr-mcp-ui/release/web/public` into the binary, so copy
+`target/release/herdr-mcp` anywhere and the web UI comes with it. Built without
+a bundle, the bridge serves only `/api/*`.
 
 ### Binaries
 
@@ -181,7 +186,7 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release
 |------------|-------------|
 | `herdr-mcp` | MCP stdio server + HTTP bridge on port 7676 (same as `serve`) |
 | `herdr-mcp serve` | Explicit MCP + HTTP with full flag control |
-| `herdr-mcp plugin link` / `unlink` | Register / unregister the herdr plugin (`link --print` shows the manifest) |
+| `herdr-mcp plugin manifest` | Print the herdr plugin manifest (the repo's `herdr-plugin.toml`) |
 | `herdr-trim dashboard` | TUI dashboard (bridge-backed) |
 | `herdr-trim trim` | One-shot message-trim pipeline on text or a file |
 | `herdr-trim folder-key` | Build/list/show/decompress per-folder PFC1 keys |
@@ -214,15 +219,18 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release
 ### Configuration
 
 Settings come from, lowest to highest: defaults, the config file
-(`$HERDR_MCP_CONFIG`, else `./herdr-mcp.toml`, else `~/.config/herdr-mcp/config.toml`), a `herdmcp.toml`
-`[persistent]` section in the working directory, environment variables, CLI flags.
+(`$HERDR_MCP_CONFIG`, else `./herdr-mcp.toml`, else `~/.config/herdr-mcp/config.toml`),
+environment variables, CLI flags. The config file is the only settings file.
 
 ```toml
-# herdmcp.toml
-[persistent]
-http-port = 7676
-data-dir = "./data"
-# herdr-socket = "~/.config/herdr/herdr.sock"
+# ~/.config/herdr-mcp/config.toml
+data-dir = "~/.local/share/herdr-mcp"
+
+[http]
+port = 7676
+
+# [herdr]
+# socket-path = "~/.config/herdr/herdr.sock"
 ```
 
 ---
@@ -236,8 +244,8 @@ data-dir = "./data"
 ```
 
 Starts MCP stdio **and** the HTTP bridge on `127.0.0.1:7676`. The web
-playground is served from `http.web-dir` / `HERDR_MCP_WEB_DIR`, defaulting to
-the in-repo `dx bundle` output.
+playground is the copy built into the binary; `http.web-dir` /
+`HERDR_MCP_WEB_DIR` serves a `dx bundle` directory from disk instead.
 
 Add to your MCP client config:
 
@@ -263,17 +271,30 @@ Inside a herdr pane, herdr-mcp finds the right herdr on its own
 ### herdr plugin
 
 ```bash
-herdr-mcp plugin link
+herdr plugin install eugeneb50/herdr-mcp
+# or, from a checkout:
+sh scripts/plugin-build.sh && herdr plugin link .
 ```
 
-Writes `~/.config/herdr-mcp/herdr-plugin/herdr-plugin.toml` and registers it
-with `herdr plugin link`. It adds these actions:
+herdr reads the repo's `herdr-plugin.toml`; its build step
+(`scripts/plugin-build.sh`) bundles the web UI when `dx` is installed, then
+compiles `herdr-mcp` (with the web UI built in) and `herdr-trim` into the
+plugin's `bin/`. Port and data
+dir come from herdr-mcp's config when each command runs; with no `data_dir`
+configured the plugin keeps its state in herdr's state dir for the plugin. Set
+`data_dir` in `~/.config/herdr-mcp/config.toml` to share one store with the
+`herdr-mcp` your MCP clients run.
+
+When herdr starts (or creates the first workspace, on a fresh server), the
+plugin opens the bridge in a tab unless a bridge already answers on
+`http.port`. As a plugin it never reads `herdr-mcp.toml` from
+its working directory (the plugin checkout). It adds these actions:
 
 | Action | Opens |
 |---|---|
 | `herdr-mcp.recipes` | Popup: pick a saved recipe and run it with the invocation context as `{{herdr.…}}` (`workspace_id`, `pane_id` = focused pane, `selected_text`, …), following its steps |
 | `herdr-mcp.bridge` | Tab: `herdr-mcp serve --http-only` |
-| `herdr-mcp.dashboard` | Split: `herdr-trim dashboard` (when `herdr-trim` is installed) |
+| `herdr-mcp.dashboard` | Split: `herdr-trim dashboard` |
 | `herdr-mcp.web` | The web playground in a browser |
 
 Bind one in herdr's config:
@@ -385,8 +406,8 @@ watched and `idle` when it was.
 | `HERDR_MCP_HTTP_PORT` | 7676 | HTTP bridge port |
 | `HERDR_MCP_HTTP_ONLY` | — | Set to disable MCP stdio |
 | `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
-| `HERDR_MCP_WEB_DIR` | in-repo `dx bundle` output | Directory of the built web UI |
-| `HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` | detected | Clipboard commands |
+| `HERDR_MCP_WEB_DIR` | the web UI built into the binary | Serve a `dx bundle` directory from disk instead |
+| `HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` | built-in | Clipboard commands (both set: used instead of the OS clipboard) |
 
 Socket resolution: `--herdr-socket` > `HERDR_SOCKET_PATH` > config file >
 `HERDR_SESSION` > `~/.config/herdr/herdr.sock`. The resolved socket is passed to
@@ -457,7 +478,7 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `list_templates` / `get_template` / `instantiate_template` | Bundled recipe templates |
 | `schedule_recipe` / `list_schedules` / `delete_schedule` / `enable_schedule` | Cron recipe scheduling |
 | `build_folder_key` / `get_folder_key` / `list_folder_keys` / `decompress_with_folder_key` | Per-folder PFC1 keys |
-| `clipboard_get` / `clipboard_set` | System clipboard |
+| `clipboard_get` / `clipboard_set` | System clipboard: built in on macOS, Windows, X11 and Wayland (data-control, else XWayland); `[clipboard]` commands override |
 
 **IDs are session-local** and may compact when items close; re-read them after
 structural changes. Pane-targeting tools accept `label` instead of `pane_id`.

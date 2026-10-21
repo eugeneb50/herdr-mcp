@@ -1,5 +1,7 @@
 pub mod agents;
+pub mod clipboard;
 pub mod herdr_client;
+pub mod panes;
 pub mod persistence;
 pub mod profiles;
 pub mod runs;
@@ -8,6 +10,7 @@ pub mod server;
 pub mod templates;
 pub mod triggers;
 pub mod variables;
+pub mod web;
 
 // Convenience re-exports so consumers don't need deep paths
 pub use herdr_client::{AgentRegistry, HerdrClient};
