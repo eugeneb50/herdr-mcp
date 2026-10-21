@@ -9,6 +9,8 @@ and a built-in OS clipboard. Breaking changes are marked **(breaking)**.
   and Linux, x86_64 and arm64; Linux builds are static musl, so any distro).
   A `v*` tag builds and attaches those archives
   (`.github/workflows/release.yml`).
+- **Rust 1.96.1** is pinned in `rust-toolchain.toml`: on 1.99 the web UI
+  bundle fails (wasm-bindgen 0.2.126, macOS `rust-objcopy`).
 - **One-file deployment.** The web UI is built into `herdr-mcp`: its build
   compiles the `dx bundle` output in, so the binary alone serves the
   playground. Bundle before `cargo build`. `http.web-dir` /
