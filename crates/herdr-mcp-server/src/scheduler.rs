@@ -18,10 +18,10 @@ use uuid::Uuid;
 use crate::persistence::Persistence;
 use crate::variables::ScheduledRecipe;
 
-/// Runs a recipe by id to completion.
 /// How often [`Scheduler::run`] picks up schedules saved since the last look.
 const SYNC_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Runs a recipe by id to completion.
 pub type ExecutorFn = Arc<dyn Fn(Uuid) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 #[derive(Clone)]
@@ -76,20 +76,23 @@ impl Scheduler {
         }
     }
 
-    /// Start a runner for each saved schedule that has none running.
-    /// Schedules with an invalid cron are skipped with a warning.
+    /// Start a runner for each enabled schedule that has none running. An
+    /// enabled schedule whose cron is invalid or never fires again is
+    /// disabled (so it is reported once, not on every pass).
     pub async fn sync(&self) -> anyhow::Result<()> {
-        for schedule in self.inner.persistence.list_schedules().await? {
+        for mut schedule in self.inner.persistence.list_schedules().await? {
             let running = self
                 .inner
                 .runners
                 .get(&schedule.id)
                 .is_some_and(|h| !h.is_finished());
-            if running {
+            if running || !schedule.enabled {
                 continue;
             }
             if let Err(e) = parse_cron(&schedule.cron_schedule) {
-                tracing::warn!("schedule {}: {e}; not started", schedule.id);
+                tracing::warn!("schedule {}: {e}; disabling it", schedule.id);
+                schedule.enabled = false;
+                self.inner.persistence.save_schedule(&schedule).await?;
                 continue;
             }
             self.spawn_runner(schedule.id);
@@ -156,28 +159,25 @@ impl SchedulerInner {
         self.persistence.load_schedule(&id).await.ok().flatten()
     }
 
-    /// Fire schedule `id` at each cron tick until its record is deleted.
+    /// Fire schedule `id` at each cron tick until it is deleted, disabled or
+    /// its cron runs out; [`Scheduler::sync`] restarts (or disables) it.
     async fn run_schedule(&self, id: Uuid) {
         loop {
-            let Some(sched) = self.load(id).await else {
+            let Some(sched) = self.load(id).await.filter(|s| s.enabled) else {
                 return;
             };
             let Some(next) = parse_cron(&sched.cron_schedule)
                 .ok()
                 .and_then(|c| c.upcoming(Utc).next())
             else {
-                tracing::warn!("schedule {id}: cron no longer valid; stopping");
                 return;
             };
             sleep_until(next).await;
 
             // Re-read: it may have been deleted or disabled while we slept.
-            let Some(sched) = self.load(id).await else {
+            let Some(sched) = self.load(id).await.filter(|s| s.enabled) else {
                 return;
             };
-            if !sched.enabled {
-                continue;
-            }
             let Some(executor) = self.executor.get() else {
                 tracing::warn!("schedule {id}: no executor set; skipping tick");
                 continue;
@@ -348,6 +348,23 @@ mod tests {
         assert!(sched.remove(s.id).await.unwrap());
         assert!(sched.inner.runners.is_empty());
         assert!(sched.list().await.is_empty());
+    }
+
+    /// A schedule whose cron never fires again is disabled once, not
+    /// re-warned and restarted on every pass.
+    #[tokio::test]
+    async fn sync_disables_a_cron_that_never_fires() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = Arc::new(Persistence::new(tmp.path().to_path_buf()));
+        let sched = Scheduler::new(Arc::clone(&p));
+        let mut s = scheduled();
+        s.cron_schedule = "0 0 0 1 1 * 2020".into();
+        p.save_schedule(&s).await.unwrap();
+
+        sched.sync().await.unwrap();
+        assert!(sched.inner.runners.is_empty());
+        let stored = p.load_schedule(&s.id).await.unwrap().unwrap();
+        assert!(!stored.enabled);
     }
 
     #[tokio::test]

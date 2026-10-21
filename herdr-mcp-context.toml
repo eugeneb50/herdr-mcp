@@ -37,8 +37,8 @@
 #   no `image`; wayland-data-control on, falls back to X11/XWayland).
 #   One static arboard handle per process, used in spawn_blocking: on X11 the
 #   process serves the selection while the handle lives.
-#   HERDR_MCP_CLIPBOARD_COPY/_PASTE are the config env layer (Config::
-#   apply_env_overrides). PUT /api/config/clipboard with both empty removes the
+#   No clipboard env vars (removed in #40: they overrode a saved Settings
+#   choice on restart); the config file is the only source. PUT /api/config/clipboard with both empty removes the
 #   [clipboard] keys (set_clipboard_in_file(path, None)) -> built-in.
 #   Copy command: stdout/stderr NOT captured (xclip's child holds them open).
 #   Removed: detect_clipboard (leaked a String per call), command probing,

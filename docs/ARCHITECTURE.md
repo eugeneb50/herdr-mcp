@@ -864,8 +864,6 @@ Bind one in herdr's config: `[[keys.command]] key = "prefix+r"`,
 | `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
 | `HERDR_MCP_WEB_DIR` | the web UI built into the binary | Serve a `dx bundle` directory from disk instead |
 | `HERDR_MCP_CONFIG` | — | Config file path |
-| `HERDR_MCP_CLIPBOARD_COPY` | — | `clipboard.copy-command` |
-| `HERDR_MCP_CLIPBOARD_PASTE` | — | `clipboard.paste-command` |
 
 ---
 
@@ -936,8 +934,8 @@ across runs in the same workspace but not leak between workspaces.
 **Decision:** `clipboard_set` / `clipboard_get` use the OS clipboard through
 [arboard](https://github.com/1Password/arboard) (macOS, Windows, X11; Wayland
 via the data-control protocol, falling back to XWayland). When both
-`clipboard.copy-command` and `clipboard.paste-command` are set (config file, or
-`HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` through the config's env layer) the
+`clipboard.copy-command` and `clipboard.paste-command` are set in the config
+file (Settings writes them; no env override, so a saved choice sticks) the
 server runs those commands instead (argv split on whitespace, no shell).
 Saving both empty from Settings removes them.  
 **Rationale:** no tool to install on the common desktops; the commands remain

@@ -58,7 +58,7 @@ fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
 }
 
 use herdr_mcp_api::{
-    AgentHandle, ApiClient, ConfigResponse, PlaygroundSnapshot, Recipe, RecipeTemplate,
+    ApiClient, ConfigResponse, HerdrPane, PlaygroundSnapshot, Recipe, RecipeTemplate,
     TrimStatusResponse, VariableStore,
 };
 use theme::{accent_style, dim_style, muted_style, title_style};
@@ -205,54 +205,9 @@ impl HerdrContext {
     }
 }
 
-/// One pane as the dashboard shows it: herdr's pane, plus the registry's
-/// record for it (role, captured output, trim policy) when the bridge has
-/// one. Built on every refresh, never kept apart from those two sources.
-#[derive(Clone, Debug, Default)]
-pub struct HerdrPane {
-    pub pane_id: String,
-    pub workspace_id: String,
-    pub tab_id: String,
-    /// Human-assigned label (`herdr pane rename`).
-    pub label: String,
-    /// Detected agent (e.g. "opencode"); `None` for a plain shell.
-    pub agent: Option<String>,
-    /// herdr's agent status (idle/working/blocked/done/unknown).
-    pub status: String,
-    pub cwd: String,
-    /// Whether the pane has focus in herdr.
-    pub focused: bool,
-    /// Human-assigned role used for `{{role.output}}` a2a interpolation (e.g. "agentA").
-    pub role: String,
-    /// Pane output captured at last idle — the agent's work product.
-    pub output: String,
-    /// Optional message-trim policy. The Trim tab editor mutates this through
-    /// the registry, so the snapshot stays live without polling herdr.
-    pub trim_policy: Option<herdr_mcp_api::TrimPolicy>,
-    /// Registry-side last-updated epoch seconds.
-    pub updated_at: i64,
-}
-
-impl HerdrPane {
-    fn join(pane: herdr_mcp_api::HerdrPane, handle: Option<AgentHandle>) -> Self {
-        let (role, output, trim_policy, updated_at) = handle.map_or_else(Default::default, |h| {
-            (h.role, h.output, h.trim_policy, h.updated_at)
-        });
-        Self {
-            pane_id: pane.pane_id,
-            workspace_id: pane.workspace_id,
-            tab_id: pane.tab_id,
-            label: pane.label.unwrap_or_default(),
-            agent: pane.agent,
-            status: pane.agent_status,
-            cwd: pane.cwd.unwrap_or_default(),
-            focused: pane.focused,
-            role,
-            output,
-            trim_policy,
-            updated_at,
-        }
-    }
+/// What the dashboard calls a pane: its herdr label, else its id.
+pub fn pane_name(p: &HerdrPane) -> &str {
+    p.label.as_deref().unwrap_or(&p.pane_id)
 }
 
 /// Right-click context-menu actions for editing fields / panes.
@@ -492,8 +447,9 @@ pub struct TrimState {
 
 /// Send tab state: what the user is typing and where it goes.
 pub struct SendState {
-    /// Selected row of `tabs::send::targets` (labeled panes first).
-    pub pane_index: usize,
+    /// The picked pane's id; `None` = the first of `tabs::send::targets`.
+    /// An id, not a row: the list re-sorts on every refresh.
+    pub pane: Option<String>,
     pub text: TextArea<'static>,
     /// Send with `run_command` (text + Enter) instead of `send_text`.
     pub enter: bool,
@@ -696,7 +652,7 @@ impl App {
                 focused_frame: 0,
             },
             send: SendState {
-                pane_index: 0,
+                pane: None,
                 text: TextArea::default(),
                 enter: true,
                 msg: String::new(),
@@ -983,25 +939,7 @@ impl App {
                 return;
             }
         };
-        let mut handles: std::collections::HashMap<String, AgentHandle> =
-            if self.herdr.session.is_none() {
-                match http.list_agents(None).await {
-                    Ok(agents) => agents.into_iter().map(|h| (h.pane_id.clone(), h)).collect(),
-                    Err(e) => {
-                        self.note_herdr_error(format!("list_agents failed: {e}"));
-                        Default::default()
-                    }
-                }
-            } else {
-                Default::default()
-            };
-        self.herdr.panes = panes
-            .into_iter()
-            .map(|p| {
-                let handle = handles.remove(&p.pane_id);
-                HerdrPane::join(p, handle)
-            })
-            .collect();
+        self.herdr.panes = panes;
     }
 
     fn note_herdr_error(&mut self, msg: String) {
@@ -1329,10 +1267,12 @@ impl App {
             self.status_msg = msg;
             return;
         }
-        let pane_id = match self.herdr.focused() {
-            Some(p) => p.pane_id.clone(),
-            None => {
-                self.status_msg = "no focused herdr pane".into();
+        // The Send tab's pane, not herdr's focused one: right-clicking the
+        // dashboard focuses the dashboard's own pane.
+        let pane_id = match tabs::send::target(self) {
+            Ok(p) => p.pane_id.clone(),
+            Err(msg) => {
+                self.status_msg = msg;
                 return;
             }
         };
@@ -2321,31 +2261,6 @@ mod tests {
             app.trim.direction,
             herdr_mcp_api::TrimDirection::None
         ));
-    }
-
-    #[test]
-    fn herdr_pane_joins_registry_by_pane() {
-        let pane: herdr_mcp_api::HerdrPane = serde_json::from_value(serde_json::json!({
-            "pane_id": "w123:p1", "workspace_id": "w123", "tab_id": "w123:t1",
-            "label": "test-pane", "agent": "hermes", "agent_status": "idle",
-            "focused": true, "cwd": "/w"
-        }))
-        .unwrap();
-        let handle: AgentHandle = serde_json::from_value(serde_json::json!({
-            "pane_id": "w123:p1", "workspace_id": "w123", "role": "reviewer",
-            "output": "done", "status": "working"
-        }))
-        .unwrap();
-        let joined = HerdrPane::join(pane.clone(), Some(handle));
-        assert_eq!(joined.label, "test-pane");
-        assert_eq!(joined.status, "idle", "herdr's status wins");
-        assert_eq!(joined.role, "reviewer");
-        assert_eq!(joined.output, "done");
-        assert!(joined.focused);
-        // A plain shell pane the registry doesn't know still shows.
-        let bare = HerdrPane::join(pane, None);
-        assert_eq!(bare.role, "");
-        assert_eq!(bare.tab_id, "w123:t1");
     }
 
     #[test]

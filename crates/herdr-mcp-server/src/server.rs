@@ -1874,13 +1874,17 @@ impl HerdrMcpServer {
                 entry.net_saved_bytes = entry.net_saved_bytes.saturating_add(ps.net_saved_bytes);
                 entry.messages_trimmed = entry.messages_trimmed.saturating_add(ps.messages_trimmed);
             }
-            for h in self.registry.list_for_ws(w).await {
-                if let Some(ref policy) = h.trim_policy
-                    && policy.is_active()
-                {
-                    resp.active_policies
-                        .insert(h.pane_id.clone(), policy.stages.clone());
-                }
+        }
+
+        // Policies live in the registry, not the stats files: a workspace
+        // that has trimmed nothing yet still shows its panes' policies.
+        let handles = match ws {
+            Some(w) => self.registry.list_for_ws(w).await,
+            None => self.registry.inner_snapshot().await,
+        };
+        for h in handles {
+            if let Some(policy) = h.trim_policy.filter(|p| p.is_active()) {
+                resp.active_policies.insert(h.pane_id, policy.stages);
             }
         }
 
@@ -2024,12 +2028,15 @@ impl HerdrMcpServer {
             ..Default::default()
         };
         let panes = crate::panes::panes(&filter).await?;
-        let target =
-            dashboard_split_target(&panes, workspace_id.is_some()).ok_or_else(|| McpError {
-                code: rmcp::model::ErrorCode(-32000),
-                message: "trim: no pane to split for the dashboard".into(),
-                data: None,
-            })?;
+        let target = dashboard_split_target(
+            &panes,
+            workspace_id.as_deref().is_some_and(|w| !w.is_empty()),
+        )
+        .ok_or_else(|| McpError {
+            code: rmcp::model::ErrorCode(-32000),
+            message: "trim: no pane to split for the dashboard".into(),
+            data: None,
+        })?;
         let raw = herdr_cli(&[
             "pane",
             "split",
@@ -3626,6 +3633,8 @@ async fn auto_variables_handler(
 
 /// Live panes (by pane id) with the registry handles (by pane id and role,
 /// from `AgentRegistry::seed`) laid over them, non-empty fields winning.
+/// Handles of panes herdr no longer lists are left out: the registry keeps
+/// them after a pane closes.
 fn pane_vars(
     mut panes: HashMap<String, serde_json::Value>,
     handles: HashMap<String, serde_json::Value>,
@@ -3633,10 +3642,9 @@ fn pane_vars(
     let mut merged = HashMap::new();
     for (key, handle) in handles {
         let pane_id = handle["pane_id"].as_str().unwrap_or_default();
-        let mut obj = panes
-            .get(pane_id)
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!({}));
+        let Some(mut obj) = panes.get(pane_id).cloned() else {
+            continue;
+        };
         if let (Some(obj), Some(fields)) = (obj.as_object_mut(), handle.as_object()) {
             for (k, v) in fields {
                 if v.as_str() != Some("") {
@@ -3781,9 +3789,12 @@ mod tests {
             ("w1:p2".to_string(), json!({"pane_id": "w1:p2"})),
         ]);
         let handle = json!({"pane_id": "w1:p1", "role": "builder", "agent": "", "output": "ok"});
+        let closed = json!({"pane_id": "w1:p9", "role": "gone", "tab_id": "w1:t9"});
         let handles = HashMap::from([
             ("w1:p1".to_string(), handle.clone()),
             ("builder".to_string(), handle),
+            ("w1:p9".to_string(), closed.clone()),
+            ("gone".to_string(), closed),
         ]);
         let vars = pane_vars(panes, handles);
         let want = json!({
@@ -4600,5 +4611,32 @@ esac
             .await
             .unwrap();
         assert_eq!(page, "<html>ui</html>");
+    }
+
+    #[tokio::test]
+    async fn trim_status_lists_policies_without_stats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let registry = AgentRegistry::new(std::sync::Arc::new(Persistence::new(data_dir.clone())));
+        registry.upsert("w9:p1", "w9", "w9:t1", "claude", "").await;
+        let policy = herdr_mcp_api::TrimPolicy {
+            stages: vec!["caveman".into()],
+            direction: herdr_mcp_api::TrimDirection::Outbound,
+        };
+        registry.set_trim_policy("w9:p1", Some(policy)).await;
+        let server = HerdrMcpServer::new(Persistence::new(data_dir), registry);
+
+        // w9 has no trim_stats.json: its policy still shows, as in the count.
+        for ws in [None, Some("w9")] {
+            let resp = server.aggregate_trim_status(ws).await;
+            assert_eq!(resp.active_policies["w9:p1"], ["caveman"], "{ws:?}");
+        }
+        assert!(
+            server
+                .aggregate_trim_status(Some("w1"))
+                .await
+                .active_policies
+                .is_empty()
+        );
     }
 }

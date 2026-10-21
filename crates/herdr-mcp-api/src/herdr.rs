@@ -68,7 +68,7 @@ impl RecipeTrigger {
 
 /// One pane as herdr's `pane list` reports it. herdr owns this data; the
 /// bridge only relays it (fields herdr adds later are ignored).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct HerdrPane {
     pub pane_id: String,
     pub workspace_id: String,
@@ -144,6 +144,9 @@ impl PaneFilter {
             && eq(&self.agent_status, &pane.agent_status)
             && self.focused.is_none_or(|f| f == pane.focused)
             && self.label.as_deref().is_none_or(|want| {
+                if want.is_empty() {
+                    return true;
+                }
                 let want = want.to_lowercase();
                 [&pane.label, &pane.agent]
                     .into_iter()
@@ -187,6 +190,11 @@ mod tests {
         );
         assert!(f(json!({"label": "review"})).matches(&pane));
         assert!(f(json!({"label": "HERM"})).matches(&pane));
+        let shell = HerdrPane {
+            pane_id: "w1:p3".into(),
+            ..Default::default()
+        };
+        assert!(f(json!({"label": ""})).matches(&shell));
         assert!(!f(json!({"agent_status": "working"})).matches(&pane));
         assert!(!f(json!({"focused": false})).matches(&pane));
         assert!(!f(json!({"workspace_id": "w2"})).matches(&pane));

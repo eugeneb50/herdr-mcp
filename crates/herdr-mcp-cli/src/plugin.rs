@@ -195,7 +195,7 @@ pub async fn run(cmd: PluginCommand, config: &herdr_mcp_core::Config) -> Result<
             print!("{}", toml::to_string(&manifest())?);
             Ok(())
         }
-        PluginCommand::Startup => startup(port()?).await,
+        PluginCommand::Startup => startup(port()?, &config.data_dir).await,
         PluginCommand::Open { pane } => open_pane(&pane),
         PluginCommand::Recipes => {
             let result = match port() {
@@ -216,7 +216,14 @@ pub async fn run(cmd: PluginCommand, config: &herdr_mcp_core::Config) -> Result<
 /// schedules and triggers) up with herdr, unless one already serves the port.
 /// A server with no workspace yet has nowhere to put the tab; the first
 /// `workspace.created` opens it then.
-async fn startup(port: u16) -> Result<()> {
+///
+/// Hooks fire together (startup plus one `workspace.created` per restored
+/// workspace), so each holds `<data_dir>/bridge-open.lock` from the probe
+/// until the bridge it opened answers: the next one then finds it running.
+async fn startup(port: u16, data_dir: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(data_dir)?;
+    let lock = std::fs::File::create(data_dir.join("bridge-open.lock"))?;
+    lock.lock()?;
     if bridge(port).await.is_some() {
         return Ok(());
     }
@@ -225,6 +232,12 @@ async fn startup(port: u16) -> Result<()> {
     let reply = [out.stdout, out.stderr].concat();
     let reply = String::from_utf8_lossy(&reply);
     if out.status.success() {
+        for _ in 0..60 {
+            if bridge(port).await.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
         Ok(())
     } else if reply.contains("no_active_workspace") {
         println!("no workspace yet: the bridge opens with the first one");

@@ -30,6 +30,17 @@ MCP (Model Context Protocol) server written in Rust that exposes [herdr](https:/
 
 ## Quick start
 
+macOS or Linux, from the latest release (installs `herdr-mcp` and `herdr-trim`
+in `~/.local/bin`; `HERDR_MCP_INSTALL_DIR` picks another directory). Linux
+builds are static (musl), so they run on any distro:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eugeneb50/herdr-mcp/main/scripts/install.sh | sh
+herdr-mcp
+```
+
+Or from source:
+
 ```bash
 cargo build --release
 ./target/release/herdr-mcp
@@ -283,7 +294,9 @@ plugin's `bin/`. Port and data
 dir come from herdr-mcp's config when each command runs; with no `data_dir`
 configured the plugin keeps its state in herdr's state dir for the plugin. Set
 `data_dir` in `~/.config/herdr-mcp/config.toml` to share one store with the
-`herdr-mcp` your MCP clients run.
+`herdr-mcp` your MCP clients run. Of the processes sharing a data dir, one
+(the holder of `daemon.lock`) fires schedules and triggers, against its own
+herdr session: give each herdr session that uses them its own data dir.
 
 When herdr starts (or creates the first workspace, on a fresh server), the
 plugin opens the bridge in a tab unless a bridge already answers on
@@ -407,7 +420,6 @@ watched and `idle` when it was.
 | `HERDR_MCP_HTTP_ONLY` | — | Set to disable MCP stdio |
 | `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
 | `HERDR_MCP_WEB_DIR` | the web UI built into the binary | Serve a `dx bundle` directory from disk instead |
-| `HERDR_MCP_CLIPBOARD_COPY` / `_PASTE` | built-in | Clipboard commands (both set: used instead of the OS clipboard) |
 
 Socket resolution: `--herdr-socket` > `HERDR_SOCKET_PATH` > config file >
 `HERDR_SESSION` > `~/.config/herdr/herdr.sock`. The resolved socket is passed to
