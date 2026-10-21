@@ -31,7 +31,8 @@ MCP (Model Context Protocol) server written in Rust that exposes [herdr](https:/
 ## Quick start
 
 macOS or Linux, from the latest release (installs `herdr-mcp` and `herdr-trim`
-in `~/.local/bin`; `HERDR_MCP_INSTALL_DIR` picks another directory):
+in `~/.local/bin`; `HERDR_MCP_INSTALL_DIR` picks another directory). Linux
+builds are static (musl), so they run on any distro:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eugeneb50/herdr-mcp/main/scripts/install.sh | sh

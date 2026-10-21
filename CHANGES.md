@@ -6,7 +6,8 @@ and a built-in OS clipboard. Breaking changes are marked **(breaking)**.
 - **One-line install.** `curl -fsSL
   https://raw.githubusercontent.com/eugeneb50/herdr-mcp/main/scripts/install.sh | sh`
   installs `herdr-mcp` and `herdr-trim` from the latest GitHub release (macOS
-  and Linux, x86_64 and arm64). A `v*` tag builds and attaches those archives
+  and Linux, x86_64 and arm64; Linux builds are static musl, so any distro).
+  A `v*` tag builds and attaches those archives
   (`.github/workflows/release.yml`).
 - **One-file deployment.** The web UI is built into `herdr-mcp`: its build
   compiles the `dx bundle` output in, so the binary alone serves the
