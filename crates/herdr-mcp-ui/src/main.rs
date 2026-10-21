@@ -5,6 +5,7 @@
 
 mod client;
 mod components;
+mod local;
 mod vars;
 
 use components::Route;

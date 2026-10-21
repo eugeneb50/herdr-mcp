@@ -231,6 +231,26 @@ impl ApiClient {
         tool_ok(&v).map(tool_text)
     }
 
+    /// `read_pane` tool — a pane's text from `source` (`visible`, `recent`
+    /// or `recent-unwrapped`), in `session` or this bridge's own.
+    pub async fn read_pane(
+        &self,
+        pane_id: &str,
+        session: Option<&str>,
+        source: &str,
+        lines: Option<u32>,
+    ) -> Result<String, ApiError> {
+        let v = self
+            .call_tool(
+                "read_pane",
+                &serde_json::json!({
+                    "pane_id": pane_id, "session": session, "source": source, "lines": lines
+                }),
+            )
+            .await?;
+        tool_ok(&v).map(tool_text)
+    }
+
     /// `trim_policy_get` tool for a pane id / role / label.
     pub async fn trim_policy_get(&self, target: &str) -> Result<Value, ApiError> {
         self.call_tool("trim_policy_get", &serde_json::json!({ "target": target }))
