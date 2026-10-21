@@ -1,0 +1,63 @@
+# On a v* tag: build herdr-mcp (web UI built in) and herdr-trim per target and
+# attach herdr-mcp-<target>.tar.gz (+ .sha256) to the tag's GitHub release —
+# the files scripts/install.sh downloads.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-latest, target: x86_64-apple-darwin }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain
+        run: rustup target add wasm32-unknown-unknown ${{ matrix.target }}
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Dioxus CLI (matches the dioxus in Cargo.lock)
+        run: cargo binstall --no-confirm --locked dioxus-cli@0.7.10
+      - name: Web UI bundle (compiled into herdr-mcp)
+        working-directory: crates/herdr-mcp-ui
+        run: dx bundle --platform web --release
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p herdr-mcp-cli --bin herdr-mcp --bin herdr-trim
+      - name: Package
+        shell: bash
+        run: |
+          name=herdr-mcp-${{ matrix.target }}
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/herdr-mcp target/${{ matrix.target }}/release/herdr-trim "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: herdr-mcp-${{ matrix.target }}.tar.gz*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" --notes "See CHANGES.md." \
+            || gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
