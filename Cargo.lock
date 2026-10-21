@@ -1917,7 +1917,6 @@ dependencies = [
  "herdr-mcp-api",
  "herdr-mcp-core",
  "herdr-mcp-server",
- "herdr-mcp-trim",
  "herdr-mcp-tui",
  "predicates",
  "rmcp",
@@ -1957,7 +1956,6 @@ dependencies = [
  "futures-util",
  "herdr-mcp-api",
  "herdr-mcp-core",
- "herdr-mcp-trim",
  "pretty_assertions",
  "regex",
  "reqwest",
@@ -1970,23 +1968,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "herdr-mcp-trim"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "chrono",
- "herdr-mcp-api",
- "lazy_static",
- "pretty_assertions",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "walkdir",
 ]
 
 [[package]]

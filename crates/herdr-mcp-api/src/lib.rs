@@ -1,8 +1,8 @@
 //! herdr-mcp-api — the wire contract of the herdr-mcp HTTP bridge (`/api/*`).
 //!
 //! Single source of truth for every type that crosses the bridge. The server
-//! (`herdr-mcp-server`) and trim (`herdr-mcp-trim`) crates re-export these instead of defining their own; the web UI and the
-//! TUI talk to the bridge through [`ApiClient`].
+//! (`herdr-mcp-server`) re-exports these instead of defining its own; the web
+//! UI and the TUI talk to the bridge through [`ApiClient`].
 //!
 //! Leaf crate: compiles for native and `wasm32-unknown-unknown`.
 
@@ -13,10 +13,9 @@ pub mod herdr;
 pub mod profile;
 pub mod recipe;
 pub mod run;
-pub mod trim;
 pub mod variables;
 
-pub use agents::{AgentHandle, AgentsResponse, TrimDirection, TrimPolicy};
+pub use agents::{AgentHandle, AgentsResponse};
 pub use client::{ApiClient, ApiError, schema_type, tool_is_error, tool_payload, tool_text};
 pub use config::{ClipboardConfig, ConfigResponse};
 pub use herdr::{
@@ -28,7 +27,6 @@ pub use recipe::{
     TemplateVariable, UpdateRecipeRequest,
 };
 pub use run::{RunAction, RunEvent, RunEventKind, RunRecord, RunStatus, StartRunRequest};
-pub use trim::{DiagnoseReport, PaneStatus, SampleRoundtrip, TrimStatusResponse};
 /// Re-exported so clients name recipe/execution ids without their own uuid dep.
 pub use uuid::Uuid;
 pub use variables::{

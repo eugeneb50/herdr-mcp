@@ -4,5 +4,4 @@ pub mod overview;
 pub mod playground;
 pub mod send;
 pub mod settings;
-pub mod trim;
 pub mod variables;

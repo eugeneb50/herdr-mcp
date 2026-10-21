@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/herdr-mcp-api",
     "crates/herdr-mcp-core",
-    "crates/herdr-mcp-trim",
     "crates/herdr-mcp-tui",
     "crates/herdr-mcp-server",
     "crates/herdr-mcp-cli",
@@ -27,12 +26,10 @@ clap = { version = "4", features = ["derive"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["fs"] }
 regex = "1"
-walkdir = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 cron = "0.12"
 dashmap = "6"
-lazy_static = "1"
 crossterm = "0.29"
 ratatui = "0.30"
 unicode-width = "0.2"

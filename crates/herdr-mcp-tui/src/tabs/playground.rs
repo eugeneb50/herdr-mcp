@@ -1145,8 +1145,8 @@ fn render_tool_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         let msg = vec![
             Line::from("Not connected to herdr-mcp bridge."),
             Line::from(""),
-            Line::from("Start `herdr-mcp serve` (or run"),
-            Line::from("`herdr-trim dashboard --http-port <port>`)."),
+            Line::from("It runs in this process: check herdr-mcp.log"),
+            Line::from("in the data dir for why it did not start."),
             Line::from(""),
             Line::from(format!("Waiting for a bridge on :{} …", app.opts.http_port)),
         ];

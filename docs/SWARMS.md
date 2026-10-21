@@ -165,11 +165,6 @@ the fold of its events (no separate message table). While **held** (operator
 pause on a link, an agent, or the whole run) a message can be edited, dropped
 or released. Operators can **inject** messages as a pseudo-agent `operator`.
 
-### 5.4 Trim
-
-The existing outbound trim policy (`apply_outbound_trim`, pfc1/caveman) is
-applied at delivery, so the lossless a2a contract is unchanged.
-
 ## 6. Flows (recipes, evolved)
 
 `Recipe` gains a graph; existing linear recipes and templates load as a

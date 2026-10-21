@@ -20,7 +20,6 @@ use tokio::sync::{RwLock, broadcast};
 
 use crate::persistence::Persistence;
 use herdr_mcp_api::HerdrEvent;
-use herdr_mcp_trim::policy::TrimPolicy;
 
 /// Agent lifecycle state, mirroring herdr's `AgentStatus` (snake_case).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,11 +73,6 @@ impl AgentRegistry {
         }
     }
 
-    /// Data directory backing persistence (stats, blobs, recipes).
-    pub fn data_dir(&self) -> &std::path::Path {
-        self.persistence.data_dir()
-    }
-
     /// Register or update an agent handle at the given pane, preserving any
     /// previously captured output/role.
     pub async fn upsert(
@@ -100,7 +94,6 @@ impl AgentRegistry {
             label: String::new(),
             status: String::new(),
             output: String::new(),
-            trim_policy: None,
             updated_at: now,
         });
         handle.pane_id = pane_id.to_string();
@@ -144,30 +137,6 @@ impl AgentRegistry {
 
     pub async fn get(&self, pane_id: &str) -> Option<AgentHandle> {
         self.inner.read().await.get(pane_id).cloned()
-    }
-
-    /// Set (or clear, with `None`) the trim policy for a pane. Persisted.
-    pub async fn set_trim_policy(&self, pane_id: &str, policy: Option<TrimPolicy>) {
-        let ws = {
-            let mut map = self.inner.write().await;
-            if let Some(h) = map.get_mut(pane_id) {
-                h.trim_policy = policy;
-                h.updated_at = chrono::Utc::now().timestamp();
-                h.workspace_id.clone()
-            } else {
-                return;
-            }
-        };
-        self.persist(&ws).await;
-    }
-
-    /// Read the trim policy for a pane, if any.
-    pub async fn get_trim_policy(&self, pane_id: &str) -> Option<TrimPolicy> {
-        self.inner
-            .read()
-            .await
-            .get(pane_id)
-            .and_then(|h| h.trim_policy.clone())
     }
 
     /// Set (or clear) the pane label. Persisted.
@@ -582,48 +551,26 @@ impl HerdrClient {
     }
 
     async fn handle_event(&self, event: HerdrEvent) {
-        match event.event.as_str() {
-            "pane.agent_status_changed" => {
-                let Ok(data) = serde_json::from_value::<StatusData>(event.data) else {
-                    return;
-                };
-                let agent = data.agent.unwrap_or_default();
-                self.registry
-                    .upsert(&data.pane_id, &data.workspace_id, "", &agent, "")
-                    .await;
-                if let Some(status) = AgentStatus::parse(&data.agent_status) {
-                    self.registry
-                        .set_status(&data.pane_id, status.as_str())
-                        .await;
-                    if status == AgentStatus::Idle {
-                        // Capture the work product: pane output at idle.
-                        if let Ok(out) = read_pane_output(&data.pane_id).await {
-                            self.registry.set_output(&data.pane_id, out).await;
-                        }
-                    }
+        if event.event != "pane.agent_status_changed" {
+            return;
+        }
+        let Ok(data) = serde_json::from_value::<StatusData>(event.data) else {
+            return;
+        };
+        let agent = data.agent.unwrap_or_default();
+        self.registry
+            .upsert(&data.pane_id, &data.workspace_id, "", &agent, "")
+            .await;
+        if let Some(status) = AgentStatus::parse(&data.agent_status) {
+            self.registry
+                .set_status(&data.pane_id, status.as_str())
+                .await;
+            if status == AgentStatus::Idle {
+                // Capture the work product: pane output at idle.
+                if let Ok(out) = read_pane_output(&data.pane_id).await {
+                    self.registry.set_output(&data.pane_id, out).await;
                 }
             }
-            "workspace.closed" => {
-                let Some(ws) = event.workspace_id().map(str::to_string) else {
-                    return;
-                };
-                // Summarize the session's trim savings.
-                let s = herdr_mcp_trim::stats::load_stats(self.registry.data_dir(), &ws).await;
-                if s.messages_trimmed > 0 {
-                    let body = format!(
-                        "Workspace {ws} closed — trim saved {:.1}% net ({} messages, {} bytes net).",
-                        s.savings_pct(),
-                        s.messages_trimmed,
-                        s.net_saved_bytes
-                    );
-                    let binary = herdr_mcp_core::herdr_bin();
-                    let _ = tokio::process::Command::new(binary)
-                        .args(["notification", "show", "herdr-mcp trim", "--body", &body])
-                        .output()
-                        .await;
-                }
-            }
-            _ => {}
         }
     }
 }
@@ -678,7 +625,6 @@ async fn read_pane_output(pane_id: &str) -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use herdr_mcp_trim::policy::TrimDirection;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -784,19 +730,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_set_trim_policy_get() {
-        let reg = make_registry();
-        reg.upsert("p1", "w1", "", "claude", "").await;
-        let policy = TrimPolicy {
-            stages: vec!["caveman:full".into(), "pfc1".into()],
-            direction: TrimDirection::OutboundWithAck,
-        };
-        reg.set_trim_policy("p1", Some(policy.clone())).await;
-        let got = reg.get_trim_policy("p1").await.unwrap();
-        assert_eq!(got, policy);
-    }
-
-    #[tokio::test]
     async fn test_set_label() {
         let reg = make_registry();
         reg.upsert("p1", "w1", "", "claude", "").await;
@@ -841,25 +774,5 @@ mod tests {
         let h = reg.get("p1").await.unwrap();
         assert_eq!(h.agent, "gpt");
         assert_eq!(h.role, "agentB");
-    }
-
-    #[tokio::test]
-    async fn test_get_trim_policy_none_when_unset() {
-        let reg = make_registry();
-        reg.upsert("p1", "w1", "", "claude", "").await;
-        assert!(reg.get_trim_policy("p1").await.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_clear_trim_policy() {
-        let reg = make_registry();
-        reg.upsert("p1", "w1", "", "claude", "").await;
-        let policy = TrimPolicy {
-            stages: vec!["pfc1".into()],
-            direction: TrimDirection::Outbound,
-        };
-        reg.set_trim_policy("p1", Some(policy)).await;
-        reg.set_trim_policy("p1", None).await;
-        assert!(reg.get_trim_policy("p1").await.is_none());
     }
 }

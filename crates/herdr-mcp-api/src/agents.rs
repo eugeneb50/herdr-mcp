@@ -1,40 +1,6 @@
-//! Agent registry wire types and the per-pane policies stored on them.
+//! Agent registry wire types.
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-
-/// When to apply a trim policy to an agent's traffic.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum TrimDirection {
-    /// No transform (default).
-    #[default]
-    None,
-    /// Compress outbound text before it crosses the pane boundary.
-    Outbound,
-    /// Compress outbound; auto-detect + decompress on the next `agent_read`.
-    OutboundWithAck,
-}
-
-/// A trim policy: an ordered stage list plus a direction.
-///
-/// Stage parsing lives in `herdr_mcp_trim::policy::TrimPolicyExt` (it needs
-/// the pipeline); this crate only carries the data.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct TrimPolicy {
-    /// Ordered stage list, e.g. `["caveman:ultra", "pfc1"]`.
-    pub stages: Vec<String>,
-    /// When to apply (default `None` = off).
-    pub direction: TrimDirection,
-}
-
-impl TrimPolicy {
-    /// True when this policy should transform outbound text.
-    pub fn is_active(&self) -> bool {
-        !self.stages.is_empty() && self.direction != TrimDirection::None
-    }
-}
 
 /// A registered agent: its pane address plus the last captured work product.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,10 +22,6 @@ pub struct AgentHandle {
     /// Pane output captured at last idle — the agent's work product.
     #[serde(default)]
     pub output: String,
-    /// Optional message-trim policy (default off). Persisted as part of the
-    /// agent blob, so recipes can opt a pane into compression.
-    #[serde(default)]
-    pub trim_policy: Option<TrimPolicy>,
     #[serde(default)]
     pub updated_at: i64,
 }

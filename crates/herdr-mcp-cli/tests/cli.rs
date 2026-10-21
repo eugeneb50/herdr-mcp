@@ -1,211 +1,38 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::io::Write;
 
-fn daemon() -> Command {
+fn bin() -> Command {
     Command::cargo_bin("herdr-mcp").unwrap()
 }
 
-fn tools() -> Command {
-    Command::cargo_bin("herdr-trim").unwrap()
-}
-
 #[test]
-fn cli_daemon_help_lists_serve_only() {
-    daemon()
+fn cli_help_lists_modes_and_plugin() {
+    bin()
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("serve"))
-        .stdout(predicate::str::contains("trim").not())
-        .stdout(predicate::str::contains("folder-key").not())
-        .stdout(predicate::str::contains("dashboard").not());
+        .stdout(predicate::str::contains("--no-tui"))
+        .stdout(predicate::str::contains("--http-only"))
+        .stdout(predicate::str::contains("plugin"));
 }
 
 #[test]
-fn cli_tools_help_lists_trim_dashboard_folder_key() {
-    tools()
-        .arg("--help")
+fn cli_version_prints_version() {
+    bin()
+        .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::contains("trim"))
-        .stdout(predicate::str::contains("folder-key"))
-        .stdout(predicate::str::contains("dashboard"))
-        .stdout(predicate::str::contains("serve").not());
+        .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
 #[test]
-fn cli_versions_print_version() {
-    for bin in ["herdr-mcp", "herdr-trim"] {
-        Command::cargo_bin(bin)
-            .unwrap()
-            .arg("--version")
-            .assert()
-            .success()
-            .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
+fn cli_rejects_removed_subcommands() {
+    // `serve` became the default (flags at the top level); the trim tools
+    // and the separate dashboard binary are gone.
+    for sub in ["serve", "trim", "dashboard", "folder-key"] {
+        bin().arg(sub).assert().failure().stderr(
+            predicate::str::contains("unexpected argument")
+                .or(predicate::str::contains("unrecognized subcommand")),
+        );
     }
-}
-
-#[test]
-fn cli_daemon_rejects_moved_subcommands() {
-    // Hard break per spec: local tools moved to herdr-trim.
-    daemon()
-        .args(["trim", "hello"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("unrecognized subcommand"));
-}
-
-#[test]
-fn cli_trim_decompress_is_identity() {
-    tools()
-        .args(["trim", "--decompress", "hello world"])
-        .assert()
-        .success()
-        .stdout("hello world");
-}
-
-#[test]
-fn cli_trim_pfc1_emits_report() {
-    let data = tempfile::tempdir().unwrap();
-    tools()
-        .args([
-            "trim",
-            "--stage",
-            "pfc1",
-            "--data-dir",
-            data.path().to_str().unwrap(),
-            "the configuration gateway profile session database connection",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("input_bytes"))
-        .stdout(predicate::str::contains("output_bytes"));
-}
-
-#[test]
-fn cli_trim_caveman_emits_report() {
-    let data = tempfile::tempdir().unwrap();
-    tools()
-        .args([
-            "trim",
-            "--stage",
-            "caveman:full",
-            "--data-dir",
-            data.path().to_str().unwrap(),
-            "the quick brown fox jumps over the lazy dog",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("output"));
-}
-
-#[test]
-fn cli_trim_invalid_stage_fails() {
-    let data = tempfile::tempdir().unwrap();
-    tools()
-        .args([
-            "trim",
-            "--stage",
-            "bogus",
-            "--data-dir",
-            data.path().to_str().unwrap(),
-            "some input",
-        ])
-        .assert()
-        .failure();
-}
-
-#[test]
-fn cli_folder_key_list_empty() {
-    let data = tempfile::tempdir().unwrap();
-    tools()
-        .args([
-            "folder-key",
-            "list",
-            "--data-dir",
-            data.path().to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("folder key(s)"));
-}
-
-#[test]
-fn cli_folder_key_build_then_show() {
-    let data = tempfile::tempdir().unwrap();
-    let folder = tempfile::tempdir().unwrap();
-    let doc = folder.path().join("docs.md");
-    let mut f = std::fs::File::create(&doc).unwrap();
-    writeln!(
-        f,
-        "configuration gateway profile session configuration gateway profile session"
-    )
-    .unwrap();
-    drop(f);
-
-    tools()
-        .args([
-            "folder-key",
-            "build",
-            folder.path().to_str().unwrap(),
-            "--data-dir",
-            data.path().to_str().unwrap(),
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Built key"));
-
-    tools()
-        .args(["folder-key", "show", folder.path().to_str().unwrap()])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("key"));
-}
-
-#[test]
-fn cli_folder_key_decompress_runs() {
-    let data = tempfile::tempdir().unwrap();
-    let folder = tempfile::tempdir().unwrap();
-    let doc = folder.path().join("docs.md");
-    let mut f = std::fs::File::create(&doc).unwrap();
-    writeln!(f, "configuration gateway profile session").unwrap();
-    drop(f);
-
-    tools()
-        .args([
-            "folder-key",
-            "build",
-            folder.path().to_str().unwrap(),
-            "--data-dir",
-            data.path().to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-
-    tools()
-        .args([
-            "folder-key",
-            "decompress",
-            folder.path().to_str().unwrap(),
-            "hello world",
-        ])
-        .assert()
-        .success();
-}
-
-#[test]
-fn cli_trim_missing_input_fails() {
-    let data = tempfile::tempdir().unwrap();
-    tools()
-        .args([
-            "trim",
-            "--stage",
-            "pfc1",
-            "--data-dir",
-            data.path().to_str().unwrap(),
-            "",
-        ])
-        .assert()
-        .failure();
 }

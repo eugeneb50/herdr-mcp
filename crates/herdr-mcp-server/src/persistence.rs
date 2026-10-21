@@ -43,7 +43,7 @@ impl Persistence {
         Self { data_dir }
     }
 
-    /// The configured data directory (used by the trim layer for PFC1 memory).
+    /// The configured data directory.
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
     }

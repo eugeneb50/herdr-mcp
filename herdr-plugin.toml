@@ -51,10 +51,10 @@ command = ["./bin/herdr-mcp", "plugin", "recipes"]
 id = "bridge"
 title = "herdr-mcp bridge"
 placement = "tab"
-command = ["./bin/herdr-mcp", "serve", "--http-only"]
+command = ["./bin/herdr-mcp", "--http-only"]
 
 [[panes]]
 id = "dashboard"
 title = "herdr-mcp dashboard"
 placement = "split"
-command = ["./bin/herdr-trim", "dashboard"]
+command = ["./bin/herdr-mcp"]

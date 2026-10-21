@@ -2,7 +2,7 @@
 //!
 //! VS Code-style tabbed interface running directly in a terminal (and a herdr
 //! pane). Supports mouse + keyboard navigation. Tabs: Overview, Playground
-//! (tool runner + recipe builder), Trim, Variables, Settings.
+//! (tool runner + recipe builder), Variables, Settings.
 //!
 //! Rendered with `ratatui` (Frame/Block/Layout widgets) over a crossterm
 //! backend, following the patterns used by the sibling `herdr` and `zerocode`
@@ -58,8 +58,7 @@ fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
 }
 
 use herdr_mcp_api::{
-    ApiClient, ConfigResponse, HerdrPane, PlaygroundSnapshot, Recipe, RecipeTemplate,
-    TrimStatusResponse, VariableStore,
+    ApiClient, ConfigResponse, HerdrPane, PlaygroundSnapshot, Recipe, RecipeTemplate, VariableStore,
 };
 use theme::{accent_style, dim_style, muted_style, title_style};
 
@@ -69,17 +68,15 @@ pub enum Tab {
     Send,
     Overview,
     Playground,
-    Trim,
     Variables,
     Settings,
 }
 
 impl Tab {
-    const ALL: [Tab; 6] = [
+    const ALL: [Tab; 5] = [
         Tab::Send,
         Tab::Overview,
         Tab::Playground,
-        Tab::Trim,
         Tab::Variables,
         Tab::Settings,
     ];
@@ -89,7 +86,6 @@ impl Tab {
             Tab::Send => "Send",
             Tab::Overview => "Overview",
             Tab::Playground => "Playground",
-            Tab::Trim => "Trim",
             Tab::Variables => "Variables",
             Tab::Settings => "Settings",
         }
@@ -100,9 +96,8 @@ impl Tab {
             Tab::Send => "1",
             Tab::Overview => "2",
             Tab::Playground => "3",
-            Tab::Trim => "4",
-            Tab::Variables => "5",
-            Tab::Settings => "6",
+            Tab::Variables => "4",
+            Tab::Settings => "5",
         }
     }
 }
@@ -143,7 +138,7 @@ pub struct HerdrContext {
     /// Every named herdr session (`GET /api/herdr/sessions`).
     pub sessions: Vec<herdr_mcp_api::HerdrSession>,
     /// Session shown, by name; `None` = the bridge's own (`current`). Only
-    /// that one is written to (paste-to-pane, trim policies).
+    /// that one is written to (paste-to-pane).
     pub session: Option<String>,
     /// The shown session's panes, in herdr's order.
     pub panes: Vec<HerdrPane>,
@@ -274,7 +269,6 @@ pub struct App {
     pub last_refresh: Instant,
     /// last-fetched bridge snapshots (refreshed on every tick)
     pub tools: Option<Vec<Value>>,
-    pub trim_status: Option<TrimStatusResponse>,
     pub recipes: Option<Vec<Recipe>>,
     pub templates: Option<Vec<RecipeTemplate>>,
     /// Bridge runtime config (`GET /api/config`); fetched once per connection
@@ -282,8 +276,6 @@ pub struct App {
     pub config: Option<ConfigResponse>,
     /// playground sub-state
     pub playground: PlaygroundState,
-    /// trim sub-state
-    pub trim: TrimState,
     /// overview sub-state
     pub send: SendState,
     pub overview: OverviewState,
@@ -422,27 +414,6 @@ pub enum BuilderLibraryTab {
 pub enum PlaygroundSub {
     Runner,
     Builder,
-}
-
-/// Trim tab state.
-pub struct TrimState {
-    pub diagnose: Option<herdr_mcp_api::DiagnoseReport>,
-    /// Selected pane in the trim settings pane list.
-    pub pane_index: usize,
-    /// Selected stage in the pipeline stage list.
-    pub stage_index: usize,
-    /// Current editing stages (local copy before Apply).
-    pub stages: Vec<String>,
-    /// Current editing direction (local copy before Apply).
-    pub direction: herdr_mcp_api::TrimDirection,
-    /// Whether the stage picker overlay is open.
-    pub stage_picker_open: bool,
-    /// Selected item in the stage picker overlay.
-    pub stage_picker_index: usize,
-    /// Last operation result message.
-    pub policy_msg: String,
-    /// Which frame has keyboard focus (0=dashboard, 1=pane list, 2=stage list).
-    pub focused_frame: usize,
 }
 
 /// Send tab state: what the user is typing and where it goes.
@@ -601,7 +572,6 @@ impl App {
             status_msg: String::new(),
             last_refresh: Instant::now(),
             tools: None,
-            trim_status: None,
             recipes: None,
             templates: None,
             config: None,
@@ -639,17 +609,6 @@ impl App {
                 builder_editing_param: false,
                 builder_param_edit_area: TextArea::default(),
                 builder_open_step: None,
-            },
-            trim: TrimState {
-                diagnose: None,
-                pane_index: 0,
-                stage_index: 0,
-                stages: Vec::new(),
-                direction: herdr_mcp_api::TrimDirection::None,
-                stage_picker_open: false,
-                stage_picker_index: 0,
-                policy_msg: String::new(),
-                focused_frame: 0,
             },
             send: SendState {
                 pane: None,
@@ -739,7 +698,7 @@ impl App {
             } else {
                 self.bridge_connected = false;
                 self.status_msg = format!(
-                    "bridge unreachable at :{} — start `herdr-mcp serve`",
+                    "bridge unreachable at :{} — see herdr-mcp.log in the data dir",
                     self.opts.http_port
                 );
             }
@@ -755,9 +714,6 @@ impl App {
                 self.playground.tools_list = parse_tool_list(&v);
             } else {
                 ok = false;
-            }
-            if let Ok(v) = http.trim_status(None).await {
-                self.trim_status = Some(v);
             }
             if let Ok(v) = http.list_variables().await {
                 self.variables_state.entries = parse_variables(&v);
@@ -906,7 +862,7 @@ impl App {
 
     /// Refresh sessions and the shown session's panes. herdr's pane list is
     /// what exists; the registry (`GET /api/agents`, this server's session
-    /// only) adds role, output and trim policy by pane id.
+    /// only) adds role and output by pane id.
     async fn refresh_herdr(&mut self) {
         self.herdr.last_error = None;
         let Some(http) = self.http.clone() else {
@@ -1051,13 +1007,6 @@ impl App {
             Tab::Overview => {
                 let pane = self.herdr.panes.get(self.overview.pane_index)?;
                 Some(pane.pane_id.clone())
-            }
-            Tab::Trim if self.trim.focused_frame == 1 => {
-                let pane = self.herdr.panes.get(self.trim.pane_index)?;
-                Some(pane.pane_id.clone())
-            }
-            Tab::Trim if self.trim.focused_frame == 2 => {
-                self.trim.stages.get(self.trim.stage_index).cloned()
             }
             Tab::Variables if !self.variables_state.editing => self
                 .variables_state
@@ -1537,7 +1486,6 @@ fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         Tab::Send => tabs::send::render(frame, area, app),
         Tab::Overview => tabs::overview::render(frame, area, app),
         Tab::Playground => tabs::playground::render(frame, area, app),
-        Tab::Trim => tabs::trim::render(frame, area, app),
         Tab::Variables => tabs::variables::render(frame, area, app),
         _ => {}
     }
@@ -1545,7 +1493,7 @@ fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
 /// Footer with status message + keybindings.
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let bindings = "Ctrl+1-6:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
+    let bindings = "Ctrl+1-5:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
     let mut line = Line::from(vec![Span::styled(bindings, dim_style())]);
     if !app.status_msg.is_empty() {
         line = Line::from(vec![
@@ -1574,7 +1522,6 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
         Tab::Playground => tabs::playground::handle_key(app, code, mods).await?,
         Tab::Variables => tabs::variables::handle_key(app, code, mods).await?,
         Tab::Settings => tabs::settings::handle_key(app, code, mods).await?,
-        Tab::Trim => tabs::trim::handle_key(app, code, mods).await?,
     };
     if consumed {
         return Ok(());
@@ -1609,7 +1556,7 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
             app.refresh().await;
             app.status_msg = "refreshed".to_string();
         }
-        KeyCode::Char(c @ '1'..='6') if mods.contains(KeyModifiers::CONTROL) => {
+        KeyCode::Char(c @ '1'..='5') if mods.contains(KeyModifiers::CONTROL) => {
             let idx = (c as u8 - b'1') as usize;
             if let Some(t) = Tab::ALL.get(idx).copied() {
                 app.tab = t;
@@ -1848,18 +1795,6 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
             Tab::Overview if app.overview.pane_index + 1 < app.herdr.panes.len() => {
                 app.overview.pane_index += 1;
             }
-            Tab::Trim
-                if app.trim.focused_frame == 1
-                    && app.trim.pane_index + 1 < app.herdr.panes.len() =>
-            {
-                app.trim.pane_index += 1;
-            }
-            Tab::Trim
-                if app.trim.focused_frame == 2
-                    && app.trim.stage_index + 1 < app.trim.stages.len() =>
-            {
-                app.trim.stage_index += 1;
-            }
             _ => {}
         },
         MouseEventKind::ScrollUp => match app.tab {
@@ -1877,12 +1812,6 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
             }
             Tab::Overview if app.overview.pane_index > 0 => {
                 app.overview.pane_index -= 1;
-            }
-            Tab::Trim if app.trim.focused_frame == 1 && app.trim.pane_index > 0 => {
-                app.trim.pane_index -= 1;
-            }
-            Tab::Trim if app.trim.focused_frame == 2 && app.trim.stage_index > 0 => {
-                app.trim.stage_index -= 1;
             }
             _ => {}
         },
@@ -2247,20 +2176,6 @@ mod tests {
             ),
             snapshot
         );
-    }
-
-    #[test]
-    fn trim_state_defaults() {
-        let app = test_app();
-        assert!(app.trim.stages.is_empty());
-        assert_eq!(app.trim.pane_index, 0);
-        assert_eq!(app.trim.stage_index, 0);
-        assert!(!app.trim.stage_picker_open);
-        assert!(app.trim.policy_msg.is_empty());
-        assert!(matches!(
-            app.trim.direction,
-            herdr_mcp_api::TrimDirection::None
-        ));
     }
 
     #[test]

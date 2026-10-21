@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs herdr-mcp and herdr-trim from the latest GitHub release:
+# Installs herdr-mcp from the latest GitHub release:
 #   curl -fsSL https://raw.githubusercontent.com/eugeneb50/herdr-mcp/main/scripts/install.sh | sh
 # HERDR_MCP_INSTALL_DIR picks the directory (default ~/.local/bin).
 set -eu
@@ -35,12 +35,10 @@ fi
 
 tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
 mkdir -p "$dir"
-for bin in herdr-mcp herdr-trim; do
-    install -m 755 "$tmp/$name/$bin" "$dir/$bin"
-done
-echo "installed herdr-mcp and herdr-trim in $dir"
+install -m 755 "$tmp/$name/herdr-mcp" "$dir/herdr-mcp"
+echo "installed herdr-mcp in $dir"
 
 case ":$PATH:" in
     *":$dir:"*) ;;
-    *) echo "add $dir to PATH to run them" ;;
+    *) echo "add $dir to PATH to run it" ;;
 esac

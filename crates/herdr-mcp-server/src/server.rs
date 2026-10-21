@@ -11,10 +11,6 @@ use crate::persistence::Persistence;
 use crate::scheduler::Scheduler;
 use crate::templates as tmpl;
 use crate::variables::{Recipe, ScheduledRecipe};
-use herdr_mcp_trim::pfc1::CompressionKey;
-use herdr_mcp_trim::pipeline;
-use herdr_mcp_trim::policy::{TrimPolicy, TrimPolicyExt};
-use herdr_mcp_trim::stats;
 
 // ── Parameter structs ────────────────────────────────────────────────
 
@@ -317,10 +313,6 @@ pub struct AgentMessageParams {
     pub target: String,
     /// Text to send to the agent's stream.
     pub text: String,
-    /// Optional explicit trim stages applied to `text` before sending. When set,
-    /// this overrides the target's per-pane policy. Empty/absent → use policy.
-    #[serde(default)]
-    pub compress: Option<Vec<String>>,
 }
 
 /// Parameters for the `agent_prompt` tool.
@@ -354,9 +346,6 @@ pub struct AgentReadParams {
     pub target: String,
     pub source: Option<String>,
     pub lines: Option<u32>,
-    /// Decompress a PFC1-compressed read before storing it (default true).
-    #[serde(default = "default_true_opt")]
-    pub decompress: Option<bool>,
 }
 
 /// Parameters for the `agent_wait` a2a step.
@@ -394,29 +383,6 @@ pub struct VarSetParams {
     pub session_id: String,
     pub key: String,
     pub value: serde_json::Value,
-}
-
-/// Parameters for the `compress` trim tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct CompressParams {
-    /// Text to compress.
-    pub text: String,
-    /// Ordered stage list, e.g. `["caveman:full", "pfc1"]`.
-    #[serde(default)]
-    pub stages: Vec<String>,
-    /// Optional workspace id to attribute the trim stats to (surfaced in
-    /// `trim_status` / badge). If omitted, stats are not persisted.
-    #[serde(default)]
-    pub workspace_id: Option<String>,
-}
-
-/// Parameters for the `decompress` trim tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct DecompressParams {
-    /// Text to decompress (optionally carrying a PFC1 header).
-    pub text: String,
 }
 
 /// Parameters for the `list_templates` tool.
@@ -484,54 +450,6 @@ pub struct EnableScheduleParams {
     pub enabled: bool,
 }
 
-// ── Folder-key (PFC1) parameters ──────────────────────────────────────
-
-/// Parameters for the `build_folder_key` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct BuildFolderKeyParams {
-    /// Folder to scan recursively for text/markdown files.
-    pub folder_path: String,
-    /// Minimum term frequency to qualify (default 3).
-    #[serde(default)]
-    pub min_frequency: Option<usize>,
-    /// Minimum term length in bytes (default 4).
-    #[serde(default)]
-    pub min_length: Option<usize>,
-    /// Maximum symbols in the produced key (default 85).
-    #[serde(default)]
-    pub max_terms: Option<usize>,
-    /// Also write the key to the central registry.
-    #[serde(default)]
-    pub persist_central: Option<bool>,
-    /// Fold accepted terms into the persistent master key.
-    #[serde(default)]
-    pub learn_master: Option<bool>,
-}
-
-/// Parameters for the `get_folder_key` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct GetFolderKeyParams {
-    /// Folder whose key should be loaded (discovered by walking up the tree).
-    pub folder_path: String,
-}
-
-/// Parameters for the `list_folder_keys` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct ListFolderKeysParams {}
-
-/// Parameters for the `decompress_with_folder_key` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct DecompressWithFolderKeyParams {
-    /// Folder whose key should be used to decompress `text`.
-    pub folder_path: String,
-    /// PFC1-compressed text (header-less, trusted a2a).
-    pub text: String,
-}
-
 /// Parameters for the `clipboard_set` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
@@ -545,65 +463,15 @@ pub struct ClipboardSetParams {
 #[must_use]
 pub struct ClipboardGetParams {}
 
-/// Parameters for the `trim_policy_set` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct TrimPolicySetParams {
-    /// Target agent: role or pane id.
-    pub target: String,
-    /// Policy to attach (stages + direction). Use `null` to clear.
-    pub policy: Option<TrimPolicy>,
-}
-
-/// Parameters for the `trim_policy_get` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct TrimPolicyGetParams {
-    /// Target agent: role or pane id.
-    pub target: String,
-}
-
-/// Parameters for the `trim_eval` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct TrimEvalParams {
-    pub text: String,
-    #[serde(default)]
-    pub stages: Vec<String>,
-}
-
-/// Parameters for the `trim_bench` tool.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct TrimBenchParams {
-    /// Path to a corpus file to sweep.
-    pub corpus: String,
-    /// Stage(s), comma-separated (e.g. `"caveman:full,pfc1"`).
-    #[serde(default = "default_bench_level")]
-    pub level: String,
-}
-
-fn default_bench_level() -> String {
-    "caveman:full,pfc1".to_string()
-}
-
-/// Parameters for the trim aggregate/diagnose tools.
-#[derive(Debug, Default, Deserialize, Serialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-pub struct TrimStatusParams {
-    /// Workspace id to scope the query. If omitted, aggregates all workspaces.
+/// A `?workspace_id=` query: one workspace, or all when absent or empty.
+#[derive(Debug, Default, Deserialize)]
+pub struct WorkspaceQuery {
     #[serde(default)]
     pub workspace_id: Option<String>,
 }
 
-/// Trim wire types, defined once in `herdr-mcp-api`.
-pub use herdr_mcp_api::{DiagnoseReport, PaneStatus, SampleRoundtrip, TrimStatusResponse};
-
 fn default_true_bool() -> bool {
     true
-}
-fn default_true_opt() -> Option<bool> {
-    Some(true)
 }
 fn default_idle() -> String {
     "idle".to_string()
@@ -619,8 +487,6 @@ pub struct HerdrMcpServer {
     pub persistence: std::sync::Arc<Persistence>,
     pub scheduler: Scheduler,
     pub registry: AgentRegistry,
-    /// Data directory, used by the trim layer for persistent PFC1 memory.
-    pub data_dir: std::path::PathBuf,
     /// Live clipboard backend config: seeded from `Config`, replaced by
     /// `PUT /api/config/clipboard` (which also writes the config file).
     pub clipboard: std::sync::Arc<std::sync::RwLock<herdr_mcp_core::ClipboardConfig>>,
@@ -691,7 +557,6 @@ impl HerdrMcpServer {
         registry: AgentRegistry,
         config: &herdr_mcp_core::Config,
     ) -> Self {
-        let data_dir = persistence.data_dir().to_path_buf();
         let persistence = std::sync::Arc::new(persistence);
         // Persisted schedules start with `serve` (see `serve_core`).
         let scheduler = Scheduler::new(persistence.clone());
@@ -699,7 +564,6 @@ impl HerdrMcpServer {
             persistence,
             scheduler,
             registry,
-            data_dir,
             clipboard: std::sync::Arc::new(std::sync::RwLock::new(config.clipboard.clone())),
             herdr_client: std::sync::Arc::default(),
             runs: crate::runs::Runs::default(),
@@ -733,139 +597,6 @@ impl HerdrMcpServer {
     pub fn with_herdr_client(self, client: std::sync::Arc<HerdrClient>) -> Self {
         let _ = self.herdr_client.set(client);
         self
-    }
-
-    // ── Trim helpers ─────────────────────────────────────────────────
-
-    /// Apply outbound trim to `text` destined for `pane`. Explicit per-call
-    /// `compress` stages win; otherwise the target's per-pane policy is used
-    /// (default off). Returns the (possibly compressed) wire text.
-    async fn apply_outbound_trim(
-        &self,
-        pane: &str,
-        text: &str,
-        explicit: Option<&Vec<String>>,
-    ) -> String {
-        // 1. Explicit per-call stages win.
-        if let Some(specs) = explicit
-            && !specs.is_empty()
-        {
-            let stages = match pipeline::parse_stage_specs(specs) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("trim: {e}");
-                    return text.to_string();
-                }
-            };
-            let base = self.base_key_for(None).await;
-            let r = pipeline::run(text, &stages, &base);
-            self.record_trim_result(pane, &r).await;
-            return r.output;
-        }
-        // 2. Fall back to the target's per-pane policy.
-        if let Some(policy) = self.registry.get_trim_policy(pane).await
-            && policy.is_active()
-        {
-            let stages = match policy.parse_stages_with(false) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("trim policy: {e}");
-                    return text.to_string();
-                }
-            };
-            let ws = self.registry.get(pane).await.map(|h| h.workspace_id);
-            let base = self.base_key_for(ws.as_deref()).await;
-            let r = pipeline::run(text, &stages, &base);
-            if let Some(last) = r.stages.iter().rev().find_map(|s| s.pfc1_key.clone())
-                && let Some(ws) = ws
-            {
-                self.save_pfc1_key(&ws, &last).await;
-            }
-            self.record_trim_result(pane, &r).await;
-            return r.output;
-        }
-        text.to_string()
-    }
-
-    /// Record a pipeline result against the pane's workspace stats and refresh
-    /// its badge. Best-effort: stats I/O or badge push failures are logged,
-    /// never fatal. Only records when bytes were actually saved.
-    async fn record_trim_result(&self, pane: &str, r: &pipeline::PipelineResult) {
-        let Some(ws) = self.registry.get(pane).await.map(|h| h.workspace_id) else {
-            return;
-        };
-        if r.input.len().saturating_sub(r.output.len()) == 0 {
-            return; // nothing actually saved; don't pollute accounting
-        }
-        let mut s = stats::load_stats(&self.data_dir, &ws).await;
-        s.record_trim(pane, r.input.len(), r.output.len(), r.total_header_bytes);
-        if let Err(e) = stats::save_stats(&self.data_dir, &ws, &s).await {
-            tracing::warn!("trim: failed to save stats for {ws}: {e}");
-        }
-        self.push_badge_for_workspace(&ws).await;
-    }
-
-    /// Push a savings-% badge to every pane in `ws` that has an active trim
-    /// policy. Best-effort: `herdr pane report-metadata` failures are swallowed.
-    async fn push_badge_for_workspace(&self, ws: &str) {
-        let s = stats::load_stats(&self.data_dir, ws).await;
-        let net_pct = s.savings_pct().round() as i64;
-        if net_pct <= 0 {
-            return;
-        }
-        let badge = format!("-{net_pct}%");
-        for h in self.registry.list_for_ws(ws).await {
-            if let Some(ref policy) = h.trim_policy
-                && policy.is_active()
-            {
-                let _ = herdr_cli(&[
-                    "pane",
-                    "report-metadata",
-                    &h.pane_id,
-                    "--source",
-                    "herdr-mcp",
-                    "--token",
-                    &format!("trim={badge}"),
-                    "--ttl-ms",
-                    "25000",
-                ])
-                .await;
-            }
-        }
-    }
-
-    /// Push savings-% badges for every workspace that has trim stats on disk.
-    /// Drives the periodic poller so badges survive server restarts.
-    async fn push_all_badges(&self) {
-        let sessions_dir = self.data_dir.join("sessions");
-        let mut entries = match tokio::fs::read_dir(&sessions_dir).await {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::debug!("trim poller: cannot read sessions dir: {e}");
-                return;
-            }
-        };
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.ends_with(".trim_stats.json") {
-                continue;
-            }
-            let ws = name.trim_end_matches(".trim_stats.json");
-            self.push_badge_for_workspace(ws).await;
-        }
-    }
-
-    /// Build the PFC1 base key: the default key merged with any persisted
-    /// steady-state memory (shared across workspaces in the data dir).
-    async fn base_key_for(&self, _ws: Option<&str>) -> CompressionKey {
-        let runner = herdr_mcp_trim::runner::PipelineRunner::new(&self.data_dir).await;
-        runner.base_key().clone()
-    }
-
-    /// Persist a PFC1 key as steady-state memory (union merge).
-    async fn save_pfc1_key(&self, _ws: &str, key: &CompressionKey) {
-        let path = self.data_dir.join(herdr_mcp_trim::runner::MEMORY_FILE);
-        herdr_mcp_trim::runner::save_memory(&path, key).await;
     }
 
     /// Run `herdr status --json` and parse the JSON output.
@@ -1383,7 +1114,7 @@ impl HerdrMcpServer {
             }
         }
 
-        let profile = crate::profiles::get(&self.data_dir, &agent)
+        let profile = crate::profiles::get(self.persistence.data_dir(), &agent)
             .await
             .unwrap_or_else(|| herdr_mcp_api::AgentProfile::native(&agent));
         let name = label
@@ -1458,29 +1189,22 @@ impl HerdrMcpServer {
         if agent.is_empty() {
             return herdr_mcp_api::AgentProfile::native("unknown");
         }
-        crate::profiles::get(&self.data_dir, &agent)
+        crate::profiles::get(self.persistence.data_dir(), &agent)
             .await
             .unwrap_or_else(|| herdr_mcp_api::AgentProfile::native(&agent))
     }
 
     #[tool(
         meta = category("A2A"),
-        description = "Send a message (text) to another agent and submit it. `target` may be a role, label or pane id. The text may interpolate {{role.output}} / {{pane_id.output}} from the session registry. Optional `compress` lists trim stages (e.g. [\"caveman:full\",\"pfc1\"]) applied to the wire bytes; if absent, the target's per-pane trim policy is used (default off). Works for any agent profile (native or command)."
+        description = "Send a message (text) to another agent and submit it. `target` may be a role, label or pane id. The text may interpolate {{role.output}} / {{pane_id.output}} from the session registry. Works for any agent profile (native or command)."
     )]
     async fn agent_message(
         &self,
-        Parameters(AgentMessageParams {
-            target,
-            text,
-            compress,
-        }): Parameters<AgentMessageParams>,
+        Parameters(AgentMessageParams { target, text }): Parameters<AgentMessageParams>,
     ) -> Result<CallToolResult, McpError> {
         let pane = resolve_target_pane(self, &target).await?;
-        let wire = self
-            .apply_outbound_trim(&pane, &text, compress.as_ref())
-            .await;
         let profile = self.profile_for_pane(&pane).await;
-        crate::agents::submit(&profile, &pane, &wire).await?;
+        crate::agents::submit(&profile, &pane, &text).await?;
         Ok(CallToolResult::success(vec![
             Content::json(serde_json::json!({ "pane_id": pane, "delivered": true }))
                 .map_err(to_mcp_err)?,
@@ -1541,7 +1265,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("A2A"),
-        description = "Read an agent's output and store it as its work product in the registry. Returns {pane_id, role, agent, status, output}. `target` may be a role or pane id. `decompress` (default true) reverses any PFC1 header on the read so {{role.output}} stays byte-faithful."
+        description = "Read an agent's output and store it as its work product in the registry. Returns {pane_id, role, agent, status, output}. `target` may be a role or pane id."
     )]
     async fn agent_read(
         &self,
@@ -1549,7 +1273,6 @@ impl HerdrMcpServer {
             target,
             source,
             lines,
-            decompress,
         }): Parameters<AgentReadParams>,
     ) -> Result<CallToolResult, McpError> {
         let pane = resolve_target_pane(self, &target).await?;
@@ -1561,23 +1284,9 @@ impl HerdrMcpServer {
         if let Some(ref n) = lines_str {
             args.extend(["--lines", n]);
         }
-        let raw = herdr_cli(&args).await?;
-
-        let do_decompress = decompress.unwrap_or(true);
-        let stored = if do_decompress {
-            // Try the self-describing header; fall back to the shared server key
-            // (compact a2a mode sends header-less payloads).
-            let shared = self.base_key_for(None).await;
-            pipeline::decompress_pfc1(&raw, Some(&shared))
-        } else {
-            raw.clone()
-        };
+        let stored = herdr_cli(&args).await?;
         self.registry.set_output(&pane, stored.clone()).await;
         let handle = self.registry.get(&pane).await;
-        // Refresh the pane's savings badge (read-only; no stats recorded).
-        if let Some(ref h) = handle {
-            self.push_badge_for_workspace(&h.workspace_id).await;
-        }
         Ok(CallToolResult::success(vec![
             Content::json(serde_json::json!({
                 "pane_id": pane,
@@ -1692,387 +1401,6 @@ impl HerdrMcpServer {
                 "session_id": session_id,
                 "key": key,
                 "value": value,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    // ── Message-trim tools ─────────────────────────────────────────────
-    // Two non-colliding compressors (caveman style + pfc1 phonetic) exposed
-    // as MCP tools and usable as recipe steps. See docs/ARCHITECTURE.md §7.
-
-    #[tool(
-        meta = category("Trim"),
-        description = "Compress text via an ordered pipeline of trim stages (e.g. [\"caveman:full\",\"pfc1\"]). Returns input/output sizes, per-stage stats, and the compressed payload with its PFC1 header."
-    )]
-    async fn compress(
-        &self,
-        Parameters(CompressParams {
-            text,
-            stages,
-            workspace_id,
-        }): Parameters<CompressParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let parsed = pipeline::parse_stage_specs(&stages).map_err(to_mcp_err)?;
-        let runner = herdr_mcp_trim::runner::PipelineRunner::new(&self.data_dir).await;
-        let r = runner.run(&text, &parsed).await;
-        // Optionally attribute this trim to a workspace's running stats.
-        if let Some(ref ws) = workspace_id
-            && r.input.len().saturating_sub(r.output.len()) > 0
-        {
-            let mut s = stats::load_stats(&self.data_dir, ws).await;
-            s.record_trim("cli", r.input.len(), r.output.len(), r.total_header_bytes);
-            let _ = stats::save_stats(&self.data_dir, ws, &s).await;
-            self.push_badge_for_workspace(ws).await;
-        }
-        let stage_reports: Vec<serde_json::Value> = r
-            .stages
-            .iter()
-            .map(|s| {
-                serde_json::json!({
-                    "stage": s.stage,
-                    "output_len": s.output.len(),
-                    "skipped": s.skipped,
-                    "stats": s.stats,
-                })
-            })
-            .collect();
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "input_bytes": r.input.len(),
-                "output_bytes": r.output.len(),
-                "total_savings_bytes": r.total_savings_bytes,
-                "total_ratio_pct": r.total_ratio,
-                "stages": stage_reports,
-                "output": r.output,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(
-        meta = category("Trim"),
-        description = "Decompress text produced by `compress`. If the input carries a PFC1 header it is expanded; otherwise the input is returned unchanged."
-    )]
-    async fn decompress(
-        &self,
-        Parameters(DecompressParams { text }): Parameters<DecompressParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let out = pipeline::decompress_pfc1(&text, None);
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "decompressed": out,
-                "changed": out != text,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(
-        meta = category("Trim"),
-        description = "Attach (or clear with `policy: null`) a message-trim policy to a target agent (role or pane id). Policy = ordered stages + direction (none/outbound/outbound_with_ack). Default off."
-    )]
-    async fn trim_policy_set(
-        &self,
-        Parameters(TrimPolicySetParams { target, policy }): Parameters<TrimPolicySetParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let pane = resolve_target_pane(self, &target).await?;
-        self.registry.set_trim_policy(&pane, policy.clone()).await;
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "pane_id": pane,
-                "policy": policy,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(
-        meta = category("Trim"),
-        description = "Read the message-trim policy attached to a target agent (role or pane id). Returns null if none."
-    )]
-    async fn trim_policy_get(
-        &self,
-        Parameters(TrimPolicyGetParams { target }): Parameters<TrimPolicyGetParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let pane = resolve_target_pane(self, &target).await?;
-        let policy = self.registry.get_trim_policy(&pane).await;
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "pane_id": pane,
-                "policy": policy,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(
-        meta = category("Trim"),
-        description = "Evaluate trim savings for a single text offline. Returns byte + token estimates and per-stage stats — lets the model verify its own compression."
-    )]
-    async fn trim_eval(
-        &self,
-        Parameters(TrimEvalParams { text, stages }): Parameters<TrimEvalParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let runner = herdr_mcp_trim::runner::PipelineRunner::new(&self.data_dir).await;
-        let report = herdr_mcp_trim::eval::trim_eval(&text, &stages, runner.base_key());
-        Ok(CallToolResult::success(vec![
-            Content::json(report).map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(
-        meta = category("Trim"),
-        description = "Sweep a corpus file and report a trim savings distribution for a level (comma-separated stages, e.g. \"caveman:full,pfc1\")."
-    )]
-    async fn trim_bench(
-        &self,
-        Parameters(TrimBenchParams { corpus, level }): Parameters<TrimBenchParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let runner = herdr_mcp_trim::runner::PipelineRunner::new(&self.data_dir).await;
-        let report = herdr_mcp_trim::eval::trim_bench(&corpus, &level, runner.base_key());
-        Ok(CallToolResult::success(vec![
-            Content::json(report).map_err(to_mcp_err)?,
-        ]))
-    }
-
-    /// Aggregate trim savings across a workspace (or all workspaces). Shared by
-    /// the `trim_status` tool and the web dashboard.
-    async fn aggregate_trim_status(&self, ws: Option<&str>) -> TrimStatusResponse {
-        let mut resp = TrimStatusResponse::default();
-
-        // Determine the workspace set to scan.
-        let ws_list: Vec<String> = match ws {
-            Some(w) => vec![w.to_string()],
-            None => {
-                let sessions = self.data_dir.join("sessions");
-                let mut list = Vec::new();
-                if let Ok(mut entries) = tokio::fs::read_dir(&sessions).await {
-                    while let Ok(Some(e)) = entries.next_entry().await {
-                        let fname = e.file_name().to_string_lossy().to_string();
-                        if fname.ends_with(".trim_stats.json") {
-                            list.push(fname.trim_end_matches(".trim_stats.json").to_string());
-                        }
-                    }
-                }
-                list
-            }
-        };
-
-        let mut total = stats::TrimStats::default();
-        for w in &ws_list {
-            let s = stats::load_stats(&self.data_dir, w).await;
-            total.gross_saved_bytes = total.gross_saved_bytes.saturating_add(s.gross_saved_bytes);
-            total.net_saved_bytes = total.net_saved_bytes.saturating_add(s.net_saved_bytes);
-            total.total_input_bytes = total.total_input_bytes.saturating_add(s.total_input_bytes);
-            total.messages_trimmed = total.messages_trimmed.saturating_add(s.messages_trimmed);
-            for (pane, ps) in &s.per_pane {
-                let key = format!("{w}:{pane}");
-                let entry = resp.per_pane.entry(key).or_default();
-                entry.gross_saved_bytes =
-                    entry.gross_saved_bytes.saturating_add(ps.gross_saved_bytes);
-                entry.net_saved_bytes = entry.net_saved_bytes.saturating_add(ps.net_saved_bytes);
-                entry.messages_trimmed = entry.messages_trimmed.saturating_add(ps.messages_trimmed);
-            }
-        }
-
-        // Policies live in the registry, not the stats files: a workspace
-        // that has trimmed nothing yet still shows its panes' policies.
-        let handles = match ws {
-            Some(w) => self.registry.list_for_ws(w).await,
-            None => self.registry.inner_snapshot().await,
-        };
-        for h in handles {
-            if let Some(policy) = h.trim_policy.filter(|p| p.is_active()) {
-                resp.active_policies.insert(h.pane_id, policy.stages);
-            }
-        }
-
-        resp.gross_saved_bytes = total.gross_saved_bytes;
-        resp.net_saved_bytes = total.net_saved_bytes;
-        resp.total_input_bytes = total.total_input_bytes;
-        resp.messages_trimmed = total.messages_trimmed;
-        resp.workspace_net_pct = total.workspace_net_pct();
-        resp.workspace_savings_pct = total.savings_pct();
-        resp
-    }
-
-    #[tool(
-        meta = category("Trim"),
-        description = "Aggregate trim savings for a workspace (or all). Returns net/savings %, per-pane breakdown, and active policies."
-    )]
-    async fn trim_status(
-        &self,
-        Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let resp = self.aggregate_trim_status(workspace_id.as_deref()).await;
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::to_value(&resp).map_err(to_mcp_err)?).map_err(to_mcp_err)?,
-        ]))
-    }
-
-    /// Build the end-to-end readiness report (shared by `trim_diagnose` tool
-    /// and the `/api/trim/diagnose` HTTP route).
-    async fn build_diagnose_report(&self, ws: Option<&str>) -> DiagnoseReport {
-        // 1. Round-trip test: compress then decompress a fixed sample.
-        let sample =
-            "The quick brown fox jumps over the lazy dog. The fox is quick and the dog is lazy.";
-        let stages = pipeline::parse_stage_specs(&["caveman:full".to_string(), "pfc1".to_string()])
-            .unwrap_or_default();
-        let base = self.base_key_for(None).await;
-        let r = pipeline::run(sample, &stages, &base);
-        let compressed_with_header = r.stages.iter().any(|s| s.pfc1_key.is_some());
-        let decompressed = pipeline::decompress_pfc1(&r.output, Some(&base));
-        let roundtrip_ok = if compressed_with_header {
-            decompressed == sample
-        } else {
-            true
-        };
-
-        // 2. PFC1 memory file validity.
-        let mem_path = self.data_dir.join(herdr_mcp_trim::runner::MEMORY_FILE);
-        let pfc1_memory_valid = tokio::fs::read_to_string(&mem_path)
-            .await
-            .ok()
-            .and_then(|c| serde_json::from_str::<CompressionKey>(&c).ok())
-            .is_some();
-
-        // 3. Active policy count.
-        let active_policies = if let Some(w) = ws {
-            self.registry
-                .list_for_ws(w)
-                .await
-                .iter()
-                .filter(|h| {
-                    h.trim_policy
-                        .as_ref()
-                        .map(|p| p.is_active())
-                        .unwrap_or(false)
-                })
-                .count()
-        } else {
-            self.registry
-                .inner_snapshot()
-                .await
-                .iter()
-                .filter(|h| {
-                    h.trim_policy
-                        .as_ref()
-                        .map(|p| p.is_active())
-                        .unwrap_or(false)
-                })
-                .count()
-        };
-
-        // 4. Badge reachability: at least one registered pane exists.
-        let badge_reachable = !self.registry.inner_snapshot().await.is_empty();
-
-        DiagnoseReport {
-            pipeline_roundtrip_ok: roundtrip_ok,
-            pfc1_memory_valid,
-            active_policies,
-            badge_reachable,
-            sample_roundtrip: Some(SampleRoundtrip {
-                input: sample.to_string(),
-                compressed: r.output,
-                decompressed,
-                matches: roundtrip_ok,
-            }),
-        }
-    }
-
-    #[tool(
-        meta = category("Trim"),
-        description = "End-to-end trim readiness check: pipeline round-trip integrity, PFC1 memory validity, active policy count, and badge reachability."
-    )]
-    async fn trim_diagnose(
-        &self,
-        Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let report = self.build_diagnose_report(workspace_id.as_deref()).await;
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::to_value(&report).map_err(to_mcp_err)?)
-                .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(meta = category("Trim"), description = "Fire a herdr notification summarizing the session's trim savings.")]
-    async fn trim_summary(
-        &self,
-        Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let resp = self.aggregate_trim_status(workspace_id.as_deref()).await;
-        let body = format!(
-            "Session savings: {:.1}% net ({} messages, {} bytes net saved)",
-            resp.workspace_savings_pct, resp.messages_trimmed, resp.net_saved_bytes
-        );
-        let raw = herdr_cli(&["notification", "show", "herdr-mcp trim", "--body", &body]).await?;
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "sent": true,
-                "body": body,
-                "herdr_output": raw,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(meta = category("Trim"), description = "Open a herdr split pane running the live trim dashboard.")]
-    async fn trim_dashboard_open(
-        &self,
-        Parameters(TrimStatusParams { workspace_id }): Parameters<TrimStatusParams>,
-    ) -> Result<CallToolResult, McpError> {
-        // `pane split` takes a pane, not a workspace: split the focused one.
-        let filter = herdr_mcp_api::PaneFilter {
-            workspace_id: workspace_id.clone(),
-            ..Default::default()
-        };
-        let panes = crate::panes::panes(&filter).await?;
-        let target = dashboard_split_target(
-            &panes,
-            workspace_id.as_deref().is_some_and(|w| !w.is_empty()),
-        )
-        .ok_or_else(|| McpError {
-            code: rmcp::model::ErrorCode(-32000),
-            message: "trim: no pane to split for the dashboard".into(),
-            data: None,
-        })?;
-        let raw = herdr_cli(&[
-            "pane",
-            "split",
-            &target,
-            "--direction",
-            "right",
-            "--no-focus",
-        ])
-        .await?;
-        let value: serde_json::Value =
-            serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}));
-        let pane_id = extract_pane_id(&value).unwrap_or_default();
-        if pane_id.is_empty() {
-            return Err(McpError {
-                code: rmcp::model::ErrorCode(-32000),
-                message: "trim: failed to open dashboard pane".into(),
-                data: None,
-            });
-        }
-        // The dashboard lives in the `herdr-trim` binary (`herdr-mcp` is
-        // serve-only): the sibling of this binary, as `plugin link` finds it,
-        // else whatever PATH has. The pane runs a shell, so single-quote.
-        let quote = |s: &str| format!("'{}'", s.replace('\'', r"'\''"));
-        let trim = std::env::current_exe()
-            .ok()
-            .map(|exe| exe.with_file_name("herdr-trim"))
-            .filter(|p| p.exists())
-            .map_or_else(|| "herdr-trim".into(), |p| quote(&p.display().to_string()));
-        let data_dir = quote(&self.data_dir.display().to_string());
-        let cmd = format!("{trim} dashboard --data-dir {data_dir}");
-        let _ = herdr_cli(&["pane", "send-text", &pane_id, &cmd]).await;
-        let _ = herdr_cli(&["pane", "send-keys", &pane_id, "Enter"]).await;
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "pane_id": pane_id,
-                "title": "trim-dashboard",
             }))
             .map_err(to_mcp_err)?,
         ]))
@@ -2237,112 +1565,6 @@ impl HerdrMcpServer {
         ]))
     }
 
-    // ── Folder-key (PFC1) tools ─────────────────────────────────────────
-
-    #[tool(
-        meta = category("Folder Key"),
-        description = "Scan a folder for text/markdown files, learn the domain's most compressible terms + phrases, and write a self-contained PFC1 key to <folder>/.pfc1_key.json. Skips code blocks; reuses the cached key when files are unchanged (mtime)."
-    )]
-    async fn build_folder_key(
-        &self,
-        Parameters(BuildFolderKeyParams {
-            folder_path,
-            min_frequency,
-            min_length,
-            max_terms,
-            persist_central,
-            learn_master,
-        }): Parameters<BuildFolderKeyParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let root = std::path::Path::new(&folder_path);
-        let mut opts = herdr_mcp_trim::folder_key::FolderKeyOptions::default();
-        if let Some(v) = min_frequency {
-            opts.min_frequency = v;
-        }
-        if let Some(v) = min_length {
-            opts.min_length = v;
-        }
-        if let Some(v) = max_terms {
-            opts.max_terms = v;
-        }
-        if let Some(v) = persist_central {
-            opts.persist_central = v;
-        }
-        if let Some(v) = learn_master {
-            opts.learn_master = v;
-        }
-        let key = herdr_mcp_trim::folder_key::build_folder_key(root, &opts, &self.data_dir)
-            .await
-            .map_err(to_mcp_err)?;
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "built": true,
-                "folder": key.folder,
-                "seeded_from_master": key.seeded_from_master,
-                "stats": key.stats,
-                "key": key.key,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(
-        meta = category("Folder Key"),
-        description = "Load the PFC1 folder key for a folder (discovered by walking up the directory tree). Returns null if none exists."
-    )]
-    async fn get_folder_key(
-        &self,
-        Parameters(GetFolderKeyParams { folder_path }): Parameters<GetFolderKeyParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let root = std::path::Path::new(&folder_path);
-        // Walk up from the folder (and its parents) to find the nearest key.
-        let keys = herdr_mcp_trim::folder_key::discover_folder_keys(root).await;
-        let key = keys.into_iter().next();
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "folder": folder_path,
-                "key": key,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(meta = category("Folder Key"), description = "List all folder keys in the central registry (data_dir/folder_keys).")]
-    async fn list_folder_keys(
-        &self,
-        Parameters(_): Parameters<ListFolderKeysParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let keys = herdr_mcp_trim::folder_key::list_central_keys(&self.data_dir).await;
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "count": keys.len(),
-                "keys": keys,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
-    #[tool(
-        meta = category("Folder Key"),
-        description = "Decompress text using a folder's PFC1 key (header-less, trusted a2a). Returns the input unchanged if no key is found."
-    )]
-    async fn decompress_with_folder_key(
-        &self,
-        Parameters(DecompressWithFolderKeyParams { folder_path, text }): Parameters<
-            DecompressWithFolderKeyParams,
-        >,
-    ) -> Result<CallToolResult, McpError> {
-        let root = std::path::Path::new(&folder_path);
-        let out = herdr_mcp_trim::folder_key::decompress_with_folder_key(root, &text).await;
-        Ok(CallToolResult::success(vec![
-            Content::json(serde_json::json!({
-                "decompressed": out,
-                "changed": out != text,
-            }))
-            .map_err(to_mcp_err)?,
-        ]))
-    }
-
     // ── Clipboard ───────────────────────────────────────────────────────
 
     #[tool(
@@ -2440,17 +1662,6 @@ pub(crate) fn extract_pane_id(value: &serde_json::Value) -> Option<String> {
 
 pub(crate) fn as_strs(args: &[String]) -> Vec<&str> {
     args.iter().map(String::as_str).collect()
-}
-
-/// Pane `trim_dashboard_open` splits: the focused pane, or — when the list
-/// is one workspace's panes and none of them has focus — its first pane.
-fn dashboard_split_target(
-    panes: &[herdr_mcp_api::HerdrPane],
-    one_workspace: bool,
-) -> Option<String> {
-    let focused = panes.iter().find(|p| p.focused);
-    let pane = focused.or(if one_workspace { panes.first() } else { None })?;
-    Some(pane.pane_id.clone())
 }
 
 /// Submit `text` (+ Enter) to an agent: `agent prompt` (0.9 has no `agent send`).
@@ -2589,18 +1800,6 @@ fn json_result(value: &impl Serialize) -> Result<CallToolResult, McpError> {
     Ok(CallToolResult::success(vec![
         Content::json(value).map_err(to_mcp_err)?,
     ]))
-}
-
-/// Spawn a background task that refreshes trim badges for all workspaces
-/// every 20s. Best-effort: I/O errors are logged, never propagated.
-pub fn spawn_trim_poller(server: std::sync::Arc<HerdrMcpServer>) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(20));
-        loop {
-            interval.tick().await;
-            server.push_all_badges().await;
-        }
-    });
 }
 
 /// Execute the `herdr` CLI binary with the given arguments.
@@ -2836,13 +2035,6 @@ fn http_router(server: HerdrMcpServer, web_dir: Option<&std::path::Path>, bind: 
             "/api/variables/{key}",
             get(get_variable_handler).delete(delete_variable_handler),
         )
-        .route("/api/trim/status", get(trim_status_http_handler))
-        .route("/api/trim/diagnose", post(trim_diagnose_http_handler))
-        .route("/api/trim/summary", post(trim_summary_http_handler))
-        .route(
-            "/api/trim/dashboard/open",
-            post(trim_dashboard_open_http_handler),
-        )
         .fallback_service(ui)
         .with_state(state)
         .layer(axum::middleware::from_fn({
@@ -2891,7 +2083,7 @@ async fn health_handler() -> &'static str {
 
 fn config_response(server: &HerdrMcpServer) -> ConfigResponse {
     ConfigResponse {
-        data_dir: server.data_dir.display().to_string(),
+        data_dir: server.persistence.data_dir().display().to_string(),
         herdr_socket: server
             .herdr_client
             .get()
@@ -2958,7 +2150,7 @@ async fn call_tool_handler(
 /// fallback only. Empty `workspace_id` returns the global snapshot.
 async fn agents_handler(
     State(AppState { server, .. }): State<AppState>,
-    Query(params): Query<TrimStatusParams>,
+    Query(params): Query<WorkspaceQuery>,
 ) -> Json<AgentsResponse> {
     let agents = match &params.workspace_id {
         Some(ws) if !ws.is_empty() => server.registry.list_for_ws(ws).await,
@@ -2984,61 +2176,6 @@ fn mcp_err_to_http(e: McpError) -> (StatusCode, String) {
 
 fn bad_request(e: impl ToString) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, e.to_string())
-}
-
-/// `GET /api/trim/status?workspace_id=w1` — aggregate trim savings.
-async fn trim_status_http_handler(
-    State(AppState { server, .. }): State<AppState>,
-    Query(params): Query<TrimStatusParams>,
-) -> Json<TrimStatusResponse> {
-    Json(
-        server
-            .aggregate_trim_status(params.workspace_id.as_deref())
-            .await,
-    )
-}
-
-/// `POST /api/trim/diagnose` — end-to-end readiness check.
-async fn trim_diagnose_http_handler(
-    State(AppState { server, .. }): State<AppState>,
-    body: Option<Json<serde_json::Value>>,
-) -> Json<DiagnoseReport> {
-    let ws = body.and_then(|j| {
-        j.0.get("workspace_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-    });
-    Json(server.build_diagnose_report(ws.as_deref()).await)
-}
-
-/// `POST /api/trim/summary` — fire a savings notification.
-async fn trim_summary_http_handler(
-    State(AppState { server, .. }): State<AppState>,
-    body: Option<Json<serde_json::Value>>,
-) -> Json<serde_json::Value> {
-    let p: TrimStatusParams = body
-        .and_then(|j| serde_json::from_value(j.0).ok())
-        .unwrap_or_default();
-    let json = match server.trim_summary(Parameters(p)).await {
-        Ok(res) => serde_json::to_value(&res).unwrap_or(serde_json::Value::Null),
-        Err(e) => serde_json::json!({ "error": e.message.to_string() }),
-    };
-    Json(json)
-}
-
-/// `POST /api/trim/dashboard/open` — open a live dashboard pane.
-async fn trim_dashboard_open_http_handler(
-    State(AppState { server, .. }): State<AppState>,
-    body: Option<Json<serde_json::Value>>,
-) -> Json<serde_json::Value> {
-    let p: TrimStatusParams = body
-        .and_then(|j| serde_json::from_value(j.0).ok())
-        .unwrap_or_default();
-    let json = match server.trim_dashboard_open(Parameters(p)).await {
-        Ok(res) => serde_json::to_value(&res).unwrap_or(serde_json::Value::Null),
-        Err(e) => serde_json::json!({ "error": e.message.to_string() }),
-    };
-    Json(json)
 }
 
 /// Call a tool by name through rmcp's own router, over the server's
@@ -3429,14 +2566,14 @@ async fn run_events_handler(
 async fn list_profiles_handler(
     State(AppState { server, .. }): State<AppState>,
 ) -> Json<Vec<herdr_mcp_api::AgentProfile>> {
-    Json(crate::profiles::list(&server.data_dir).await)
+    Json(crate::profiles::list(server.persistence.data_dir()).await)
 }
 
 async fn get_profile_handler(
     State(AppState { server, .. }): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<herdr_mcp_api::AgentProfile>, (StatusCode, String)> {
-    crate::profiles::get(&server.data_dir, &id)
+    crate::profiles::get(server.persistence.data_dir(), &id)
         .await
         .map(Json)
         .ok_or((StatusCode::NOT_FOUND, format!("no profile {id:?}")))
@@ -3454,7 +2591,7 @@ async fn save_profile_handler(
             "body id must match the path".into(),
         ));
     }
-    match crate::profiles::save(&server.data_dir, &profile).await {
+    match crate::profiles::save(server.persistence.data_dir(), &profile).await {
         Ok(()) => Ok(Json(profile)),
         Err(crate::profiles::SaveError::Invalid(problems)) => {
             Err((StatusCode::BAD_REQUEST, problems.join("; ")))
@@ -3471,7 +2608,7 @@ async fn delete_profile_handler(
     State(AppState { server, .. }): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    match crate::profiles::delete(&server.data_dir, &id).await {
+    match crate::profiles::delete(server.persistence.data_dir(), &id).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err((StatusCode::NOT_FOUND, format!("no user profile {id:?}"))),
         Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
@@ -3602,7 +2739,7 @@ async fn list_variables_handler(
 /// workspace's `var_set` session variables when one is given.
 async fn auto_variables_handler(
     State(AppState { server, .. }): State<AppState>,
-    Query(params): Query<TrimStatusParams>,
+    Query(params): Query<WorkspaceQuery>,
 ) -> Json<AutoVariablesResponse> {
     let ws = params.workspace_id.filter(|s| !s.trim().is_empty());
     let filter = herdr_mcp_api::PaneFilter {
@@ -3664,7 +2801,7 @@ fn pane_vars(
 /// Canonical store is `data/sessions/{ws}.playground.json` via `Persistence`.
 async fn get_playground_handler(
     State(AppState { server, .. }): State<AppState>,
-    Query(params): Query<TrimStatusParams>,
+    Query(params): Query<WorkspaceQuery>,
 ) -> Result<Json<crate::persistence::PlaygroundSnapshot>, (StatusCode, String)> {
     let ws = params
         .workspace_id
@@ -4223,27 +3360,6 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_splits_the_focused_pane() {
-        let p = |id: &str, focused: bool| -> herdr_mcp_api::HerdrPane {
-            let ws = id.split(':').next().unwrap_or_default();
-            serde_json::from_value(serde_json::json!({
-                "pane_id": id, "workspace_id": ws, "tab_id": "t", "focused": focused
-            }))
-            .unwrap()
-        };
-        let panes = [p("w1:p1", false), p("w1:p2", true)];
-        assert_eq!(
-            dashboard_split_target(&panes, false).as_deref(),
-            Some("w1:p2")
-        );
-        // A background workspace has no focused pane: use its first.
-        let bg = [p("w2:p1", false), p("w2:p3", false)];
-        assert_eq!(dashboard_split_target(&bg, true).as_deref(), Some("w2:p1"));
-        assert_eq!(dashboard_split_target(&bg, false), None);
-        assert_eq!(dashboard_split_target(&[], true), None);
-    }
-
-    #[test]
     fn herdr_09_argv() {
         assert_eq!(
             agent_submit_args("w1:p2", "hi"),
@@ -4402,8 +3518,6 @@ esac
             api.instantiate_template("nope", &req).await,
             Err(ApiError::Status { status: 404, .. })
         ));
-        let status = api.trim_status(Some("w1")).await.unwrap();
-        assert_eq!(status.messages_trimmed, 0);
         assert_eq!(
             api.auto_variables(Some("w9")).await.unwrap().workspace_id,
             "w9"
@@ -4611,32 +3725,5 @@ esac
             .await
             .unwrap();
         assert_eq!(page, "<html>ui</html>");
-    }
-
-    #[tokio::test]
-    async fn trim_status_lists_policies_without_stats() {
-        let tmp = tempfile::tempdir().unwrap();
-        let data_dir = tmp.path().join("data");
-        let registry = AgentRegistry::new(std::sync::Arc::new(Persistence::new(data_dir.clone())));
-        registry.upsert("w9:p1", "w9", "w9:t1", "claude", "").await;
-        let policy = herdr_mcp_api::TrimPolicy {
-            stages: vec!["caveman".into()],
-            direction: herdr_mcp_api::TrimDirection::Outbound,
-        };
-        registry.set_trim_policy("w9:p1", Some(policy)).await;
-        let server = HerdrMcpServer::new(Persistence::new(data_dir), registry);
-
-        // w9 has no trim_stats.json: its policy still shows, as in the count.
-        for ws in [None, Some("w9")] {
-            let resp = server.aggregate_trim_status(ws).await;
-            assert_eq!(resp.active_policies["w9:p1"], ["caveman"], "{ws:?}");
-        }
-        assert!(
-            server
-                .aggregate_trim_status(Some("w1"))
-                .await
-                .active_policies
-                .is_empty()
-        );
     }
 }

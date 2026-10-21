@@ -108,14 +108,13 @@ pub fn Home() -> Element {
             details { class: "details",
                 summary { "Getting started" }
                 pre { class: "code-block",
-                    "cargo install --path crates/herdr-mcp-cli --bin herdr-mcp\nherdr-mcp serve --http 7676"
+                    "cargo install --path crates/herdr-mcp-cli\nherdr-mcp --http 7676"
                 }
                 ul { class: "doc-list",
                     li { code { "POST /api/tools/:name" } " — invoke any MCP tool" }
                     li { code { "POST /api/runs?wait=true" } " — run a recipe (saved or ad-hoc steps) and get the result" }
                     li { code { "GET /api/variables/auto" } " — live panes and agents as variables" }
                     li { code { "GET /api/herdr/panes" } " — herdr panes (session/status/label filters)" }
-                    li { code { "GET /api/trim/status" } " — aggregate trim savings" }
                 }
             }
         }

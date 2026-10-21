@@ -1,45 +1,44 @@
-//! Shared startup for the `herdr-mcp` (daemon) and `herdr-trim` (tools) bins.
-//!
-//! Single source of truth for: tracing init, the full serve stack
-//! (`serve_core`), the MCP stdio server (`run_serve`), and the headless stack
-//! used under dashboards (`run_serve_headless`). Both bins delegate here —
-//! neither duplicates construction. (Kept in the CLI crate rather than moved
-//! into `herdr-mcp-server` so the server crate gains no CLI deps.)
-//
-// NOTE: included by two bins that each use a subset (`herdr-mcp` never calls
-// `run_serve_headless`, `herdr-trim` never calls `run_serve`). Each bin marks
-// the module `#[allow(dead_code)]` — see the `mod common` declaration.
+//! Startup for `herdr-mcp`: tracing, the full serve stack (`serve_core`)
+//! and the MCP stdio server (`run_serve`). Kept in the CLI crate rather than
+//! moved into `herdr-mcp-server` so the server crate gains no CLI deps.
 
 use anyhow::Result;
 use rmcp::{ServiceExt, transport::stdio};
 
 use herdr_mcp_core::Config;
-use herdr_mcp_server::{
-    HerdrClient, HerdrMcpServer, Persistence,
-    server::{spawn_trim_poller, start_http},
-    triggers,
-};
+use herdr_mcp_server::{HerdrClient, HerdrMcpServer, Persistence, server::start_http, triggers};
 
-/// Tracing to stderr. Never stdout: stdout is MCP/ACP JSON-RPC on the daemon.
-pub fn init_tracing() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("herdr_mcp=info".parse()?),
-        )
-        .with_writer(std::io::stderr)
-        .init();
+/// Tracing to stderr, or appended to `log_file` while the TUI owns the
+/// terminal. Never stdout: stdout is MCP JSON-RPC when serving stdio.
+pub fn init_tracing(log_file: Option<&std::path::Path>) -> Result<()> {
+    let fmt = tracing_subscriber::fmt().with_env_filter(
+        tracing_subscriber::EnvFilter::from_default_env().add_directive("herdr_mcp=info".parse()?),
+    );
+    match log_file {
+        Some(path) => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            let file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            fmt.with_writer(std::sync::Mutex::new(file))
+                .with_ansi(false)
+                .init();
+        }
+        None => fmt.with_writer(std::io::stderr).init(),
+    }
     Ok(())
 }
 
 /// Build the full serve stack (persistence, herdr subscriber, registry, HTTP
-/// bridge; schedules, triggers and trim badges once this process is the data
+/// bridge; schedules and triggers once this process is the data
 /// dir's daemon, see [`spawn_daemon`]) and spawn its background tasks. Does NOT block —
 /// the spawned tasks live on the Tokio runtime until it shuts down. Returns
-/// the one `HerdrMcpServer` every surface shares (HTTP, stdio, triggers, trim
-/// poller): a single scheduler and one set of live runs. Shared by both
-/// `serve` and `dashboard`: the former awaits the MCP server afterwards, the
-/// latter runs the TUI on the main task.
+/// the one `HerdrMcpServer` every surface shares (HTTP, stdio, triggers): a
+/// single scheduler and one set of live runs. [`run_serve`] awaits the MCP
+/// server afterwards; the TUI mode in `main.rs` runs the TUI on the main task.
 pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
     let data_dir = config.data_dir.clone();
     let persistence = Persistence::new(data_dir.clone());
@@ -79,7 +78,7 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
 }
 
 /// Lock file in the data dir. Its holder is the data dir's daemon: the one
-/// process that fires schedules and triggers and pushes trim badges, however
+/// process that fires schedules and triggers, however
 /// many herdr-mcp processes (MCP clients, the bridge, the dashboard) share it.
 const DAEMON_LOCK: &str = "daemon.lock";
 /// How often a process without the lock tries again, so one of them takes
@@ -122,8 +121,6 @@ fn spawn_daemon(
             "daemon for {}: running schedules and triggers",
             data_dir.display()
         );
-        // Periodic trim-badge refresh so savings badges survive server restarts.
-        spawn_trim_poller(std::sync::Arc::new(server.clone()));
         triggers::spawn(server.clone(), herdr_client.events());
         server.scheduler.run().await;
     });
@@ -143,7 +140,8 @@ fn try_lock(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
     }
 }
 
-/// `serve` — full MCP server (stdio + optional HTTP).
+/// Headless serve: MCP stdio + the HTTP bridge, or the bridge alone with
+/// `http.http_only`.
 pub async fn run_serve(config: &Config) -> Result<()> {
     let server = serve_core(config).await?;
 
@@ -159,13 +157,6 @@ pub async fn run_serve(config: &Config) -> Result<()> {
         tracing::info!("herdr-mcp server stopped");
     }
     tokio::task::spawn_blocking(herdr_mcp_server::clipboard::release).await?;
-    Ok(())
-}
-
-/// Serve stack headless (MCP stdio disabled) for the dashboard: brings up the
-/// HTTP bridge + herdr event subscriber; the caller runs the UI afterwards.
-pub async fn run_serve_headless(config: &Config) -> Result<()> {
-    serve_core(config).await?;
     Ok(())
 }
 
