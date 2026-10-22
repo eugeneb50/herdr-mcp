@@ -45,11 +45,13 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
     persistence.init().await?;
     let persistence = std::sync::Arc::new(persistence);
 
+    let (settings, _) = config.settings();
     let herdr_client = build_herdr_client(
         &data_dir,
         config.herdr_socket_path(),
-        config.herdr.reconnect_attempts,
-        config.herdr.reconnect_backoff_ms,
+        u32::try_from(settings.number(herdr_mcp_api::settings::RECONNECT_ATTEMPTS))
+            .unwrap_or(u32::MAX),
+        settings.number(herdr_mcp_api::settings::RECONNECT_BACKOFF_MS),
     );
     herdr_client.spawn_subscriber();
     let registry = herdr_client.registry.clone();

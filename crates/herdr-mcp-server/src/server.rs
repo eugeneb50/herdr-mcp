@@ -1,3 +1,4 @@
+use herdr_mcp_api::settings;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::wrapper::Parameters,
@@ -425,6 +426,13 @@ pub struct HerdrMcpServer {
     /// Live clipboard backend config: seeded from `Config`, replaced by
     /// `PUT /api/config/clipboard` (which also writes the config file).
     pub clipboard: std::sync::Arc<std::sync::RwLock<herdr_mcp_core::ClipboardConfig>>,
+    /// Live tunables (timeouts, limits, TUI keys): seeded from the config
+    /// file's `[settings.*]`, changed by `PUT/DELETE /api/settings`.
+    pub settings: std::sync::Arc<std::sync::RwLock<herdr_mcp_api::Settings>>,
+    /// The config file's invalid `[settings.*]` entries (on their defaults).
+    pub settings_warnings: std::sync::Arc<Vec<String>>,
+    /// The config file Settings saves write to (resolved at startup).
+    pub config_path: std::path::PathBuf,
     /// The herdr event subscriber client (for status reporting), once
     /// attached. Shared by every clone, including the scheduler's.
     pub herdr_client: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<HerdrClient>>>,
@@ -486,13 +494,73 @@ impl HerdrMcpServer {
         Ok(())
     }
 
-    /// Build the server, resolving the clipboard backend from `config`.
+    /// The tunables in effect right now.
+    pub fn settings(&self) -> herdr_mcp_api::Settings {
+        self.settings
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// A millisecond setting as a herdr `--timeout` / `timeout_ms` value.
+    fn timeout_ms(&self, key: &str) -> u32 {
+        u32::try_from(self.settings().number(key)).unwrap_or(u32::MAX)
+    }
+
+    /// Validate `value` for setting `key` (`None`: back to its default),
+    /// write it to the config file at `path`, then apply it. `Ok(Err)` is a
+    /// value the caller must fix; nothing is written then.
+    pub async fn save_setting(
+        &self,
+        path: std::path::PathBuf,
+        key: String,
+        value: Option<herdr_mcp_api::settings::Value>,
+    ) -> anyhow::Result<Result<(), String>> {
+        let mut next = self.settings();
+        let stored = match value {
+            Some(v) => match next.set(&key, v) {
+                Ok(()) => next.value(&key),
+                Err(e) => return Ok(Err(e)),
+            },
+            None if next.reset(&key) => None,
+            None => return Ok(Err(format!("unknown setting {key:?}"))),
+        };
+        tokio::task::spawn_blocking(move || {
+            herdr_mcp_core::set_setting_in_file(&path, &key, stored.as_ref())
+        })
+        .await??;
+        *self
+            .settings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+        Ok(Ok(()))
+    }
+
+    /// Every setting back to its default, in the config file at `path` and
+    /// live.
+    pub async fn reset_settings(&self, path: std::path::PathBuf) -> anyhow::Result<()> {
+        tokio::task::spawn_blocking(move || herdr_mcp_core::reset_settings_in_file(&path))
+            .await??;
+        *self
+            .settings
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            herdr_mcp_api::Settings::default();
+        Ok(())
+    }
+
+    /// Build the server, resolving the clipboard backend and the tunables
+    /// from `config`.
     pub fn with_config(
         persistence: Persistence,
         registry: AgentRegistry,
         config: &herdr_mcp_core::Config,
     ) -> Self {
         let persistence = std::sync::Arc::new(persistence);
+        let (settings, warnings) = config.settings();
+        for w in &warnings {
+            tracing::warn!("{w}");
+        }
         // Persisted schedules start with `serve` (see `serve_core`).
         let scheduler = Scheduler::new(persistence.clone());
         let server = Self {
@@ -500,6 +568,9 @@ impl HerdrMcpServer {
             scheduler,
             registry,
             clipboard: std::sync::Arc::new(std::sync::RwLock::new(config.clipboard.clone())),
+            settings: std::sync::Arc::new(std::sync::RwLock::new(settings)),
+            settings_warnings: std::sync::Arc::new(warnings),
+            config_path: herdr_mcp_core::config_file_or_default(),
             herdr_client: std::sync::Arc::default(),
             runs: crate::runs::Runs::default(),
             tool_session: ToolSession::default(),
@@ -830,10 +901,15 @@ impl HerdrMcpServer {
             &exec_done_regex(&token),
             true,
             Some("recent-unwrapped"),
-            Some(timeout_ms.unwrap_or(120_000)),
+            Some(timeout_ms.unwrap_or(self.timeout_ms(settings::PANE_EXEC_MS))),
         );
         herdr_cli(&as_strs(&wait)).await?;
-        let lines = lines.unwrap_or(500).to_string();
+        let lines = lines
+            .map_or_else(
+                || self.settings().number(settings::PANE_EXEC_LINES),
+                u64::from,
+            )
+            .to_string();
         let screen = herdr_cli(&[
             "pane",
             "read",
@@ -882,7 +958,10 @@ impl HerdrMcpServer {
             .herdr_client
             .get()
             .ok_or_else(|| user_err("not connected to herdr (no socket client attached)"))?;
-        let timeout = std::time::Duration::from_millis(u64::from(timeout_ms.unwrap_or(60_000)));
+        let timeout = timeout_ms.map_or_else(
+            || self.settings().duration(settings::HERDR_API_MS),
+            |ms| std::time::Duration::from_millis(u64::from(ms)),
+        );
         let params = params.unwrap_or_else(|| serde_json::json!({}));
         let response = client
             .call(&method, params, timeout)
@@ -958,7 +1037,12 @@ impl HerdrMcpServer {
                 pane = self.registry.resolve("", dep).await;
             }
             let pane = pane.ok_or_else(|| user_err(format!("needs: no agent '{dep}'")))?;
-            herdr_cli(&as_strs(&agent_wait_args(&pane, "idle", Some(300_000))))
+            let wait = agent_wait_args(
+                &pane,
+                "idle",
+                Some(self.timeout_ms(settings::AGENT_WAIT_MS)),
+            );
+            herdr_cli(&as_strs(&wait))
                 .await
                 .map_err(|e| user_err(format!("needs: '{dep}' never went idle: {}", e.message)))?;
         }
@@ -976,6 +1060,7 @@ impl HerdrMcpServer {
                 )
             });
         let pane_id = crate::agents::spawn(
+            &self.settings(),
             &profile,
             &name,
             &args,
@@ -1008,7 +1093,12 @@ impl HerdrMcpServer {
         let mut wait_error = None;
         if wait_idle {
             // The pane exists either way, so a failed wait is reported, not raised.
-            match herdr_cli(&as_strs(&agent_wait_args(&pane_id, "idle", Some(300_000)))).await {
+            let wait = agent_wait_args(
+                &pane_id,
+                "idle",
+                Some(self.timeout_ms(settings::AGENT_WAIT_MS)),
+            );
+            match herdr_cli(&as_strs(&wait)).await {
                 Ok(_) => {
                     status = "idle".to_string();
                     output = read_pane_text(&pane_id).await.unwrap_or_default();
@@ -1081,8 +1171,9 @@ impl HerdrMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let pane = resolve_target_pane(self, &target).await?;
         let profile = self.profile_for_pane(&pane).await;
+        let timeout = timeout_ms.unwrap_or_else(|| self.timeout_ms(settings::AGENT_PROMPT_MS));
         let reply =
-            crate::agents::prompt(&profile, &pane, &text, timeout_ms.unwrap_or(300_000)).await?;
+            crate::agents::prompt(&self.settings(), &profile, &pane, &text, timeout).await?;
         self.registry.set_output(&pane, reply.clone()).await;
         let role = self
             .registry
@@ -1857,6 +1948,14 @@ fn http_router(server: HerdrMcpServer, web_dir: Option<&std::path::Path>, bind: 
         .route("/api/health", get(health_handler))
         .route("/api/config", get(config_handler))
         .route("/api/config/clipboard", put(set_clipboard_config_handler))
+        .route(
+            "/api/settings",
+            get(settings_handler).delete(reset_settings_handler),
+        )
+        .route(
+            "/api/settings/{key}",
+            put(save_setting_handler).delete(reset_setting_handler),
+        )
         .route("/api/tools", get(list_tools_handler))
         .route("/api/tools/{name}", post(call_tool_handler))
         .route("/api/agents", get(agents_handler))
@@ -1969,10 +2068,67 @@ fn config_response(server: &HerdrMcpServer) -> ConfigResponse {
             .unwrap_or_default(),
         herdr_bin: herdr_mcp_core::herdr_bin(),
         clipboard: server.clipboard_config(),
-        config_path: herdr_mcp_core::config_file_or_default()
-            .display()
-            .to_string(),
+        config_path: server.config_path.display().to_string(),
     }
+}
+
+fn settings_response(server: &HerdrMcpServer) -> herdr_mcp_api::SettingsResponse {
+    herdr_mcp_api::SettingsResponse::new(
+        &server.settings(),
+        server.config_path.display().to_string(),
+        server.settings_warnings.to_vec(),
+    )
+}
+
+/// `GET /api/settings` — every tunable with its default, bounds and value.
+async fn settings_handler(
+    State(AppState { server, .. }): State<AppState>,
+) -> Json<herdr_mcp_api::SettingsResponse> {
+    Json(settings_response(&server))
+}
+
+/// `PUT /api/settings/{key}` — validate, write to the config file, apply.
+/// 400 (nothing written) for a value out of range, a chord that types text,
+/// is reserved or already bound, or an unknown key.
+async fn save_setting_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Path(key): Path<String>,
+    Json(value): Json<settings::Value>,
+) -> Result<Json<herdr_mcp_api::SettingsResponse>, (StatusCode, String)> {
+    write_setting(&server, key, Some(value)).await
+}
+
+/// `DELETE /api/settings/{key}` — back to the built-in default.
+async fn reset_setting_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Path(key): Path<String>,
+) -> Result<Json<herdr_mcp_api::SettingsResponse>, (StatusCode, String)> {
+    write_setting(&server, key, None).await
+}
+
+async fn write_setting(
+    server: &HerdrMcpServer,
+    key: String,
+    value: Option<settings::Value>,
+) -> Result<Json<herdr_mcp_api::SettingsResponse>, (StatusCode, String)> {
+    server
+        .save_setting(server.config_path.clone(), key, value)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?
+        .map_err(bad_request)?;
+    Ok(Json(settings_response(server)))
+}
+
+/// `DELETE /api/settings` — every setting back to its default (the
+/// known-good configuration).
+async fn reset_settings_handler(
+    State(AppState { server, .. }): State<AppState>,
+) -> Result<Json<herdr_mcp_api::SettingsResponse>, (StatusCode, String)> {
+    server
+        .reset_settings(server.config_path.clone())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
+    Ok(Json(settings_response(&server)))
 }
 
 async fn config_handler(State(AppState { server, .. }): State<AppState>) -> Json<ConfigResponse> {
@@ -1998,7 +2154,7 @@ async fn set_clipboard_config_handler(
         }
     };
     server
-        .save_clipboard_config(herdr_mcp_core::config_file_or_default(), commands)
+        .save_clipboard_config(server.config_path.clone(), commands)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
     Ok(Json(config_response(&server)))
@@ -3365,6 +3521,77 @@ mod tests {
                 "10"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn settings_crud_over_http_with_known_good_fallback() {
+        use herdr_mcp_api::settings::{PANE_EXEC_MS, Value};
+        use herdr_mcp_api::{ApiClient, ApiError};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let registry = AgentRegistry::new(std::sync::Arc::new(Persistence::new(data_dir.clone())));
+        let mut server = HerdrMcpServer::new(Persistence::new(data_dir), registry);
+        let cfg = tmp.path().join("herdr-mcp.toml");
+        std::fs::write(&cfg, "# keep me\n").unwrap();
+        server.config_path = cfg.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = http_router(server.clone(), None, "127.0.0.1");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let api = ApiClient::new(&format!("http://{addr}")).unwrap();
+        let info = |r: &herdr_mcp_api::SettingsResponse, key: &str| {
+            r.settings.iter().find(|s| s.key == key).cloned().unwrap()
+        };
+
+        // Read: every spec, all on defaults.
+        let all = api.settings().await.unwrap();
+        assert_eq!(all.settings.len(), herdr_mcp_api::settings::SPECS.len());
+        assert!(
+            all.settings
+                .iter()
+                .all(|s| !s.overridden && s.value == s.default)
+        );
+
+        // Update: applied live and written to the file.
+        let r = api
+            .set_setting(PANE_EXEC_MS, &Value::Number(9_000))
+            .await
+            .unwrap();
+        assert!(info(&r, PANE_EXEC_MS).overridden);
+        assert_eq!(server.settings().number(PANE_EXEC_MS), 9_000);
+        let keys = Value::Keys(vec!["Alt+]".into()]);
+        let r = api.set_setting("keys.tab-next", &keys).await.unwrap();
+        assert_eq!(
+            info(&r, "keys.tab-next").value,
+            Value::Keys(vec!["alt+]".into()])
+        );
+        let text = std::fs::read_to_string(&cfg).unwrap();
+        assert!(text.contains("# keep me\n"), "{text}");
+        assert!(text.contains("pane-exec-ms = 9000"), "{text}");
+
+        // Bad values are refused with the reason, and nothing changes.
+        let bad = [
+            (PANE_EXEC_MS, Value::Number(1)),
+            ("keys.tab-prev", Value::Keys(vec!["alt+]".into()])),
+            ("keys.quit", Value::Keys(vec!["q".into()])),
+            ("timeouts.nope", Value::Number(5_000)),
+        ];
+        for (key, value) in bad {
+            match api.set_setting(key, &value).await {
+                Err(ApiError::Status { status: 400, body }) => assert!(!body.is_empty()),
+                other => panic!("{key}: {other:?}"),
+            }
+        }
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), text);
+
+        // Delete one: back to its default; reset all: the known-good config.
+        let r = api.reset_setting(PANE_EXEC_MS).await.unwrap();
+        assert!(!info(&r, PANE_EXEC_MS).overridden);
+        assert_eq!(server.settings().number(PANE_EXEC_MS), 120_000);
+        let r = api.reset_settings().await.unwrap();
+        assert!(r.settings.iter().all(|s| !s.overridden));
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap().trim(), "# keep me");
     }
 
     #[tokio::test]

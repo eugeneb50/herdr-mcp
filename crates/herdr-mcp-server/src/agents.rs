@@ -6,6 +6,8 @@
 //! `working` / `idle` to herdr with `pane report-agent`, so every agent
 //! looks the same to herdr, its events and the registry.
 
+use herdr_mcp_api::Settings;
+use herdr_mcp_api::settings;
 use std::time::{Duration, Instant};
 
 use herdr_mcp_api::AgentProfile;
@@ -17,10 +19,6 @@ use crate::server::{
 
 /// `--source` value herdr-mcp reports agent state under.
 const REPORT_SOURCE: &str = "herdr-mcp";
-const WATCH_EVERY: Duration = Duration::from_millis(500);
-/// Consecutive failed reads after which the watcher assumes the pane is gone.
-const WATCH_GIVE_UP: u32 = 5;
-const START_TIMEOUT_MS: &str = "60000";
 
 /// Quote one word for the pane's shell (`pane run` types a command line).
 fn shell_quote(word: &str) -> String {
@@ -65,7 +63,8 @@ fn split_args(anchor: &str, direction: &str, cwd: Option<&str>) -> Vec<String> {
 }
 
 /// `agent start <name> --kind K --pane P --timeout ms [-- args]` (herdr 0.9).
-fn start_args(kind: &str, name: &str, pane: &str, args: &[String]) -> Vec<String> {
+fn start_args(kind: &str, name: &str, pane: &str, timeout_ms: u64, args: &[String]) -> Vec<String> {
+    let timeout = timeout_ms.to_string();
     let mut out: Vec<String> = [
         "agent",
         "start",
@@ -75,7 +74,7 @@ fn start_args(kind: &str, name: &str, pane: &str, args: &[String]) -> Vec<String
         "--pane",
         pane,
         "--timeout",
-        START_TIMEOUT_MS,
+        &timeout,
     ]
     .map(String::from)
     .to_vec();
@@ -119,6 +118,7 @@ pub struct Placement<'a> {
 /// `name`. Returns the pane id once the agent is started (native: herdr saw
 /// it ready; command: launched, with its watcher running).
 pub async fn spawn(
+    knobs: &Settings,
     profile: &AgentProfile,
     name: &str,
     extra: &[String],
@@ -138,12 +138,13 @@ pub async fn spawn(
     match &profile.kind {
         Some(kind) => {
             let args: Vec<String> = profile.args.iter().chain(extra).cloned().collect();
-            herdr(&start_args(kind, name, &pane, &args)).await?;
+            let timeout = knobs.number(settings::AGENT_START_MS);
+            herdr(&start_args(kind, name, &pane, timeout, &args)).await?;
         }
         None => {
             let line = command_line(profile, extra);
             herdr(&["pane".into(), "run".into(), pane.clone(), line]).await?;
-            watch(pane.clone(), profile);
+            watch(pane.clone(), profile, knobs);
         }
     }
     let _ = herdr(&["pane".into(), "rename".into(), pane.clone(), name.into()]).await;
@@ -219,7 +220,9 @@ impl QuietDetector {
 /// Watch a `command` agent's pane and report its activity to herdr until
 /// the pane goes away. Reported under the profile id, which the registry
 /// picks up as the pane's agent, so later prompts find the same profile.
-fn watch(pane: String, profile: &AgentProfile) {
+fn watch(pane: String, profile: &AgentProfile, knobs: &Settings) {
+    let every = knobs.duration(settings::WATCHER_POLL_MS);
+    let give_up = knobs.number(settings::WATCHER_GIVE_UP);
     let agent = profile.id.clone();
     let ready = profile
         .ready_regex
@@ -230,7 +233,7 @@ fn watch(pane: String, profile: &AgentProfile) {
         let mut detector = QuietDetector::new(quiet, ready, Instant::now());
         let mut failures = 0;
         loop {
-            tokio::time::sleep(WATCH_EVERY).await;
+            tokio::time::sleep(every).await;
             let read = ["pane", "read", &pane, "--source", "detection"];
             let snapshot = match herdr_cli(&read).await {
                 Ok(s) => {
@@ -239,7 +242,7 @@ fn watch(pane: String, profile: &AgentProfile) {
                 }
                 Err(_) => {
                     failures += 1;
-                    if failures >= WATCH_GIVE_UP {
+                    if failures >= give_up {
                         tracing::debug!("agent watcher for {pane}: pane gone, stopping");
                         return;
                     }
@@ -292,6 +295,7 @@ async fn send_keys(pane: &str, keys: &[String]) -> Result<(), McpError> {
 
 /// Send `text`, wait for the agent to finish its turn, and return its reply.
 pub async fn prompt(
+    knobs: &Settings,
     profile: &AgentProfile,
     pane: &str,
     text: &str,
@@ -319,7 +323,9 @@ pub async fn prompt(
         "--lines",
         &lines,
     ];
-    Ok(extract_reply(&herdr_cli(&read).await?, text))
+    let fallback =
+        usize::try_from(knobs.number(settings::REPLY_FALLBACK_LINES)).unwrap_or(usize::MAX);
+    Ok(extract_reply(&herdr_cli(&read).await?, text, fallback))
 }
 
 /// Stop the agent's current turn (`interrupt` keys) or quit it (`stop`).
@@ -335,12 +341,10 @@ pub async fn interrupt(profile: &AgentProfile, pane: &str, hard: bool) -> Result
     .await
 }
 
-/// Lines kept when the prompt can't be found in the output.
-const REPLY_FALLBACK_LINES: usize = 40;
-
 /// The agent's reply in `output`: everything after the last line that echoes
-/// the prompt's first line; if the echo can't be found, the last lines.
-pub(crate) fn extract_reply(output: &str, prompt: &str) -> String {
+/// the prompt's first line; if the echo can't be found, the last `fallback`
+/// lines.
+pub(crate) fn extract_reply(output: &str, prompt: &str, fallback: usize) -> String {
     let lines: Vec<&str> = output.lines().collect();
     let needle: String = prompt
         .lines()
@@ -353,7 +357,7 @@ pub(crate) fn extract_reply(output: &str, prompt: &str) -> String {
     let start = (!needle.is_empty())
         .then(|| lines.iter().rposition(|l| l.contains(&needle)))
         .flatten()
-        .map_or(lines.len().saturating_sub(REPLY_FALLBACK_LINES), |i| i + 1);
+        .map_or(lines.len().saturating_sub(fallback), |i| i + 1);
     lines[start..].join("\n").trim().to_string()
 }
 
@@ -394,7 +398,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            start_args("codex", "rev", "w1:p2", &[]),
+            start_args("codex", "rev", "w1:p2", 60_000, &[]),
             [
                 "agent",
                 "start",
@@ -408,7 +412,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            start_args("claude", "a", "p", &["--model".into(), "opus".into()])[9..],
+            start_args(
+                "claude",
+                "a",
+                "p",
+                60_000,
+                &["--model".into(), "opus".into()]
+            )[9..],
             ["--", "--model", "opus"]
         );
     }
@@ -460,11 +470,11 @@ mod tests {
     fn reply_follows_the_last_prompt_echo() {
         let out = "old stuff\n> summarise the repo\nold answer\n> summarise the repo\nIt is a Rust MCP server.\n\n";
         assert_eq!(
-            extract_reply(out, "summarise the repo\nbriefly"),
+            extract_reply(out, "summarise the repo\nbriefly", 40),
             "It is a Rust MCP server."
         );
         let long: String = (0..60).map(|i| format!("line{i}\n")).collect();
-        let reply = extract_reply(&long, "never echoed");
+        let reply = extract_reply(&long, "never echoed", 40);
         assert!(reply.starts_with("line20") && reply.ends_with("line59"));
     }
 }
