@@ -1,3 +1,29 @@
+# Unreleased
+
+One binary, TUI first, no message trim. **(breaking)** throughout.
+
+- **One binary.** `herdr-trim` is gone; `herdr-mcp` is the only binary, and
+  the release archives, `scripts/install.sh` and the plugin ship just it.
+  Remove a stale `herdr-trim` from an earlier install by hand.
+- **TUI by default.** `herdr-mcp` in a terminal opens the TUI dashboard over
+  its own HTTP bridge; launched by an MCP client (stdin not a terminal) it
+  serves MCP stdio + HTTP as before, so MCP client configs keep working.
+  `--no-tui` forces MCP stdio + HTTP, `--http-only` the bridge alone. The
+  `serve` subcommand is gone: its flags (`--http`, `--http-only`,
+  `--data-dir`, `--herdr-socket`) are top-level. In TUI mode logs go to
+  `<data_dir>/herdr-mcp.log` instead of the terminal.
+- **Message trim removed.** The `herdr-mcp-trim` crate (caveman, PFC1,
+  folder keys), the Trim and Folder Key tools (`compress`, `decompress`,
+  `trim_*`, `*_folder_key`), `/api/trim/*`, trim policies on agents, savings
+  badges and the Trim tabs in the web UI and TUI. `agent_message` and
+  `agent_read` send and store plain text (their `compress` / `decompress`
+  parameters are gone). 41 tools remain. Leftover `trim_stats`, `pfc1_*` and
+  `folder_keys` files in a data dir are ignored.
+- **Plugin.** The bridge tab runs `herdr-mcp --http-only`, the dashboard
+  split `herdr-mcp`. `scripts/plugin-build.sh` replaces `bin/herdr-mcp` by
+  rename, so rebuilding while the bridge runs no longer fails with "Text
+  file busy".
+
 # 0.2.0
 
 Installable as a herdr plugin, one Home page for sending to panes, sessions,

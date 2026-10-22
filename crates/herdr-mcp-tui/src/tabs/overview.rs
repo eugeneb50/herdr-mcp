@@ -32,10 +32,6 @@ fn render_intro(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let trim = app.trim_status.as_ref();
-    let savings = trim.map_or(0.0, |t| t.workspace_savings_pct);
-    let net = trim.map_or(0, |t| t.net_saved_bytes);
-    let msgs = trim.map_or(0, |t| t.messages_trimmed);
     let tool_count = app.playground.tools_list.len();
 
     let lines = vec![
@@ -44,9 +40,6 @@ fn render_intro(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             app.settings.http_port
         )),
         Line::from(""),
-        detail_line("savings", &format!("{}%", savings.round() as i64), 12),
-        detail_line("net saved", &fmt_bytes(net), 12),
-        detail_line("msgs trimmed", &msgs.to_string(), 12),
         detail_line("tools", &tool_count.to_string(), 12),
         detail_line("session", app.herdr.session_name(), 12),
         detail_line("panes", &app.herdr.panes.len().to_string(), 12),
@@ -61,10 +54,10 @@ fn render_tabs_guide(frame: &mut ratatui::Frame, area: Rect) {
 
     let lines = vec![
         Line::from("1 Send (type into a pane)   2 Overview"),
-        Line::from("3 Playground (tool runner + recipe builder)   4 Trim"),
-        Line::from("5 Variables                 6 Settings"),
+        Line::from("3 Playground (tool runner + recipe builder)"),
+        Line::from("4 Variables                 5 Settings"),
         Line::from(""),
-        Line::from("Press Ctrl+1-6 to switch tabs or click the tab strip above."),
+        Line::from("Press Ctrl+1-5 to switch tabs or click the tab strip above."),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
@@ -269,17 +262,6 @@ fn trim_cwd(cwd: &str) -> String {
     }
     let tail = &parts[parts.len() - 2..];
     format!("…/{}", tail.join("/"))
-}
-
-/// Pretty-print bytes like the web UI (K/M suffixes).
-pub fn fmt_bytes(n: usize) -> String {
-    if n >= 1_048_576 {
-        format!("{:.1}M", n as f64 / 1_048_576.0)
-    } else if n >= 1024 {
-        format!("{:.1}K", n as f64 / 1024.0)
-    } else {
-        n.to_string()
-    }
 }
 
 #[cfg(test)]

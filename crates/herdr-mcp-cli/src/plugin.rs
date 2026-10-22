@@ -3,7 +3,7 @@
 //! [`manifest`] is the plugin's `herdr-plugin.toml`, committed at the repo
 //! root (`herdr-mcp plugin manifest > herdr-plugin.toml`; a test keeps the
 //! two equal) so `herdr plugin install eugeneb50/herdr-mcp` works. Its
-//! `[[build]]` puts both binaries in the plugin's `bin/`, and every command
+//! `[[build]]` puts the binary in the plugin's `bin/`, and every command
 //! runs from the plugin directory, reading port and data dir from config
 //! when it runs. herdr offers the actions below in its action menu and
 //! keybindings:
@@ -32,9 +32,8 @@ use herdr_mcp_core::PLUGIN_ID;
 
 /// Env var carrying the invoking action's context into a plugin pane.
 const CONTEXT_ENV: &str = "HERDR_MCP_CONTEXT";
-/// The binaries `[[build]]` installs, relative to the plugin directory.
+/// The binary `[[build]]` installs, relative to the plugin directory.
 pub const EXE: &str = "./bin/herdr-mcp";
-const TRIM: &str = "./bin/herdr-trim";
 
 #[derive(Subcommand)]
 pub enum PluginCommand {
@@ -169,7 +168,7 @@ pub fn manifest() -> Manifest {
                 placement: "tab",
                 width: None,
                 height: None,
-                command: us(&["serve", "--http-only"]),
+                command: us(&["--http-only"]),
             },
             Pane {
                 id: "dashboard",
@@ -177,7 +176,7 @@ pub fn manifest() -> Manifest {
                 placement: "split",
                 width: None,
                 height: None,
-                command: argv(TRIM, &["dashboard"]),
+                command: us(&[]),
             },
         ],
     }

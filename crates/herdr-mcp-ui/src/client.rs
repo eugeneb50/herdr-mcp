@@ -19,26 +19,3 @@ pub fn api() -> Result<ApiClient, ApiError> {
         .ok_or_else(|| ApiError::BadBase("window.location.origin unavailable".into()))?;
     ApiClient::new(&origin)
 }
-
-/// Format byte counts like the old web UI (`1.2K`, `3.4M`, raw).
-pub fn fmt_bytes(n: usize) -> String {
-    if n >= 1_048_576 {
-        format!("{:.1}M", n as f64 / 1_048_576.0)
-    } else if n >= 1024 {
-        format!("{:.1}K", n as f64 / 1024.0)
-    } else {
-        format!("{n}")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fmt_bytes_units() {
-        assert_eq!(fmt_bytes(512), "512");
-        assert_eq!(fmt_bytes(2048), "2.0K");
-        assert_eq!(fmt_bytes(2_097_152), "2.0M");
-    }
-}

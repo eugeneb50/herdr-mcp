@@ -1,7 +1,7 @@
 # herdr-mcp — Architecture Reference
 
 Comprehensive architecture reference for the herdr-mcp project: data flow,
-tool reference, HTTP API, recipe engine, trim system, agent registry,
+tool reference, HTTP API, recipe engine, agent registry,
 persistence, scheduler, frontend, dependencies, build/run, design decisions,
 and known gotchas.
 
@@ -13,12 +13,12 @@ and known gotchas.
 exposes [herdr](https://herdr.dev) — a terminal-native agent multiplexer —
 as MCP tools. It enables AI clients (Claude Desktop, Cursor, Claude Code,
 OpenCode) to control herdr workspaces, tabs, panes, and agents. It also
-includes an HTTP bridge, a Dioxus (Rust → wasm) web playground, a
-sophisticated message-trim (compression) pipeline, and a recipe engine for
-chaining tool calls with variable interpolation.
+includes an HTTP bridge, a Dioxus (Rust → wasm) web playground, a TUI
+dashboard, and a recipe engine for chaining tool calls with variable
+interpolation.
 
 **License:** AGPL v3
-**Current test suite:** run `cargo nextest run --workspace` (343 passing)
+**Current test suite:** run `cargo nextest run --workspace` (217 passing)
 **Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---
@@ -47,60 +47,55 @@ chaining tool calls with variable interpolation.
 │                        ▼                                     │
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │              HerdrMcpServer (server.rs)                  │ │
-│  │  - 55 tool definitions (discovery, lifecycle, read, write, synchronize, a2a, trim, recipes, scheduler, folder-key) │ │
+│  │  - 41 tool definitions (discovery, lifecycle, read,     │ │
+│  │    write, synchronize, a2a, variables, templates,       │ │
+│  │    scheduler, clipboard)                                │ │
 │  │  - Recipe engine with {{ variable }} interpolation      │ │
-│  │  - Outbound trim: apply_outbound_trim()                 │ │
-│  │  - Badge push: push_badge_for_workspace()               │ │
 │  │  - Scheduler for cron-based recipe runs                 │ │
-│  └──────────┬──────────────────────┬───────────────────────┘ │
-│             │                      │                         │
-│     ┌───────▼────────┐   ┌────────▼────────┐                │
-│     │ herdr CLI      │   │ Trim Pipeline   │                │
-│     │ (tokio::process│   │ (in-process)    │                │
-│     │  ::Command)    │   │ caveman → pfc1  │                │
-│     └───────┬────────┘   └─────────────────┘                │
+│  └──────────┬──────────────────────────────────────────────┘ │
+│             │                                                │
+│     ┌───────▼────────┐                                       │
+│     │ herdr CLI      │                                       │
+│     │ (tokio::process│                                       │
+│     │  ::Command)    │                                       │
+│     └───────┬────────┘                                       │
 │             │                                                │
 │     ┌───────▼────────────┐  ┌──────────────────────────┐    │
 │     │ herdr daemon       │  │ Persistence (file-based)  │    │
 │     │ (workspaces,       │  │ data/recipes/*.json       │    │
 │     │  tabs, panes,      │  │ data/sessions/*.json      │    │
 │     │  agents)           │  │ data/schedules/*.json     │    │
-│     └────────────────────┘  │ data/pfc1_memory.json     │    │
-│                              │ data/pfc1_master_key.json │    │
-│                              │ data/folder_keys/         │    │
-│                              └──────────────────────────┘    │
+│     └────────────────────┘  └──────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────┐
 │  Event Subscriber (herdr_client.rs)                         │
 │  Unix socket → herdr daemon                                 │
-│  Subscribes to: workspace.created, workspace.closed,        │
-│                 pane.agent_status_changed                   │
+│  Subscribes to: herdr's global events, plus                 │
+│                 pane.agent_status_changed per pane          │
 │  Populates AgentRegistry (in-memory RwLock<HashMap>)        │
 │  Captures work product on idle transitions                  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 Dual Transport Design
+### 2.2 Front Ends on One Server
 
-The server supports **two transport modes simultaneously**:
+One process serves the HTTP bridge (Axum, `--http <port>`) plus one of:
 
-1. **MCP stdio** (JSON-RPC over stdin/stdout) — for AI client integration
-2. **HTTP bridge** (Axum, optional `--http <port>`) — for browser-based web playground
+1. **TUI dashboard** — in a terminal (stdin is a TTY), the default
+2. **MCP stdio** (JSON-RPC over stdin/stdout) — when an MCP client launches
+   it (stdin is a pipe), or with `--no-tui`
+3. nothing more — `--http-only` (`http.http_only`)
 
-Both share the same `HerdrMcpServer` instance, tool dispatch, and recipe
+All share the same `HerdrMcpServer` instance, tool dispatch, and recipe
 engine. The HTTP bridge exposes REST endpoints that mirror the MCP tools.
 
 ### 2.3 CLI Architecture
 
-The binary has 4 subcommands:
-
-| Subcommand | Purpose |
-|---|---|
-| `serve` | Run the MCP server (stdio + optional HTTP) |
-| `trim` | One-shot message-trim runner (CLI) |
-| `dashboard` | Live ANSI TUI of trim savings |
-| `folder-key` | Manage per-folder PFC1 phonetic keys (build/list/show/decompress) |
+One binary, `herdr-mcp`. With no subcommand it serves (mode as above); its
+flags are `--no-tui`, `--http`, `--http-only`, `--data-dir`, `--herdr-socket`.
+The only subcommand is `plugin` (manifest + the entry points herdr runs).
+While the TUI owns the terminal, tracing goes to `<data_dir>/herdr-mcp.log`.
 
 ---
 
@@ -117,9 +112,8 @@ herdr-mcp/
 │   ├── herdr-mcp-api/      # HTTP wire contract (leaf crate, native + wasm32)
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports every wire type + ApiClient
-│   │       ├── agents.rs   # AgentHandle, TrimPolicy/TrimDirection
+│   │       ├── agents.rs   # AgentHandle, AgentsResponse
 │   │       ├── recipe.rs   # Recipe, RecipeStep, ExecutionResult, templates, recipe requests
-│   │       ├── trim.rs     # TrimStatusResponse, PaneStatus, DiagnoseReport
 │   │       ├── variables.rs # VariableStore, PlaygroundSnapshot, variable/tool envelopes
 │   │       └── client.rs   # Typed ApiClient + ApiError
 │   ├── herdr-mcp-core/     # Config
@@ -127,24 +121,12 @@ herdr-mcp/
 │   │       ├── lib.rs      # Re-exports Config, CliOverrides
 │   │       ├── config.rs   # Full config system: TOML + env + CLI
 │   │       └── session_context.rs # inside-herdr / pane id from herdr's env
-│   ├── herdr-mcp-trim/     # Message-trim pipeline
-│   │   └── src/
-│   │       ├── lib.rs      # Re-exports all public types
-│   │       ├── pfc1.rs     # PFC1 phonetic compressor
-│   │       ├── caveman.rs  # Caveman style compressor
-│   │       ├── code_regions.rs  # Code detection engine
-│   │       ├── pipeline.rs # Composable stage pipeline
-│   │       ├── policy.rs   # TrimPolicyExt (stage parsing); policy data re-exported from api
-│   │       ├── runner.rs   # PipelineRunner with persistence
-│   │       ├── stats.rs    # TrimStats per workspace
-│   │       ├── eval.rs     # trim_eval + trim_bench
-│   │       └── folder_key.rs # Per-folder PFC1 keys
 │   ├── herdr-mcp-tui/      # TUI dashboard (crossterm + ratatui); bridge client only
 │   │   └── src/
 │   │       ├── lib.rs      # App state, event loop, mouse handling
 │   │       ├── http.rs     # Bridge liveness probe (configured port only); every call goes through ApiClient
 │   │       ├── theme.rs    # Color palette and styles
-│   │       └── tabs/       # overview, playground, trim, variables, settings
+│   │       └── tabs/       # send, overview, playground, variables, settings
 │   ├── herdr-mcp-server/   # MCP server, tools, HTTP bridge
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports HerdrMcpServer, Persistence, etc.
@@ -158,16 +140,16 @@ herdr-mcp/
 │   │       ├── templates.rs    # Bundled recipe templates
 │   │       └── variables.rs    # ScheduledRecipe + variable extraction (wire types from api)
 │   ├── herdr-mcp-ui/       # Dioxus 0.7 web UI (see §11)
-│   └── herdr-mcp-cli/      # Binaries
-│       ├── src/bin/herdr-mcp.rs  # Daemon: serve (MCP stdio + HTTP)
-│       ├── src/bin/herdr-trim.rs # Local tools: trim / dashboard / folder-key
-│       ├── src/common.rs         # Shared tracing, config, serve_core
+│   └── herdr-mcp-cli/      # The herdr-mcp binary
+│       ├── src/main.rs           # Mode choice: TUI / MCP stdio / HTTP only; `plugin`
+│       ├── src/common.rs         # Tracing, serve_core, run_serve, daemon lock
+│       ├── src/plugin.rs         # herdr plugin manifest + entry points
 │       └── tests/                # Integration tests
 ```
 
 ---
 
-## 4. MCP Tool Reference (55 tools total)
+## 4. MCP Tool Reference (41 tools total)
 
 ### 4.1 Discovery Tools (8)
 
@@ -229,8 +211,8 @@ engine, always acts on the server's own session.
 | `agent_spawn` | `role`, `agent`, `args`, `cwd?`, `workspace_id?`, `tab_id?`, `split?`, `needs`, `wait_idle`, `label?` | Spawn agent, register role→pane, wait for deps, capture output |
 | `agent_prompt` | `target`, `text`, `timeout_ms?` | Prompt an agent and wait for its turn to finish; returns its reply |
 | `agent_interrupt` | `target`, `hard` | Stop the agent's turn (profile `interrupt` keys) or quit it (`hard`) |
-| `agent_message` | `target`, `text`, `compress?` | Send message with optional trim; uses per-pane policy if no explicit stages |
-| `agent_read` | `target`, `source?`, `lines?`, `decompress?` | Read + store as work product; auto-decompress PFC1 |
+| `agent_message` | `target`, `text` | Send a message to an agent and submit it |
+| `agent_read` | `target`, `source?`, `lines?` | Read + store as work product |
 | `agent_wait` | `target`, `status?`, `timeout_ms?` | Wait for agent by role/pane |
 | `agent_list` | `workspace_id?` | List registry agents |
 
@@ -241,22 +223,7 @@ engine, always acts on the server's own session.
 | `var_get` | `session_id`, `key` | Get session variable |
 | `var_set` | `session_id`, `key`, `value` | Set session variable |
 
-### 4.8 Message-Trim Tools (10)
-
-| Tool | Parameters | Description |
-|---|---|---|
-| `compress` | `text`, `stages`, `workspace_id?` | Compress text via pipeline; embeds PFC1 header |
-| `decompress` | `text` | Decompress PFC1 payload |
-| `trim_policy_set` | `target`, `policy?` | Attach/clear trim policy on agent |
-| `trim_policy_get` | `target` | Read trim policy |
-| `trim_eval` | `text`, `stages` | Offline savings evaluation |
-| `trim_bench` | `corpus`, `level` | Corpus sweep savings distribution |
-| `trim_status` | `workspace_id?` | Aggregate savings metrics |
-| `trim_diagnose` | `workspace_id?` | End-to-end readiness check |
-| `trim_summary` | `workspace_id?` | Fire herdr notification with savings |
-| `trim_dashboard_open` | `workspace_id?` | Open live TUI dashboard in split pane |
-
-### 4.9 Recipe Template Tools (3)
+### 4.8 Recipe Template Tools (3)
 
 | Tool | Parameters | Description |
 |---|---|---|
@@ -264,7 +231,7 @@ engine, always acts on the server's own session.
 | `get_template` | `template_id` | Get template by ID |
 | `instantiate_template` | `template_id`, `variables`, `name?` | Instantiate template → recipe, auto-save |
 
-### 4.10 Scheduler Tools (4)
+### 4.9 Scheduler Tools (4)
 
 | Tool | Parameters | Description |
 |---|---|---|
@@ -273,23 +240,14 @@ engine, always acts on the server's own session.
 | `delete_schedule` | `id` | Delete schedule |
 | `enable_schedule` | `id`, `enabled` | Enable/disable schedule |
 
-### 4.11 Folder-Key Tools (4)
-
-| Tool | Parameters | Description |
-|---|---|---|
-| `build_folder_key` | `folder_path`, `min_frequency?`, `min_length?`, `max_terms?`, `persist_central?`, `learn_master?` | Scan folder, build PFC1 key |
-| `get_folder_key` | `folder_path` | Load folder key (walks up tree) |
-| `list_folder_keys` | — | List central registry keys |
-| `decompress_with_folder_key` | `folder_path`, `text` | Decompress with folder's key |
-
-### 4.12 Clipboard Tools (2)
+### 4.10 Clipboard Tools (2)
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `clipboard_set` | `text` | Write text to system clipboard |
 | `clipboard_get` | — | Read text from system clipboard |
 
-Both go through `clipboard.rs` (see §14.10).
+Both go through `clipboard.rs` (see §14.6).
 
 ---
 
@@ -299,7 +257,7 @@ Both go through `clipboard.rs` (see §14.10).
 
 | Method | Path | Handler | Description |
 |---|---|---|---|---|
-| `GET` | `/*` | `web::serve` / `ServeDir` fallback | Serves the Dioxus web UI built into the binary, or from `http.web-dir` (see §5.5) |
+| `GET` | `/*` | `web::serve` / `ServeDir` fallback | Serves the Dioxus web UI built into the binary, or from `http.web-dir` (see §5.4) |
 | `GET` | `/api/health` | `health_handler` | Returns `"ok"` |
 | `GET` | `/api/tools` | `list_tools_handler` | Lists all tools with JSON schemas |
 | `POST` | `/api/tools/{name}` | `call_tool_handler` | Dispatch tool by name |
@@ -329,16 +287,7 @@ Both go through `clipboard.rs` (see §14.10).
 | `GET` | `/api/variables/{key}` | Get variable |
 | `DELETE` | `/api/variables/{key}` | Delete variable |
 
-### 5.4 Trim Routes
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/trim/status?workspace_id=` | Aggregate trim savings |
-| `POST` | `/api/trim/diagnose` | End-to-end readiness check |
-| `POST` | `/api/trim/summary` | Fire savings notification |
-| `POST` | `/api/trim/dashboard/open` | Open live dashboard pane |
-
-### 5.5 Frontend Serving
+### 5.4 Frontend Serving
 
 The bridge serves the Dioxus bundle built into the binary:
 
@@ -349,14 +298,14 @@ The bridge serves the Dioxus bundle built into the binary:
 - `http.web-dir` (TOML) / `HERDR_MCP_WEB_DIR` (env) serves a bundle directory
   from disk with `tower_http::services::ServeDir` instead (UI development)
 - Any path that isn't an `/api/*` route or a file falls back to `index.html`,
-  so Dioxus router deep links (`/playground`, `/trim`, …) load the app
+  so Dioxus router deep links (`/playground`, `/variables`, …) load the app
 - A missing `index.html` logs a `tracing::warn!` with the build command;
   `/api/*` keeps working
 - No CORS layer: the UI is same-origin with the API (and `dx serve` proxies
   `/api` server-side via `Dioxus.toml [web.proxy]`)
 - Binds `http.bind-addr` (default `127.0.0.1`)
 
-### 5.6 Wire Contract
+### 5.5 Wire Contract
 
 Every request/response type on these routes is defined once in
 `crates/herdr-mcp-api` and re-exported by the server; nothing redefines it.
@@ -421,181 +370,36 @@ Variables use `{{ path }}` syntax with dot/bracket navigation:
 
 ---
 
-## 7. Message-Trim System
+## 7. TUI Dashboard (`crates/herdr-mcp-tui`)
 
-### 7.1 Architecture
+What `herdr-mcp` opens when run in a terminal: VS Code-style tabs, mouse +
+keyboard navigation, sized for a herdr sidecar pane.
 
-The trim system compresses messages crossing the wire between agents, using
-two **non-colliding, composable** compressors:
-
-```
-Input Text
-    │
-    ▼
-┌──────────────┐     ┌──────────────┐
-│   Caveman    │────▶│     PFC1     │────▶ Compressed Output
-│ (style lossy)│     │(phonetic     │      (with optional header)
-│              │     │ lossless)    │
-└──────────────┘     └──────────────┘
-  ASCII/Latin           Cherokee
-  prose only            syllabary
-  U+0000-U+007F         U+13A0-U+13FF
-```
-
-### 7.2 Caveman Compressor (`caveman.rs`)
-
-**Lossy style compressor** for ASCII/Latin prose. Never touches code or
-technical identifiers.
-
-**Levels:**
-| Level | Behavior |
-|---|---|
-| `lite` | Drop pleasantries, fillers, multi-word phrases |
-| `full` | + Drop articles (a/an/the), synonym replacements |
-| `ultra` | + Drop hedging, causal arrows (→), prose abbreviations (database→DB) |
-| `wenyan-*` | Reserved (requires zh corpus, currently skips) |
-
-**Safety:**
-- `is_technical()` detects CamelCase, digits, separators → never rewritten
-- `DESTRUCTIVE` list: security/danger keywords → auto-clarity guard (skips compression)
-- Code regions (fenced blocks) detected via `code_regions.rs` → passed through untouched
-- `replace_whole_words()` ensures `user_database` is never corrupted when replacing `database`
-
-### 7.3 PFC1 Compressor (`pfc1.rs`)
-
-**Lossless phonetic/frequency key-dictionary compressor.** Replaces frequent
-technical terms with **Cherokee syllabary symbols** (U+13A0–U+13FF, 3 UTF-8
-bytes each).
-
-**Alphabet:** 85 Cherokee symbols — a private code point space that cannot
-appear in English/model output.
-
-**Algorithm:**
-1. `analyze_phonetic_pairs()` — tokenizes text, counts frequencies, extracts phrases (n-grams)
-2. `calculate_heuristic_benefit()` — net benefit = `freq × (len − 3) − key_cost`
-3. `generate_compression_key()` — assigns Cherokee symbols to highest-benefit terms (max 80-85)
-4. `compress_text()` — whole-word replacement, longest-first for overlap safety
-5. `generate_header()` — ASCII header with key mapping (self-describing mode)
-
-**Code-aware compression:**
-- `code_regions.rs` provides a pluggable detection engine with 3 built-in detectors:
-  - `FencedCodeDetector` (priority 100): ``` / ~~~ blocks
-  - `InlineCodeDetector` (priority 50): `...` spans
-  - `BracketedCodeDetector` (priority 30): `{...}` / `[...]` balanced regions
-- Only prose segments are compressed; code passes through untouched
-
-**Two modes:**
-| Mode | Header | Use Case |
-|---|---|---|
-| Self-describing | Embedded ASCII header with full key | Standalone `compress` tool, cross-system |
-| Compact (header-less) | No header | Trusted a2a (both ends share server key) |
-
-**Adaptive gate:** Never expands wire bytes. If `candidate.len() >= current.len()`,
-the original passes through unchanged.
-
-### 7.4 Pipeline (`pipeline.rs`)
-
-Composable ordered pipeline of `StageSpec`s:
-```rust
-pub enum StageSpec {
-    Caveman(CavemanLevel),
-    Pfc1 { emit_header: bool },
-}
-```
-
-`pipeline::run()` chains stages sequentially, recording per-stage output,
-stats, and header bytes. Returns `PipelineResult` with `total_savings_bytes`,
-`total_ratio`, and `total_header_bytes`.
-
-### 7.5 Policy System (`policy.rs`)
-
-Per-pane trim policies stored on `AgentHandle`:
-
-```rust
-pub struct TrimPolicy {
-    pub stages: Vec<String>,     // e.g. ["caveman:full", "pfc1"]
-    pub direction: TrimDirection, // None | Outbound | OutboundWithAck
-}
-```
-
-**Direction semantics:**
-- `None` — no transform (default)
-- `Outbound` — compress before sending
-- `OutboundWithAck` — compress outbound; auto-detect + decompress on `agent_read`
-
-**Trim application flow (`apply_outbound_trim`):**
-1. Explicit per-call `compress` stages win
-2. Fall back to target's per-pane policy
-3. Run pipeline with adaptive gate
-4. Record stats + refresh badge
-
-### 7.6 Statistics & Badges (`stats.rs`)
-
-**Two metrics:**
-- `workspace_net_pct()` = `net_saved / gross_saved × 100` (efficiency: what survived header tax)
-- `savings_pct()` = `gross_saved / total_input × 100` (savings: what's shown on badge)
-
-Stats persisted per-workspace to `data/sessions/{ws}.trim_stats.json`.
-
-**Badge push:** After each trim, `push_badge_for_workspace()` sends
-`herdr pane report-metadata --custom-status "-12%" --ttl-ms 25000` to all
-panes with active policies.
-
-### 7.7 PFC1 Memory Persistence (`runner.rs`)
-
-- `PipelineRunner` owns the persistent base key
-- After each run, the latest PFC1 key is merged into `data/pfc1_memory.json`
-- Union merge: new symbols win, existing preserved
-- Shared across CLI tools and MCP calls
-
-### 7.8 Folder Keys (`folder_key.rs`)
-
-Per-folder PFC1 keys for domain-specific compression:
-- Scans folder recursively for text/markdown/code files
-- Learns most compressible terms + phrases
-- Writes `<folder>/.pfc1_key.json` (self-contained key)
-- `MIN_FOLDER_SLOTS = 30` symbols always reserved for local terms
-- Master key persistence: `data/pfc1_master_key.json` seeds future builds
-- Central registry: `data/folder_keys/` for cross-folder visibility
-- mtime-based caching: unchanged file set reuses the cached key
-
-### 7.9 TUI Dashboard (`crates/herdr-mcp-tui`)
-
-Full-featured terminal dashboard with VS Code-style tabs, mouse + keyboard
-navigation, running as a herdr sidecar pane:
-
-**6 tabs** (`Ctrl+1`–`Ctrl+6`; opens on Send):
+**5 tabs** (`Ctrl+1`–`Ctrl+5`; opens on Send):
 | Tab | Content |
 |---|---|
 | Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "press Enter after" (`Ctrl+t`); addressed by pane id |
 | Overview | Welcome, stats, pane table (tab/label/agent/status/cwd) for the shown session; `s` cycles sessions |
 | Playground | Tool runner + recipe builder (same as web playground) |
-| Trim | Trim savings dashboard + per-pane policy editor |
 | Variables | Workspace-scoped variable editor |
 | Settings | Runtime info, clipboard config, keyboard shortcuts |
 
 **Architecture:**
-- Runs **in-process on top of the `serve` stack** (A1 approach): the HTTP
+- Runs **in-process on top of the serve stack** (`serve_core`): the HTTP
   bridge + AgentRegistry + event subscriber come up headless, then the TUI
-  takes over the terminal. MCP stdio is auto-disabled (`http_only=true`) so
-  the TUI owns stdout.
+  takes over the terminal. No MCP stdio in this mode, and tracing goes to
+  `<data_dir>/herdr-mcp.log` so nothing writes over the TUI. If another
+  herdr-mcp already serves the port, the bind fails (logged) and the TUI
+  talks to that bridge.
 - Panes come from herdr via `GET /api/herdr/panes` (the shown session),
   joined by pane id with the registry (`GET /api/agents`, own session only)
-  for role, captured output and trim policy. Writes (Send, paste-to-pane,
-  trim policies) refuse while another session is shown.
-- **Trim policy editor** — select a pane, add/remove/reorder pipeline stages
-  (`caveman:lite/full/ultra`, `pfc1`), set direction, Get/Apply via the
-  bridge's tool endpoints.
+  for role and captured output. Writes (Send, paste-to-pane) refuse while
+  another session is shown.
 - **Mouse support**: Tab strip clicks, scroll wheel on lists, right-click
   context menu with copy actions.
 - **Clipboard integration**: Copy pane text, tool results, or JSON via
   right-click menu; `clipboard_set`/`clipboard_get` tool integration in the
   Settings panel.
-- Stats persisted per-workspace to
-  `data/sessions/{ws}.trim_stats.json`.
-- **Badge push:** After each trim, `push_badge_for_workspace()` sends
-  `herdr pane report-metadata --custom-status "-12%" --ttl-ms 25000` to all
-  panes with active policies.
 
 ---
 
@@ -613,13 +417,13 @@ pub struct AgentRegistry {
 ```
 
 **AgentHandle fields:** `pane_id`, `workspace_id`, `tab_id`, `agent`,
-`role`, `label`, `status`, `output`, `trim_policy`, `updated_at`
+`role`, `label`, `status`, `output`, `updated_at`
 
 **Resolution order:** pane_id (exact match) → role → label (optionally
 scoped to workspace)
 
 **Registry operations:** `upsert`, `set_status`, `set_output`, `get`,
-`set_trim_policy`, `set_label`, `resolve`, `list_for_ws`, `inner_snapshot`,
+`set_label`, `resolve`, `list_for_ws`, `inner_snapshot`,
 `seed`
 
 ### 8.2 Event Subscriber (`HerdrClient`)
@@ -634,8 +438,8 @@ herdr names global events `pane_created` on the wire; `HerdrEvent::parse`
 (`herdr-mcp-api`) maps them to the subscription name (`pane.created`).
 Every event is broadcast (`HerdrClient::events()`) to recipe triggers and
 `GET /api/herdr/events`, and handled locally:
-- `pane.agent_status_changed` → update registry, capture work product on idle
-- `workspace.closed` → send trim summary notification
+`pane.agent_status_changed` updates the registry and captures the work
+product on idle.
 
 ### 8.3 Recipe Triggers (`triggers.rs`)
 
@@ -653,8 +457,7 @@ re-trigger itself.
 2. **role** (filtering by workspace if provided)
 3. **label** (filtering by workspace if provided)
 
-Used by `agent_spawn`, `agent_message`, `agent_read`, `agent_wait`,
-`trim_policy_set/get`.
+Used by `agent_spawn`, `agent_message`, `agent_read`, `agent_wait`.
 
 ---
 
@@ -670,11 +473,9 @@ data/
 ├── schedules/{uuid}.json        # Cron schedules
 ├── sessions/
 │   ├── {session_id}.json        # Session variables
-│   ├── {ws}.agents.json         # Agent registry blob
-│   └── {ws}.trim_stats.json     # Trim statistics per workspace
-├── pfc1_memory.json             # Persistent PFC1 key (learned terms)
-├── pfc1_master_key.json         # Cross-folder master key
-└── folder_keys/                 # Central folder key registry
+│   └── {ws}.agents.json         # Agent registry blob
+├── daemon.lock                  # Held by the data dir's daemon (schedules, triggers)
+└── herdr-mcp.log                # Tracing while the TUI owns the terminal
 ```
 
 **Key types:**
@@ -692,7 +493,7 @@ Cron-based recipe scheduling using the `cron` crate:
 - Each task sleeps until next cron fire, then invokes the executor
 - Executor: the run engine (wired in `HerdrMcpServer::with_config`)
 - Persisted schedules start in `serve_core`, which builds the one
-  `HerdrMcpServer` shared by HTTP, stdio, triggers and the trim poller
+  `HerdrMcpServer` shared by HTTP, stdio, the TUI and triggers
 - `DashMap` for concurrent schedule access
 - Persistence: `data/schedules/{uuid}.json`
 - Enable/disable without losing schedule state
@@ -707,7 +508,7 @@ Cron-based recipe scheduling using the `cron` crate:
   compiled to `wasm32-unknown-unknown` by the `dx` CLI
 - `dx serve` — dev server with hot reload; proxies `/api` to
   `http://localhost:7676/` (`Dioxus.toml [web.proxy]`)
-- `dx bundle --platform web --release` — production build served by the bridge (§5.5)
+- `dx bundle --platform web --release` — production build served by the bridge (§5.4)
 - Styles: `assets/app.css` (plain CSS, no Node toolchain)
 
 ### 11.2 Routes
@@ -717,7 +518,6 @@ Cron-based recipe scheduling using the `cron` crate:
 | `/` | `Home` | Landing page: send to a pane by `pane_id` and/or `label` (typed, or picked from dropdowns of the panes and labels/roles in `GET /api/variables/auto`; `ApiClient::send_to_pane` → `send_text` / `run_command`, `pane_id` wins), remembers the last target in `localStorage`; collapsed getting-started notes; pane table at the bottom from the same auto variables (click a row to target it) |
 | `/overview` | `Overview` | Pane browser: `GET /api/herdr/panes` with session/status/label filters, grouped by workspace and tab |
 | `/playground` | `Playground` | Tool runner (schema-driven form) + recipe builder/library; `pane_id` / `label` fields offer the same auto-variable pane dropdowns as Home (`components/pane_options.rs`) |
-| `/trim` | `Trim` | Trim savings, per-pane bars, active policies, diagnose/summary |
 | `/variables` | `Variables` | User variables (CRUD/import) + auto variables |
 | `/settings` | `Settings` | Runtime config + clipboard round-trip test |
 
@@ -753,11 +553,9 @@ Cron-based recipe scheduling using the `cron` crate:
 | `chrono` | 0.4 (serde) | Date/time |
 | `cron` | 0.12 | Cron expression parsing |
 | `dashmap` | 6 | Concurrent hashmap |
-| `lazy_static` | 1 | Static regex compilation |
 | `crossterm` | 0.28 | Terminal TUI for dashboard |
 | `dirs` | 5 | XDG directory resolution |
 | `toml` | 0.8 | Config file parsing |
-| `walkdir` | 2 | Directory traversal |
 | `tempfile` | 3 | Temp file management (dev) |
 
 ### 12.2 Rust (Dev/Test)
@@ -785,14 +583,14 @@ Cron-based recipe scheduling using the `cron` crate:
 
 ```bash
 # Rust binaries
-cargo build --release                    # → target/release/{herdr-mcp,herdr-trim}
+cargo build --release                    # → target/release/herdr-mcp
 
 # Web UI
 cd crates/herdr-mcp-ui && dx bundle --platform web --release
                                          # → target/dx/herdr-mcp-ui/release/web/public
 
 # Development (Rust bridge + Dioxus hot reload)
-cargo run --release --bin herdr-mcp -- serve --http-only   # Terminal 1 (port 7676)
+cargo run --release --bin herdr-mcp -- --http-only   # Terminal 1 (port 7676)
 cd crates/herdr-mcp-ui && dx serve                          # Terminal 2 (proxies /api)
 
 # Tests
@@ -805,20 +603,13 @@ cargo clippy -p herdr-mcp-api -p herdr-mcp-ui --target wasm32-unknown-unknown --
 cargo fmt --all -- --check
 ```
 
-### 13.2 Binary Subcommands
+### 13.2 Command Line
 
 ```bash
-herdr-mcp                         # MCP stdio + HTTP bridge on port 7676
-herdr-mcp serve                   # Explicit MCP + HTTP
-herdr-trim dashboard              # TUI dashboard
+herdr-mcp                         # terminal: TUI + HTTP bridge; piped stdin: MCP stdio + HTTP
+herdr-mcp --no-tui                # MCP stdio + HTTP bridge
+herdr-mcp --http-only             # HTTP bridge only
 herdr-mcp plugin manifest         # print the herdr plugin manifest (see §13.3)
-herdr-mcp trim --stage caveman:full --stage pfc1 "text to compress"
-herdr-mcp trim --decompress "compressed text"
-herdr-mcp trim --file input.txt
-herdr-mcp folder-key build ./my-folder --data-dir ./data --max-terms 85
-herdr-mcp folder-key list --data-dir ./data
-herdr-mcp folder-key show ./my-folder
-herdr-mcp folder-key decompress ./my-folder "compressed text"
 ```
 
 ### 13.3 herdr Plugin
@@ -828,7 +619,7 @@ The repo-root `herdr-plugin.toml` is generated from
 herdr-plugin.toml`; a test fails when they differ), so `herdr plugin install
 eugeneb50/herdr-mcp` works and the repo can carry the `herdr-plugin`
 marketplace topic. `[[build]]` runs `scripts/plugin-build.sh` (release
-`herdr-mcp` + `herdr-trim` into `bin/`, web UI when `dx` exists); every command
+`herdr-mcp` into `bin/`, web UI when `dx` exists); every command
 runs `./bin/…` from the plugin directory and resolves port and data dir from
 config at run time. With no `data_dir` configured, a process herdr runs as this
 plugin (`HERDR_PLUGIN_ID=herdr-mcp`) defaults to `HERDR_PLUGIN_STATE_DIR`, not
@@ -844,8 +635,8 @@ another bridge may serve another data dir).
 | Action (`herdr-mcp.<id>`) | Opens |
 |---|---|
 | `recipes` | popup: pick a saved recipe, run it with the invocation context as `{{herdr.…}}` (`workspace_id`, `pane_id` = focused pane, `selected_text`, …), follow its steps |
-| `bridge` | tab: `herdr-mcp serve --http-only` |
-| `dashboard` | split: `herdr-trim dashboard` |
+| `bridge` | tab: `herdr-mcp --http-only` |
+| `dashboard` | split: `herdr-mcp` (the TUI) |
 | `web` | the web playground in a browser |
 
 Bind one in herdr's config: `[[keys.command]] key = "prefix+r"`,
@@ -860,7 +651,7 @@ Bind one in herdr's config: `[[keys.command]] key = "prefix+r"`,
 | `RUST_LOG` | `herdr_mcp=info` | Tracing filter |
 | `HERDR_MCP_DATA_DIR` | `./data` | Data directory |
 | `HERDR_MCP_HTTP_PORT` | — | HTTP port override |
-| `HERDR_MCP_HTTP_ONLY` | — | HTTP-only mode |
+| `HERDR_MCP_HTTP_ONLY` | — | HTTP bridge only (no TUI, no MCP stdio) |
 | `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
 | `HERDR_MCP_WEB_DIR` | the web UI built into the binary | Serve a `dx bundle` directory from disk instead |
 | `HERDR_MCP_CONFIG` | — | Config file path |
@@ -894,42 +685,20 @@ single-source-of-truth rule applied to the HTTP contract — a shape change is
 one edit, checked by the contract test.  
 **Trade-off:** Building the UI needs the `dx` CLI and the wasm32 target.
 
-### 14.4 Non-Colliding Compressors
-
-**Decision:** Caveman operates on ASCII/Latin prose (U+0000–U+007F); PFC1
-uses Cherokee syllabary (U+13A0–U+13FF).  
-**Rationale:** The two compressors cannot interfere with each other's output,
-making composition trivially safe.
-
-### 14.5 Adaptive Gate (Never Expand)
-
-**Decision:** If `candidate.len() >= current.len()`, pass through unchanged.  
-**Rationale:** Short messages drowned by PFC1 headers would expand rather
-than compress. The gate prevents this.
-
-### 14.6 Lossy vs. Lossless Split
-
-**Decision:** `caveman` is lossy (drops articles/fillers, never technical
-identifiers); `pfc1` is lossless.  
-**Rationale:** Style compression is inherently lossy; dictionary compression
-must be reversible for a2a communication. The a2a path
-(`agent_message`→`agent_read`) uses compact header-less PFC1 and is
-**lossless end-to-end**.
-
-### 14.7 File-Based Persistence
+### 14.4 File-Based Persistence
 
 **Decision:** All state (recipes, schedules, variables, stats, agent
 registry) persisted as JSON files under `data/`.  
 **Rationale:** Simple, inspectable, no database dependency. Adequate for
 single-server deployment.
 
-### 14.8 Workspace-Scoped Variables
+### 14.5 Workspace-Scoped Variables
 
 **Decision:** Session variables use herdr workspace ID as scope.  
 **Rationale:** Recipes run within a workspace context; variables should chain
 across runs in the same workspace but not leak between workspaces.
 
-### 14.10 Built-in Clipboard & Command Override
+### 14.6 Built-in Clipboard & Command Override
 
 **Decision:** `clipboard_set` / `clipboard_get` use the OS clipboard through
 [arboard](https://github.com/1Password/arboard) (macOS, Windows, X11; Wayland
@@ -964,40 +733,27 @@ libraries linked.
    enables `agent_spawn`→`agent_message`→`agent_read` chains where one
    agent's output becomes another's input.
 
-4. **Pipeline composition:** Trim stages compose as an ordered list. Each
-   stage is independent and the pipeline tracks per-stage stats, making it
-   easy to add new compressor types.
-
-5. **RAII terminal management:** The dashboard uses `RestoreTerm` guard
+4. **RAII terminal management:** The dashboard uses `RestoreTerm` guard
    struct to ensure terminal state is restored on any exit path.
-
-6. **Pluggable code detection:** The `CodeDetector` trait + `CodeRegionRegistry`
-   pattern allows adding new language-specific detectors without modifying
-   core compression logic.
 
 ---
 
 ## 16. Known Gotchas
 
-1. **Folder key non-determinism:** `build_folder_key` writes its output INTO
-   the scanned root folder, so a second scan re-ingests the JSON file →
-   produced key is non-deterministic across separate builds (HashMap
-   iteration order). A single persisted-on-disk key IS stable.
-
-2. **Config merge semantics:** `Config::merge` takes `other` wholesale for
+1. **Config merge semantics:** `Config::merge` takes `other` wholesale for
    every field (no per-field default-preservation). If `other.data_dir` is
    empty, it overwrites the base.
 
-3. **IDs may compact:** Session-local IDs (workspace, pane, tab) may change
+2. **IDs may compact:** Session-local IDs (workspace, pane, tab) may change
    when items are closed. Always re-read from list commands after structural
    changes.
 
-4. **Event subscriber only on Unix:** The herdr event subscriber uses Unix
+3. **Event subscriber only on Unix:** The herdr event subscriber uses Unix
    sockets. On non-Unix platforms, the registry is populated only by explicit
    tool calls.
 
-5. **One pane list:** every caller that needs herdr's panes (label lookup,
-   agent placement, the dashboard split, auto variables, the event
+4. **One pane list:** every caller that needs herdr's panes (label lookup,
+   agent placement, auto variables, the event
    subscriber, `list_panes`, `/api/herdr/panes`) goes through
    `panes::panes(&PaneFilter)` in `herdr-mcp-server/src/panes.rs`, typed as
    `herdr_mcp_api::HerdrPane`. herdr 0.9 always names the id `pane_id`.

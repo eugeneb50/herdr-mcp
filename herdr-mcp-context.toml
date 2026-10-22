@@ -285,14 +285,26 @@
 #   to the step's text.
 # - resolve_variables leaves unknown {{ path }} placeholders unchanged.
 # - Config::merge takes `other` wholesale for every field.
-# - TrimPolicy::parse_stages defaults emit_header = true; parse_stages_with
-#   sets it.
-# - CompressionKey = HashMap<String,String> (Cherokee symbol -> term), 85
-#   symbols (U+13A0..=U+13FF).
-# - stats.rs: savings_pct() = gross/total_input; workspace_net_pct() =
-#   net/gross.
 # - resolve_label_in_panes takes typed HerdrPane (herdr 0.9 always sends
 #   pane_id; herdr's PaneInfo has workspace_id/tab_id as required strings).
-# - Gotcha: build_folder_key writes its output INTO the scanned folder, so a
-#   second scan re-ingests it -> keys differ across separate builds (HashMap
-#   order). One persisted key is stable; never assert two builds are equal.
+
+# One binary, TUI first, trim removed (chore/single-bin-drop-trim, 2026-10-21)
+#
+# - herdr-mcp-trim crate, herdr-trim binary, Trim/Folder Key tools,
+#   /api/trim/*, AgentHandle.trim_policy, badges, Trim tabs: all deleted.
+#   41 tools, 6 crates, 217 tests. a2a (agent_message/agent_read) is plain
+#   text. Supersedes the trim notes above (kept as history).
+# - main.rs picks the mode: --http-only / http.http_only -> bridge only;
+#   else stdin a TTY and no --no-tui -> TUI over serve_core in-process; else
+#   run_serve (MCP stdio + HTTP). MCP clients launch with piped stdin, so a
+#   bare `herdr-mcp` in their config still serves MCP. `serve` subcommand gone.
+# - TUI mode logs to <data_dir>/herdr-mcp.log: `herdr_mcp=info` prefix-matches
+#   herdr_mcp_server etc., so async info logs used to land on the TUI's
+#   terminal (the old `herdr-trim dashboard` had the same bug).
+# - HerdrMcpServer.data_dir field removed (duplicate of
+#   persistence.data_dir()); TrimStatusParams -> WorkspaceQuery for the
+#   ?workspace_id= handlers.
+# - plugin-build.sh copies to bin/herdr-mcp.new and renames over: a plain cp
+#   onto a running bin/herdr-mcp fails with "Text file busy".
+# - `dx fmt` rewrites the whole UI crate (and chokes on forms.rs); this repo
+#   is formatted by rustfmt only — never run dx fmt.

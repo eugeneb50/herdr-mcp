@@ -105,7 +105,7 @@ pub struct HerdrSession {
     pub socket_path: String,
     pub session_dir: String,
     /// The session this bridge talks to (set by the bridge per request, not
-    /// by herdr). Writes and trim policies only ever act on this one.
+    /// by herdr). Writes only ever act on this one.
     #[serde(default)]
     pub current: bool,
 }

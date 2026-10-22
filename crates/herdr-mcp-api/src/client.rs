@@ -139,13 +139,6 @@ impl ApiClient {
         }
     }
 
-    fn ws_body(workspace_id: Option<&str>) -> Value {
-        match workspace_id {
-            Some(ws) if !ws.is_empty() => serde_json::json!({ "workspace_id": ws }),
-            _ => serde_json::json!({}),
-        }
-    }
-
     // ── discovery ──────────────────────────────────────────────────────
 
     /// `GET /api/health` — `Ok` when the bridge answers.
@@ -249,25 +242,6 @@ impl ApiClient {
             )
             .await?;
         tool_ok(&v).map(tool_text)
-    }
-
-    /// `trim_policy_get` tool for a pane id / role / label.
-    pub async fn trim_policy_get(&self, target: &str) -> Result<Value, ApiError> {
-        self.call_tool("trim_policy_get", &serde_json::json!({ "target": target }))
-            .await
-    }
-
-    /// `trim_policy_set` tool; `None` clears the policy.
-    pub async fn trim_policy_set(
-        &self,
-        target: &str,
-        policy: Option<&TrimPolicy>,
-    ) -> Result<Value, ApiError> {
-        self.call_tool(
-            "trim_policy_set",
-            &serde_json::json!({ "target": target, "policy": policy }),
-        )
-        .await
     }
 
     /// Type `text` into a pane: `send_text`, or `run_command` (text + Enter)
@@ -466,44 +440,6 @@ impl ApiClient {
         self.no_content(
             self.request(Method::POST, &["api", "playground"])
                 .json(snapshot),
-        )
-        .await
-    }
-
-    // ── trim ───────────────────────────────────────────────────────────
-
-    /// `GET /api/trim/status[?workspace_id=]` — aggregate savings.
-    pub async fn trim_status(
-        &self,
-        workspace_id: Option<&str>,
-    ) -> Result<TrimStatusResponse, ApiError> {
-        let req = Self::ws_query(
-            self.request(Method::GET, &["api", "trim", "status"]),
-            workspace_id,
-        );
-        Self::json(req).await
-    }
-
-    /// `POST /api/trim/diagnose` — end-to-end readiness check.
-    pub async fn trim_diagnose(
-        &self,
-        workspace_id: Option<&str>,
-    ) -> Result<DiagnoseReport, ApiError> {
-        self.post(&["api", "trim", "diagnose"], &Self::ws_body(workspace_id))
-            .await
-    }
-
-    /// `POST /api/trim/summary` — fire a savings notification (tool result JSON).
-    pub async fn trim_summary(&self, workspace_id: Option<&str>) -> Result<Value, ApiError> {
-        self.post(&["api", "trim", "summary"], &Self::ws_body(workspace_id))
-            .await
-    }
-
-    /// `POST /api/trim/dashboard/open` — open the dashboard pane (tool result JSON).
-    pub async fn trim_dashboard_open(&self, workspace_id: Option<&str>) -> Result<Value, ApiError> {
-        self.post(
-            &["api", "trim", "dashboard", "open"],
-            &Self::ws_body(workspace_id),
         )
         .await
     }

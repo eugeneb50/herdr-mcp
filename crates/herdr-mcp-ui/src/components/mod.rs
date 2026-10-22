@@ -6,7 +6,6 @@ pub mod overview;
 pub mod pane_options;
 pub mod playground;
 pub mod settings;
-pub mod trim;
 pub mod variables;
 
 use dioxus::prelude::*;
@@ -15,7 +14,6 @@ use home::Home;
 use overview::Overview;
 use playground::Playground;
 use settings::Settings;
-use trim::Trim;
 use variables::Variables;
 
 #[derive(Debug, Clone, Routable, PartialEq)]
@@ -28,8 +26,6 @@ pub enum Route {
         Overview {},
         #[route("/playground")]
         Playground {},
-        #[route("/trim")]
-        Trim {},
         #[route("/variables")]
         Variables {},
         #[route("/settings")]
@@ -52,7 +48,6 @@ fn Shell() -> Element {
                 Link { class: "nav-link", to: Route::Home {}, "Home" }
                 Link { class: "nav-link", to: Route::Overview {}, "Overview" }
                 Link { class: "nav-link", to: Route::Playground {}, "Playground" }
-                Link { class: "nav-link", to: Route::Trim {}, "Trim" }
                 Link { class: "nav-link", to: Route::Variables {}, "Variables" }
                 Link { class: "nav-link", to: Route::Settings {}, "Settings" }
             }

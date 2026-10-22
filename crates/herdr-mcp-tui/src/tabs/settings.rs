@@ -175,7 +175,7 @@ async fn run_clipboard_test(app: &mut App) {
         Some(h) => h.clone(),
         None => {
             app.settings.clipboard.test_msg =
-                "HTTP bridge not connected — start herdr-mcp serve --http 7676".into();
+                "HTTP bridge not connected — see herdr-mcp.log in the data dir".into();
             return;
         }
     };
@@ -307,7 +307,7 @@ fn render_clipboard(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let bridge_text = if app.bridge_connected {
         "Bridge: connected"
     } else {
-        "Bridge: not connected — start herdr-mcp serve --http 7676"
+        "Bridge: not connected — see herdr-mcp.log in the data dir"
     };
     lines.push(Line::from(Span::styled(bridge_text, bridge_style)));
 
