@@ -41,6 +41,20 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   `agent_wait`, whose `target` (role, label or pane id) now also takes a
   pane the registry hasn't seen. The Dev Watch template's notify step uses `agent_message`; saved
   recipes with the old tool names need the same edit. 36 tools remain.
+- **TUI stays live during requests.** Playground tool calls and recipe
+  runs run in the background: the screen keeps drawing ("running …"),
+  tabs switch, and the result lands when it finishes. Recipe runs are
+  polled to the end, so one longer than 30s is no longer reported as
+  failed. A held key or steady typing no longer freezes the redraw.
+- **TUI number fields.** Integer parameters (`timeout_ms`, `lines`) were
+  sent as `6000.0` and always rejected; integers now go as integers.
+- **Terminal restored on a TUI panic.** Release builds abort on panic; a
+  panic hook now leaves the alternate screen, raw mode and mouse capture
+  first, so the shell isn't left unusable.
+- **Atomic saves.** Data-dir files (recipes, variables, session vars,
+  playground, runs, schedules, profiles) and the `[clipboard]` config are
+  written to a temp file and renamed into place: a crash or two racing
+  saves can no longer leave a truncated or torn file.
 - **Chaining across requests.** A recipe step can carry `extract` rules
   (`{path, var, scope}`) that save part of its result as a global or a
   collection (recipe) variable; later steps and later runs resolve it.

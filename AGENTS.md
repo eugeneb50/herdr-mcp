@@ -185,7 +185,8 @@ When uncertain, classify as higher risk.
 - Do not mix massive formatting-only changes with functional changes.
 - Do not modify unrelated modules "while here".
 - Do not bypass failing checks without explicit explanation.
-- Do not leave `unwrap()` / `expect()` in production paths; propagate errors or document the invariant that makes panic impossible.
+- Do not leave `unwrap()` / `expect()` in production paths; propagate errors or document the invariant that makes panic impossible (`expect("…")` naming it). `clippy::unwrap_used` is denied workspace-wide; tests may unwrap (`clippy.toml`).
+- Write data and config files through `persistence::write_atomic` (temp file + rename), never `fs::write` in place.
 - Do not print to stdout from server code — stdout is exclusively MCP JSON-RPC; all tracing/logging goes to stderr.
 
 ## Design Decisions & Trade-offs

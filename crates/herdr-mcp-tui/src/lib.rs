@@ -265,6 +265,8 @@ pub struct DashboardOptions {
 /// The top-level interactive application state.
 pub struct App {
     pub opts: DashboardOptions,
+    /// The tool call or recipe run in flight, if any.
+    pub(crate) job: Option<tabs::playground::Job>,
     pub http: Option<ApiClient>,
     pub tab: Tab,
     pub herdr: HerdrContext,
@@ -574,6 +576,7 @@ impl App {
         let data_dir = opts.data_dir.display().to_string();
         Self {
             opts,
+            job: None,
             http,
             tab: Tab::Send,
             herdr: HerdrContext::default(),
@@ -1265,6 +1268,14 @@ pub async fn run(opts: DashboardOptions) -> Result<()> {
     app.refresh().await;
     app.refresh_herdr().await;
 
+    // Release builds abort on panic (no unwinding past here), so put the
+    // terminal back in the hook or the shell is left raw, on the alternate
+    // screen, with mouse capture on. Then print the panic as usual.
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        report(info);
+    }));
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -1297,6 +1308,20 @@ pub async fn run(opts: DashboardOptions) -> Result<()> {
     result
 }
 
+/// Undo [`run`]'s terminal setup, best effort (the panic path). Popping
+/// keyboard flags that were never pushed is a no-op.
+fn restore_terminal() {
+    let mut out = io::stdout();
+    let _ = execute!(out, PopKeyboardEnhancementFlags);
+    let _ = disable_raw_mode();
+    let _ = execute!(
+        out,
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        crossterm::cursor::Show
+    );
+}
+
 /// Core event loop: draws, polls, dispatches input.
 async fn main_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
@@ -1319,8 +1344,12 @@ async fn main_loop(
             app.dirty = false;
         }
 
-        let poll = Duration::from_millis(frame_ms);
+        // Wait up to a frame for input, then drain only what is already
+        // queued: waiting a full frame per event would starve the redraw
+        // for as long as keys keep coming (a held arrow key, steady typing).
+        let mut poll = Duration::from_millis(frame_ms);
         while event::poll(poll)? {
+            poll = Duration::ZERO;
             match event::read()? {
                 Event::Key(k) => {
                     if k.kind != KeyEventKind::Press {
@@ -1343,6 +1372,12 @@ async fn main_loop(
             }
         }
 
+        if app.job.as_ref().is_some_and(|j| j.is_finished())
+            && let Some(job) = app.job.take()
+        {
+            tabs::playground::finish_job(app, job).await;
+            app.dirty = true;
+        }
         if app.last_refresh.elapsed() > refresh {
             app.refresh().await;
             app.dirty = true;
