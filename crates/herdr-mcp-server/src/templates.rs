@@ -38,7 +38,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 },
                 RecipeStep {
                     id: "send".to_string(),
-                    tool: "send_agent".to_string(),
+                    tool: "agent_message".to_string(),
                     params: serde_json::json!({
                         "target": "{{ template.agent_target }}",
                         "text": "Files in {{ template.directory }} changed"
@@ -581,11 +581,11 @@ mod tests {
         let recipe = instantiate("dev-watch", vars, None).expect("should instantiate");
         assert_eq!(recipe.name, "Dev Watch");
         assert!(recipe.steps.iter().any(|s| s.tool == "list_panes"));
-        assert!(recipe.steps.iter().any(|s| s.tool == "send_agent"));
+        assert!(recipe.steps.iter().any(|s| s.tool == "agent_message"));
         let send = recipe
             .steps
             .iter()
-            .find(|s| s.tool == "send_agent")
+            .find(|s| s.tool == "agent_message")
             .unwrap();
         assert!(send.params.to_string().contains("agentA"));
         assert!(send.params.to_string().contains("/src"));
@@ -600,7 +600,7 @@ mod tests {
         let send = recipe
             .steps
             .iter()
-            .find(|s| s.tool == "send_agent")
+            .find(|s| s.tool == "agent_message")
             .unwrap();
         assert!(
             send.params.to_string().contains("Files in . changed"),

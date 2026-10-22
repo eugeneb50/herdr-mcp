@@ -8,11 +8,11 @@
 
 use chrono::{DateTime, Utc};
 use cron::Schedule;
-use dashmap::DashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
 use crate::persistence::Persistence;
@@ -33,9 +33,9 @@ struct SchedulerInner {
     persistence: Arc<Persistence>,
     executor: OnceLock<ExecutorFn>,
     /// Runner task per schedule id (task handles only, no schedule state).
-    runners: DashMap<Uuid, tokio::task::JoinHandle<()>>,
+    runners: Mutex<HashMap<Uuid, tokio::task::JoinHandle<()>>>,
     /// Recipes currently executing, so two schedules never overlap one recipe.
-    in_flight: DashMap<Uuid, ()>,
+    in_flight: Mutex<HashSet<Uuid>>,
 }
 
 fn parse_cron(expr: &str) -> anyhow::Result<Schedule> {
@@ -52,8 +52,8 @@ impl Scheduler {
             inner: Arc::new(SchedulerInner {
                 persistence,
                 executor: OnceLock::new(),
-                runners: DashMap::new(),
-                in_flight: DashMap::new(),
+                runners: Mutex::default(),
+                in_flight: Mutex::default(),
             }),
         }
     }
@@ -84,6 +84,8 @@ impl Scheduler {
             let running = self
                 .inner
                 .runners
+                .lock()
+                .unwrap()
                 .get(&schedule.id)
                 .is_some_and(|h| !h.is_finished());
             if running || !schedule.enabled {
@@ -110,14 +112,14 @@ impl Scheduler {
     fn spawn_runner(&self, id: Uuid) {
         let inner = Arc::clone(&self.inner);
         let handle = tokio::spawn(async move { inner.run_schedule(id).await });
-        if let Some(old) = self.inner.runners.insert(id, handle) {
+        if let Some(old) = self.inner.runners.lock().unwrap().insert(id, handle) {
             old.abort();
         }
     }
 
     pub async fn remove(&self, id: Uuid) -> anyhow::Result<bool> {
         let removed = self.inner.persistence.delete_schedule(&id).await?;
-        if let Some((_, handle)) = self.inner.runners.remove(&id) {
+        if let Some(handle) = self.inner.runners.lock().unwrap().remove(&id) {
             handle.abort();
         }
         Ok(removed)
@@ -182,7 +184,7 @@ impl SchedulerInner {
                 tracing::warn!("schedule {id}: no executor set; skipping tick");
                 continue;
             };
-            if self.in_flight.insert(sched.recipe_id, ()).is_some() {
+            if !self.in_flight.lock().unwrap().insert(sched.recipe_id) {
                 tracing::debug!(
                     "schedule {id}: recipe {} still running; skipping tick",
                     sched.recipe_id
@@ -206,11 +208,11 @@ impl SchedulerInner {
     }
 }
 
-struct InFlight<'a>(&'a DashMap<Uuid, ()>, Uuid);
+struct InFlight<'a>(&'a Mutex<HashSet<Uuid>>, Uuid);
 
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
-        self.0.remove(&self.1);
+        self.0.lock().unwrap().remove(&self.1);
     }
 }
 
@@ -322,12 +324,16 @@ mod tests {
         s.cron_schedule = "* * * * * *".into();
         sched.schedule_one(s.clone()).await.unwrap();
         assert!(
-            sched.inner.runners.is_empty(),
+            sched.inner.runners.lock().unwrap().is_empty(),
             "saving alone starts nothing"
         );
         sched.sync().await.unwrap();
         sched.sync().await.unwrap();
-        assert_eq!(sched.inner.runners.len(), 1, "sync is idempotent");
+        assert_eq!(
+            sched.inner.runners.lock().unwrap().len(),
+            1,
+            "sync is idempotent"
+        );
 
         tokio::time::sleep(std::time::Duration::from_millis(2200)).await;
         assert!(fired.load(Ordering::SeqCst) >= 1, "never fired");
@@ -346,7 +352,7 @@ mod tests {
         );
 
         assert!(sched.remove(s.id).await.unwrap());
-        assert!(sched.inner.runners.is_empty());
+        assert!(sched.inner.runners.lock().unwrap().is_empty());
         assert!(sched.list().await.is_empty());
     }
 
@@ -362,7 +368,7 @@ mod tests {
         p.save_schedule(&s).await.unwrap();
 
         sched.sync().await.unwrap();
-        assert!(sched.inner.runners.is_empty());
+        assert!(sched.inner.runners.lock().unwrap().is_empty());
         let stored = p.load_schedule(&s.id).await.unwrap().unwrap();
         assert!(!stored.enabled);
     }
@@ -388,7 +394,7 @@ mod tests {
 
         let daemon = Scheduler::new(std::sync::Arc::new(p));
         daemon.sync().await.unwrap();
-        assert!(daemon.inner.runners.contains_key(&s.id));
-        assert!(saver.inner.runners.is_empty());
+        assert!(daemon.inner.runners.lock().unwrap().contains_key(&s.id));
+        assert!(saver.inner.runners.lock().unwrap().is_empty());
     }
 }

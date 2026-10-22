@@ -567,7 +567,7 @@ impl HerdrClient {
                 .await;
             if status == AgentStatus::Idle {
                 // Capture the work product: pane output at idle.
-                if let Ok(out) = read_pane_output(&data.pane_id).await {
+                if let Ok(out) = crate::server::read_pane_text(&data.pane_id).await {
                     self.registry.set_output(&data.pane_id, out).await;
                 }
             }
@@ -607,19 +607,6 @@ fn global_subscriptions(schema: &serde_json::Value) -> Vec<String> {
         .filter_map(|s| s.pointer("/properties/type/const")?.as_str())
         .map(str::to_string)
         .collect()
-}
-
-/// Read a pane's recent output via the herdr CLI. Best-effort; errors are
-/// swallowed by callers.
-async fn read_pane_output(pane_id: &str) -> anyhow::Result<String> {
-    let binary = herdr_mcp_core::herdr_bin();
-    let output = tokio::process::Command::new(binary)
-        .args([
-            "pane", "read", pane_id, "--source", "recent", "--lines", "200",
-        ])
-        .output()
-        .await?;
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[cfg(test)]

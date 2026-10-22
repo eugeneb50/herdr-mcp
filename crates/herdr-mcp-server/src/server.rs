@@ -47,17 +47,6 @@ pub struct GetPaneParams {
     pub session: Option<String>,
 }
 
-/// Parameters for getting details about a specific agent.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-#[serde(deny_unknown_fields)]
-pub struct GetAgentParams {
-    /// Agent target: terminal ID, agent name, or pane ID.
-    pub target: String,
-    /// herdr session name (see `list_sessions`); default: this server's.
-    pub session: Option<String>,
-}
-
 /// Parameters for creating a new workspace.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
@@ -121,21 +110,6 @@ pub struct ReadPaneParams {
     pub pane_id: Option<String>,
     /// Pane label (alternative to pane_id).
     pub label: Option<String>,
-    /// Source: "visible", "recent", or "recent-unwrapped".
-    pub source: Option<String>,
-    /// Number of lines to read.
-    pub lines: Option<u32>,
-    /// herdr session name (see `list_sessions`); default: this server's.
-    pub session: Option<String>,
-}
-
-/// Parameters for reading text output from an agent.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-#[serde(deny_unknown_fields)]
-pub struct ReadAgentParams {
-    /// Agent target: terminal ID, agent name, or pane ID.
-    pub target: String,
     /// Source: "visible", "recent", or "recent-unwrapped".
     pub source: Option<String>,
     /// Number of lines to read.
@@ -217,17 +191,6 @@ pub struct PaneExecParams {
     pub check: Option<bool>,
 }
 
-/// Parameters for sending text to an agent.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-#[serde(deny_unknown_fields)]
-pub struct SendAgentParams {
-    /// Agent target: terminal ID, agent name, or pane ID.
-    pub target: String,
-    /// Text to send to the agent.
-    pub text: String,
-}
-
 /// Parameters for waiting for specific text in a pane.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
@@ -245,34 +208,6 @@ pub struct WaitOutputParams {
     pub source: Option<String>,
     /// Whether to treat match_text as a regex pattern.
     pub use_regex: Option<bool>,
-}
-
-/// Parameters for waiting for a pane's agent status.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-#[serde(deny_unknown_fields)]
-pub struct WaitPaneAgentStatusParams {
-    /// Pane ID to check (alternative to label).
-    pub pane_id: Option<String>,
-    /// Pane label (alternative to pane_id).
-    pub label: Option<String>,
-    /// Target status: "idle", "working", "blocked", "done", "unknown".
-    pub status: String,
-    /// Timeout in milliseconds.
-    pub timeout_ms: Option<u32>,
-}
-
-/// Parameters for waiting for an agent's status.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
-#[must_use]
-#[serde(deny_unknown_fields)]
-pub struct WaitAgentStatusParams {
-    /// Agent target: terminal ID, agent name, or pane ID.
-    pub target: String,
-    /// Target status: "idle", "working", "blocked", "done", "unknown".
-    pub status: String,
-    /// Timeout in milliseconds.
-    pub timeout_ms: Option<u32>,
 }
 
 /// Parameters for the `agent_spawn` a2a step. Starts an agent, registers its
@@ -352,7 +287,7 @@ pub struct AgentReadParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 pub struct AgentWaitParams {
-    /// Target agent: role or pane id.
+    /// Role, label or pane id.
     pub target: String,
     /// Target status: "idle", "working", "blocked", "done" (default "idle").
     #[serde(default = "default_idle")]
@@ -602,10 +537,8 @@ impl HerdrMcpServer {
     /// Run `herdr status --json` and parse the JSON output.
     async fn run_herdr_status_json(&self) -> Result<serde_json::Value, McpError> {
         let output = herdr_cli(&["status", "--json"]).await?;
-        serde_json::from_str(&output).map_err(|e| McpError {
-            code: rmcp::model::ErrorCode(-32603),
-            message: format!("Failed to parse herdr status JSON: {e}").into(),
-            data: None,
+        serde_json::from_str(&output).map_err(|e| {
+            McpError::internal_error(format!("Failed to parse herdr status JSON: {e}"), None)
         })
     }
 
@@ -641,10 +574,8 @@ impl HerdrMcpServer {
             }
         });
 
-        let content = Content::json(merged).map_err(|e| McpError {
-            code: rmcp::model::ErrorCode(-32603),
-            message: format!("Failed to serialize merged status: {e}").into(),
-            data: None,
+        let content = Content::json(merged).map_err(|e| {
+            McpError::internal_error(format!("Failed to serialize merged status: {e}"), None)
         })?;
 
         Ok(CallToolResult::success(vec![content]))
@@ -708,17 +639,6 @@ impl HerdrMcpServer {
         let session = session.as_deref();
         let pid = resolve_pane_id_in(session, pane_id, label).await?;
         herdr_json_in(session, &["pane", "get", &pid]).await
-    }
-
-    #[tool(
-        meta = category("Discovery"),
-        description = "Get details about a specific agent by target — terminal ID, agent name, or pane ID"
-    )]
-    async fn get_agent(
-        &self,
-        Parameters(GetAgentParams { target, session }): Parameters<GetAgentParams>,
-    ) -> Result<CallToolResult, McpError> {
-        herdr_json_in(session.as_deref(), &["agent", "get", &target]).await
     }
 
     // ── Lifecycle ──────────────────────────────────────────────────────
@@ -833,30 +753,6 @@ impl HerdrMcpServer {
         herdr_text_in(session, &args).await
     }
 
-    #[tool(
-        meta = category("Read"),
-        description = "Read text output from an agent. Source: visible (current screen), recent (scrollback with wrapping), or recent-unwrapped (scrollback without soft wrapping, best for logs)"
-    )]
-    async fn read_agent(
-        &self,
-        Parameters(ReadAgentParams {
-            target,
-            source,
-            lines,
-            session,
-        }): Parameters<ReadAgentParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let lines_str = lines.map(|n| n.to_string());
-        let mut args = vec!["agent", "read", &target];
-        if let Some(ref src) = source {
-            args.extend(["--source", src]);
-        }
-        if let Some(ref n) = lines_str {
-            args.extend(["--lines", n]);
-        }
-        herdr_text_in(session.as_deref(), &args).await
-    }
-
     // ── Write ──────────────────────────────────────────────────────────
 
     #[tool(
@@ -948,20 +844,16 @@ impl HerdrMcpServer {
             &lines,
         ])
         .await?;
-        let (output, exit_code) = exec_result(&screen, &token).ok_or_else(|| McpError {
-            code: rmcp::model::ErrorCode(-32000),
-            message: format!(
+        let (output, exit_code) = exec_result(&screen, &token).ok_or_else(|| {
+            user_err(format!(
                 "pane_exec: finished, but its end marker was not in the last {lines} lines"
-            )
-            .into(),
-            data: None,
+            ))
         })?;
         if check == Some(true) && exit_code != 0 {
-            return Err(McpError {
-                code: rmcp::model::ErrorCode(-32000),
-                message: format!("`{command}` exited {exit_code}:\n{}", tail(&output, 20)).into(),
-                data: None,
-            });
+            return Err(user_err(format!(
+                "`{command}` exited {exit_code}:\n{}",
+                tail(&output, 20)
+            )));
         }
         Ok(CallToolResult::success(vec![
             Content::json(serde_json::json!({
@@ -986,11 +878,10 @@ impl HerdrMcpServer {
             timeout_ms,
         }): Parameters<HerdrApiParams>,
     ) -> Result<CallToolResult, McpError> {
-        let client = self.herdr_client.get().ok_or_else(|| McpError {
-            code: rmcp::model::ErrorCode(-32000),
-            message: "not connected to herdr (no socket client attached)".into(),
-            data: None,
-        })?;
+        let client = self
+            .herdr_client
+            .get()
+            .ok_or_else(|| user_err("not connected to herdr (no socket client attached)"))?;
         let timeout = std::time::Duration::from_millis(u64::from(timeout_ms.unwrap_or(60_000)));
         let params = params.unwrap_or_else(|| serde_json::json!({}));
         let response = client
@@ -1003,15 +894,6 @@ impl HerdrMcpServer {
         } else {
             CallToolResult::success(vec![Content::text(text)])
         })
-    }
-
-    #[tool(meta = category("Write"), description = "Send text directly to an agent's stream")]
-    async fn send_agent(
-        &self,
-        Parameters(SendAgentParams { target, text }): Parameters<SendAgentParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let args = agent_submit_args(&target, &text);
-        run_herdr_json(&as_strs(&args)).await
     }
 
     // ── Synchronize ────────────────────────────────────────────────────
@@ -1039,40 +921,6 @@ impl HerdrMcpServer {
             source.as_deref(),
             timeout_ms,
         );
-        run_herdr_json(&as_strs(&args)).await
-    }
-
-    #[tool(
-        meta = category("Synchronize"),
-        description = "Wait for a pane's agent to reach a specific status. Statuses: idle, working, blocked, done, unknown. Blocks until status reached or timeout."
-    )]
-    async fn wait_pane_agent_status(
-        &self,
-        Parameters(WaitPaneAgentStatusParams {
-            pane_id,
-            label,
-            status,
-            timeout_ms,
-        }): Parameters<WaitPaneAgentStatusParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let pid = resolve_pane_id(pane_id, label).await?;
-        let args = agent_wait_args(&pid, &status, timeout_ms);
-        run_herdr_json(&as_strs(&args)).await
-    }
-
-    #[tool(
-        meta = category("Synchronize"),
-        description = "Wait for an agent (by target) to reach a specific status. Statuses: idle, working, blocked, done, unknown. Blocks until status reached or timeout."
-    )]
-    async fn wait_agent_status(
-        &self,
-        Parameters(WaitAgentStatusParams {
-            target,
-            status,
-            timeout_ms,
-        }): Parameters<WaitAgentStatusParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let args = agent_wait_args(&target, &status, timeout_ms);
         run_herdr_json(&as_strs(&args)).await
     }
 
@@ -1265,7 +1113,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("A2A"),
-        description = "Read an agent's output and store it as its work product in the registry. Returns {pane_id, role, agent, status, output}. `target` may be a role or pane id."
+        description = "Read an agent's output and store it as its work product in the registry. Returns {pane_id, role, agent, status, output}. `target` may be a role, label or pane id."
     )]
     async fn agent_read(
         &self,
@@ -1301,7 +1149,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("A2A"),
-        description = "Wait for an agent to reach a status (default idle). `target` may be a role or pane id."
+        description = "Wait for an agent to reach a status (default idle): idle, working, blocked, done or unknown. Blocks until reached or timeout. `target` may be a role, label or pane id."
     )]
     async fn agent_wait(
         &self,
@@ -1312,12 +1160,8 @@ impl HerdrMcpServer {
         }): Parameters<AgentWaitParams>,
     ) -> Result<CallToolResult, McpError> {
         let pane = resolve_target_pane(self, &target).await?;
-        self.wait_agent_status(Parameters(WaitAgentStatusParams {
-            target: pane,
-            status,
-            timeout_ms,
-        }))
-        .await
+        let args = agent_wait_args(&pane, &status, timeout_ms);
+        run_herdr_json(&as_strs(&args)).await
     }
 
     #[tool(
@@ -1435,11 +1279,10 @@ impl HerdrMcpServer {
             Some(t) => Ok(CallToolResult::success(vec![
                 Content::json(serde_json::json!(t)).map_err(to_mcp_err)?,
             ])),
-            None => Err(McpError {
-                code: rmcp::model::ErrorCode(-32602),
-                message: format!("template not found: {template_id}").into(),
-                data: None,
-            }),
+            None => Err(McpError::invalid_params(
+                format!("template not found: {template_id}"),
+                None,
+            )),
         }
     }
 
@@ -1455,10 +1298,8 @@ impl HerdrMcpServer {
             name,
         }): Parameters<InstantiateTemplateParams>,
     ) -> Result<CallToolResult, McpError> {
-        let recipe = tmpl::instantiate(&template_id, variables, name).ok_or_else(|| McpError {
-            code: rmcp::model::ErrorCode(-32602),
-            message: format!("template not found: {template_id}").into(),
-            data: None,
+        let recipe = tmpl::instantiate(&template_id, variables, name).ok_or_else(|| {
+            McpError::invalid_params(format!("template not found: {template_id}"), None)
         })?;
         self.persistence
             .save_recipe(&recipe)
@@ -1617,11 +1458,12 @@ impl ServerHandler for HerdrMcpServer {}
 
 /// Map any displayable error into an `McpError` for `#[tool]` methods.
 pub(crate) fn to_mcp_err(e: impl std::fmt::Display) -> McpError {
-    McpError {
-        code: rmcp::model::ErrorCode(-32603),
-        message: e.to_string().into(),
-        data: None,
-    }
+    McpError::internal_error(e.to_string(), None)
+}
+
+/// A request the caller can fix (bad target, herdr refused it): code -32000.
+pub(crate) fn user_err(msg: impl Into<std::borrow::Cow<'static, str>>) -> McpError {
+    McpError::new(rmcp::model::ErrorCode(-32000), msg, None)
 }
 
 /// Recursively find a string value for `key` anywhere in a JSON tree.
@@ -1736,30 +1578,26 @@ fn tail(text: &str, n: usize) -> String {
     lines[lines.len().saturating_sub(n)..].join("\n")
 }
 
-/// Resolve an a2a target (role or pane id) to a concrete pane id.
+/// Resolve an a2a target (role, label or pane id) to a pane id. A target
+/// the registry doesn't know passes through as a pane id; herdr rejects a
+/// bad one.
 async fn resolve_target_pane(server: &HerdrMcpServer, target: &str) -> Result<String, McpError> {
-    if !target.is_empty()
-        && let Some(pane) = server.registry.resolve("", target).await
-    {
-        return Ok(pane);
+    if target.is_empty() {
+        return Err(user_err("target is required"));
     }
-    Err(McpError {
-        code: rmcp::model::ErrorCode(-32000),
-        message: format!("No agent found for target '{target}'").into(),
-        data: None,
-    })
+    Ok(server
+        .registry
+        .resolve("", target)
+        .await
+        .unwrap_or_else(|| target.to_string()))
 }
 
-/// Read a pane's recent output via the herdr CLI.
-async fn read_pane_text(pane_id: &str) -> anyhow::Result<String> {
-    let binary = herdr_mcp_core::herdr_bin();
-    let output = tokio::process::Command::new(binary)
-        .args([
-            "pane", "read", pane_id, "--source", "recent", "--lines", "200",
-        ])
-        .output()
-        .await?;
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+/// A pane's last 200 lines (its work product once its agent is idle).
+pub(crate) async fn read_pane_text(pane_id: &str) -> Result<String, McpError> {
+    herdr_cli(&[
+        "pane", "read", pane_id, "--source", "recent", "--lines", "200",
+    ])
+    .await
 }
 
 /// Run `herdr` CLI args and return stdout as a JSON-pretty-printed `CallToolResult`.
@@ -1773,10 +1611,8 @@ async fn herdr_json_in(session: Option<&str>, args: &[&str]) -> Result<CallToolR
 
     match serde_json::from_str::<serde_json::Value>(&output) {
         Ok(value) => {
-            let content = Content::json(value).map_err(|e| McpError {
-                code: rmcp::model::ErrorCode(-32603),
-                message: format!("Failed to serialize JSON: {e}").into(),
-                data: None,
+            let content = Content::json(value).map_err(|e| {
+                McpError::internal_error(format!("Failed to serialize JSON: {e}"), None)
             })?;
             Ok(CallToolResult::success(vec![content]))
         }
@@ -1817,11 +1653,11 @@ pub(crate) async fn herdr_cli_at(socket: Option<&str>, args: &[&str]) -> Result<
     if let Some(socket) = socket {
         cmd.env("HERDR_SOCKET_PATH", socket);
     }
-    let output = cmd.args(args).output().await.map_err(|e| McpError {
-        code: rmcp::model::ErrorCode(-32603),
-        message: format!("Failed to execute herdr: {e}").into(),
-        data: None,
-    })?;
+    let output = cmd
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| McpError::internal_error(format!("Failed to execute herdr: {e}"), None))?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
@@ -1835,11 +1671,7 @@ pub(crate) async fn herdr_cli_at(socket: Option<&str>, args: &[&str]) -> Result<
         } else {
             format!("herdr exited with code {}", output.status)
         };
-        Err(McpError {
-            code: rmcp::model::ErrorCode(-32000),
-            message: msg.into(),
-            data: None,
-        })
+        Err(user_err(msg))
     }
 }
 
@@ -1895,17 +1727,9 @@ async fn resolve_pane_id_in(
                 ..Default::default()
             };
             let panes = crate::panes::panes(&filter).await?;
-            resolve_label_in_panes(&panes, &lbl).map_err(|msg| McpError {
-                code: rmcp::model::ErrorCode(-32000),
-                message: msg.into(),
-                data: None,
-            })
+            resolve_label_in_panes(&panes, &lbl).map_err(user_err)
         }
-        (None, None) => Err(McpError {
-            code: rmcp::model::ErrorCode(-32000),
-            message: "Either pane_id or label is required".into(),
-            data: None,
-        }),
+        (None, None) => Err(user_err("Either pane_id or label is required")),
     }
 }
 
