@@ -1932,31 +1932,69 @@ struct AppState {
     server: HerdrMcpServer,
 }
 
+/// The host of a `host[:port]` authority, lowercased: a bracketed IPv6
+/// literal without its brackets, `None` if the brackets don't hold one.
+fn authority_host(authority: &str) -> Option<String> {
+    match authority.strip_prefix('[') {
+        Some(v6) => v6
+            .split(']')
+            .next()
+            .filter(|ip| ip.parse::<std::net::Ipv6Addr>().is_ok())
+            .map(str::to_ascii_lowercase),
+        None => Some(
+            authority
+                .rsplit_once(':')
+                .map_or(authority, |(name, _port)| name)
+                .to_ascii_lowercase(),
+        ),
+    }
+}
+
+fn is_localhost(name: &str) -> bool {
+    name == "localhost" || name.ends_with(".localhost")
+}
+
 /// Whether a request's `Host` may reach the bridge: `localhost`,
 /// `*.localhost`, an IP literal, or the name the bridge is bound to. Any
 /// other name is how a DNS-rebinding page would reach this port from a
 /// browser, and the bridge can type into panes.
 fn host_allowed(host: &str, bind: &str) -> bool {
-    let name = match host.strip_prefix('[') {
-        Some(v6) => {
-            return v6
-                .split(']')
-                .next()
-                .is_some_and(|ip| ip.parse::<std::net::Ipv6Addr>().is_ok());
-        }
-        None => host.rsplit_once(':').map_or(host, |(name, _port)| name),
+    authority_host(host).is_some_and(|name| {
+        is_localhost(&name)
+            || name.parse::<std::net::IpAddr>().is_ok()
+            || name == bind.to_ascii_lowercase()
+    })
+}
+
+/// Whether a browser `Origin` may call the bridge: an http(s) page on
+/// `localhost`, `*.localhost`, a loopback IP, or the bind name. Browsers
+/// send `Origin` on every cross-origin POST, `no-cors` ones included; a
+/// body-less POST needs no preflight, so without this any website could
+/// call a tool (`create_workspace` with `{}`). `null` (sandboxed frames,
+/// `file:`) is refused. Requests without `Origin` (MCP clients, the TUI,
+/// curl) never reach this check.
+fn origin_allowed(origin: &str, bind: &str) -> bool {
+    let Some(authority) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
     };
-    let name = name.to_ascii_lowercase();
-    name == "localhost"
-        || name.ends_with(".localhost")
-        || name.parse::<std::net::IpAddr>().is_ok()
-        || name == bind.to_ascii_lowercase()
+    authority_host(authority).is_some_and(|name| {
+        is_localhost(&name)
+            || name
+                .trim_matches(['[', ']'])
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+            || name == bind.to_ascii_lowercase()
+    })
 }
 
 /// Build the Axum router: `/api/*` plus the Dioxus web UI — from `web_dir`
 /// when set, else the copy built into the binary ([`crate::web`]). Unknown
 /// paths fall back to `index.html` so client-side routes resolve. Requests
-/// with a foreign `Host` are refused ([`host_allowed`]).
+/// with a foreign `Host` ([`host_allowed`]) or `Origin` ([`origin_allowed`])
+/// are refused.
 fn http_router(server: HerdrMcpServer, web_dir: Option<&std::path::Path>, bind: &str) -> Router {
     let ui: axum::routing::MethodRouter = match web_dir {
         Some(dir) => {
@@ -2046,15 +2084,22 @@ fn http_router(server: HerdrMcpServer, web_dir: Option<&std::path::Path>, bind: 
                     .and_then(|h| h.to_str().ok())
                     .unwrap_or("")
                     .to_string();
-                let ok = host_allowed(&host, &bind);
+                let refused = if !host_allowed(&host, &bind) {
+                    Some(format!("host {host:?} not allowed"))
+                } else {
+                    req.headers()
+                        .get(axum::http::header::ORIGIN)
+                        .map(|o| String::from_utf8_lossy(o.as_bytes()).into_owned())
+                        .filter(|o| !origin_allowed(o, &bind))
+                        .map(|o| format!("origin {o:?} not allowed"))
+                };
                 async move {
-                    if ok {
-                        next.run(req).await
-                    } else {
-                        axum::response::IntoResponse::into_response((
+                    match refused {
+                        None => next.run(req).await,
+                        Some(msg) => axum::response::IntoResponse::into_response((
                             StatusCode::FORBIDDEN,
-                            format!("host {host:?} not allowed"),
-                        ))
+                            msg,
+                        )),
                     }
                 }
             }
@@ -3282,6 +3327,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn origin_allowlist_is_loopback_pages_only() {
+        for ok in [
+            "http://localhost:7676",
+            "http://ui.localhost:8080",
+            "https://127.0.0.1",
+            "http://127.0.0.2:3000",
+            "http://[::1]:7676",
+            "http://box:7676",
+        ] {
+            assert!(origin_allowed(ok, "box"), "{ok}");
+        }
+        for bad in [
+            "https://evil.example",
+            "http://localhost.evil.example",
+            "http://192.168.1.5",
+            "http://[2001:db8::1]",
+            "null",
+            "file://",
+            "",
+        ] {
+            assert!(!origin_allowed(bad, "box"), "{bad}");
+        }
+    }
+
     /// The playgrounds group tools by `_meta.category`; none may go missing.
     #[test]
     fn every_tool_has_a_category() {
@@ -3414,6 +3484,16 @@ mod tests {
         let app = http_router(server, Some(&web_dir), "127.0.0.1");
         tokio::spawn(async move { axum::serve(listener, app).await });
         let api = ApiClient::new(&format!("http://{addr}")).unwrap();
+
+        // A body-less POST is a CORS "simple request": a website can send it
+        // without a preflight, so a foreign Origin is refused outright.
+        let http = reqwest::Client::new();
+        let tool = format!("http://{addr}/api/tools/list_templates");
+        let forged = http.post(&tool).header("origin", "https://evil.example");
+        assert_eq!(forged.send().await.unwrap().status(), 403);
+        let own = http.post(&tool).header("origin", format!("http://{addr}"));
+        assert_eq!(own.send().await.unwrap().status(), 200);
+        assert_eq!(http.post(&tool).send().await.unwrap().status(), 200);
 
         // A fake herdr (nextest runs each test in its own process, so the
         // env var stays here). Its pane labels echo the socket it was given.
