@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.2.0-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-229%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-240%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-6%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
@@ -223,7 +223,29 @@ port = 7676
 
 # [herdr]
 # socket-path = "~/.config/herdr/herdr.sock"
+
+# Tunables: edit them on the Settings page (web or TUI), which writes these
+# tables. Anything missing or invalid uses its built-in default.
+[settings.timeouts]
+pane-exec-ms = 120000
+
+[settings.keys]
+tab-next = ["alt+right", "ctrl+tab"]
 ```
+
+**Settings** (`GET /api/settings` lists them all with defaults and bounds):
+
+| Section | Keys |
+|---|---|
+| `timeouts` | `pane-exec-ms`, `herdr-api-ms`, `agent-wait-ms`, `agent-prompt-ms`, `agent-start-ms`, `tui-request-ms` |
+| `limits` | `pane-exec-lines`, `reply-fallback-lines`, `watcher-give-up`, `reconnect-attempts` |
+| `intervals` | `watcher-poll-ms`, `reconnect-backoff-ms`, `tui-refresh-ms` |
+| `keys` (TUI) | `tab-next`, `tab-prev`, `tab-1`…`tab-5`, `refresh`, `quit` |
+
+Tool calls that pass their own `timeout_ms` / `lines` still win. Key chords
+need Ctrl or Alt (or are F1–F12), may not take a chord a tab already uses
+(`ctrl+s`, `ctrl+k`, …) and may not be bound twice; the Settings page refuses
+them and says why. Reset (one setting or all) goes back to the defaults.
 
 ---
 
@@ -337,6 +359,8 @@ All endpoints return JSON unless noted. Request/response types live in
 | `GET` | `/*` | Web playground (Dioxus bundle, SPA fallback to `index.html`) |
 | `GET` | `/api/health` | Health check |
 | `GET` / `PUT` | `/api/config`, `/api/config/clipboard` | Resolved config / set clipboard commands |
+| `GET` / `DELETE` | `/api/settings` | Every tunable (default, bounds, value) / reset all to defaults |
+| `PUT` / `DELETE` | `/api/settings/{key}` | Set one (400 with the reason if refused) / reset it to its default |
 | `GET` | `/api/tools` | All 36 tools with JSON schemas and categories |
 | `POST` | `/api/tools/{name}` | Call a tool; body is its parameter object |
 | `GET` | `/api/agents?workspace_id=` | Live panes from the agent registry |

@@ -22,7 +22,7 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         .split(area);
 
     render_intro(frame, chunks[0], app);
-    render_tabs_guide(frame, chunks[1]);
+    render_tabs_guide(frame, chunks[1], &app.knobs);
     render_pane_table(frame, chunks[2], app);
     render_pane_detail(frame, chunks[3], app);
 }
@@ -47,7 +47,7 @@ fn render_intro(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-fn render_tabs_guide(frame: &mut ratatui::Frame, area: Rect) {
+fn render_tabs_guide(frame: &mut ratatui::Frame, area: Rect, knobs: &herdr_mcp_api::Settings) {
     let block = panel_block(" Tabs ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -57,7 +57,13 @@ fn render_tabs_guide(frame: &mut ratatui::Frame, area: Rect) {
         Line::from("3 Playground (tool runner + recipe builder)"),
         Line::from("4 Variables                 5 Settings"),
         Line::from(""),
-        Line::from("Press Alt+←/→ or Alt+1-5 to switch tabs or click the tab strip above."),
+        Line::from(format!(
+            "Press {} / {} or {}…{} to switch tabs (Settings → keys) or click the tab strip above.",
+            crate::first_chord(knobs, "keys.tab-next"),
+            crate::first_chord(knobs, "keys.tab-prev"),
+            crate::first_chord(knobs, "keys.tab-1"),
+            crate::first_chord(knobs, "keys.tab-5"),
+        )),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }

@@ -33,6 +33,29 @@ pub enum Value {
     Keys(Vec<String>),
 }
 
+impl Value {
+    /// A value as typed in a Settings field: a whole number (`120_000`
+    /// works), or comma-separated key chords. Only the shape is checked
+    /// here; [`Settings::set`] checks the rest.
+    pub fn parse(kind: Kind, text: &str) -> Result<Self, String> {
+        match kind {
+            Kind::Millis | Kind::Count => text
+                .trim()
+                .replace('_', "")
+                .parse::<u64>()
+                .map(Self::Number)
+                .map_err(|_| format!("{:?} is not a whole number", text.trim())),
+            Kind::Keys => Ok(Self::Keys(
+                text.split(',')
+                    .map(str::trim)
+                    .filter(|k| !k.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            )),
+        }
+    }
+}
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -719,6 +742,20 @@ mod tests {
         for bad in ["", "ctrl+", "hyper+a", "f13", "alt+right+x", "ctrl+ab"] {
             assert!(Chord::parse(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn typed_values_parse_per_kind() {
+        assert_eq!(
+            Value::parse(Kind::Millis, " 120_000 "),
+            Ok(Value::Number(120_000))
+        );
+        assert!(Value::parse(Kind::Count, "ten").is_err());
+        assert!(Value::parse(Kind::Millis, "-5").is_err());
+        assert_eq!(
+            Value::parse(Kind::Keys, "alt+right, ctrl+tab,,"),
+            Ok(Value::Keys(vec!["alt+right".into(), "ctrl+tab".into()]))
+        );
     }
 
     #[test]
