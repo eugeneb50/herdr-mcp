@@ -933,7 +933,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("A2A"),
-        description = "Spawn an agent in a new pane from an agent profile and register it under `role`. `agent` is a profile id (see /api/profiles: claude, codex, opencode, gemini, hermes, zeroclaw, aider, shell, or your own) or any herdr-native agent kind. Optionally waits for `needs` targets (role or pane id) to be idle first, then (wait_idle) for the new agent to be idle, capturing its output. Returns {pane_id, role, agent, status, output}."
+        description = "Spawn an agent in a new pane from an agent profile and register it under `role`. `agent` is a profile id (see /api/profiles: claude, codex, opencode, gemini, hermes, zeroclaw, aider, shell, or your own) or any herdr-native agent kind. Optionally waits for `needs` targets (role or pane id) to be idle first (failing, before spawning, if one is unknown or never idles), then (wait_idle) for the new agent to be idle, capturing its output. Returns {pane_id, role, agent, status, output, wait_error}; a failed wait_idle leaves status `working` and sets wait_error."
     )]
     async fn agent_spawn(
         &self,
@@ -957,9 +957,10 @@ impl HerdrMcpServer {
             if pane.is_none() {
                 pane = self.registry.resolve("", dep).await;
             }
-            if let Some(pane) = pane {
-                let _ = herdr_cli(&as_strs(&agent_wait_args(&pane, "idle", Some(300_000)))).await;
-            }
+            let pane = pane.ok_or_else(|| user_err(format!("needs: no agent '{dep}'")))?;
+            herdr_cli(&as_strs(&agent_wait_args(&pane, "idle", Some(300_000))))
+                .await
+                .map_err(|e| user_err(format!("needs: '{dep}' never went idle: {}", e.message)))?;
         }
 
         let profile = crate::profiles::get(self.persistence.data_dir(), &agent)
@@ -1004,11 +1005,17 @@ impl HerdrMcpServer {
 
         let mut status = "working".to_string();
         let mut output = String::new();
+        let mut wait_error = None;
         if wait_idle {
-            let _ = herdr_cli(&as_strs(&agent_wait_args(&pane_id, "idle", Some(300_000)))).await;
-            status = "idle".to_string();
-            output = read_pane_text(&pane_id).await.unwrap_or_default();
-            self.registry.set_output(&pane_id, output.clone()).await;
+            // The pane exists either way, so a failed wait is reported, not raised.
+            match herdr_cli(&as_strs(&agent_wait_args(&pane_id, "idle", Some(300_000)))).await {
+                Ok(_) => {
+                    status = "idle".to_string();
+                    output = read_pane_text(&pane_id).await.unwrap_or_default();
+                    self.registry.set_output(&pane_id, output.clone()).await;
+                }
+                Err(e) => wait_error = Some(e.message),
+            }
         }
 
         Ok(CallToolResult::success(vec![
@@ -1020,6 +1027,7 @@ impl HerdrMcpServer {
                 "name": name,
                 "status": status,
                 "output": output,
+                "wait_error": wait_error,
             }))
             .map_err(to_mcp_err)?,
         ]))
@@ -3052,6 +3060,20 @@ mod tests {
         let pers_arc = std::sync::Arc::new(pers);
         let reg = AgentRegistry::new(pers_arc);
         HerdrMcpServer::new(Persistence::new(tmp.path().join("data2")), reg)
+    }
+
+    #[tokio::test]
+    async fn agent_spawn_fails_on_unknown_need_before_spawning() {
+        let server = clipboard_test_server();
+        let params: AgentSpawnParams =
+            serde_json::from_value(serde_json::json!({"agent": "shell", "needs": ["ghost"]}))
+                .unwrap();
+        let err = server.agent_spawn(Parameters(params)).await.unwrap_err();
+        assert!(
+            err.message.contains("needs: no agent 'ghost'"),
+            "{}",
+            err.message
+        );
     }
 
     #[tokio::test]

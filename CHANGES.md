@@ -55,6 +55,10 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   playground, runs, schedules, profiles) and the `[clipboard]` config are
   written to a temp file and renamed into place: a crash or two racing
   saves can no longer leave a truncated or torn file.
+- **`agent_spawn` reports failed waits.** A `needs` target that is unknown
+  or never goes idle now fails the call before anything spawns (it was
+  skipped, spawning anyway). A `wait_idle` that times out leaves `status`
+  `working` and sets `wait_error`, instead of claiming `idle`.
 - **Chaining across requests.** A recipe step can carry `extract` rules
   (`{path, var, scope}`) that save part of its result as a global or a
   collection (recipe) variable; later steps and later runs resolve it.
