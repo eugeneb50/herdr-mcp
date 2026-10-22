@@ -399,7 +399,7 @@ watched and `idle` when it was.
 | `HERDR_MCP_DATA_DIR` | `./data` | Data directory |
 | `HERDR_MCP_HTTP_PORT` | 7676 | HTTP bridge port |
 | `HERDR_MCP_HTTP_ONLY` | — | `true`: HTTP bridge only (no TUI, no MCP stdio) |
-| `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
+| `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address. Keep it loopback: the bridge has no auth, so anyone who can reach a LAN or `0.0.0.0` bind can run commands in your panes (startup logs a warning) |
 | `HERDR_MCP_WEB_DIR` | the web UI built into the binary | Serve a `dx bundle` directory from disk instead |
 
 Socket resolution: `--herdr-socket` > `HERDR_SOCKET_PATH` > config file >

@@ -303,7 +303,11 @@ The bridge serves the Dioxus bundle built into the binary:
   `/api/*` keeps working
 - No CORS layer: the UI is same-origin with the API (and `dx serve` proxies
   `/api` server-side via `Dioxus.toml [web.proxy]`)
-- Binds `http.bind-addr` (default `127.0.0.1`)
+- Binds `http.bind-addr` (default `127.0.0.1`). There is no auth: a
+  non-loopback bind lets anyone who reaches it run commands in panes, so
+  startup logs a warning for one
+- Refuses a foreign `Host` (DNS rebinding) and a foreign browser `Origin`
+  (cross-site simple requests); requests without `Origin` pass
 
 ### 5.5 Wire Contract
 
