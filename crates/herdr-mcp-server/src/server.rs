@@ -1920,8 +1920,8 @@ use axum::{
     routing::{get, post, put},
 };
 use herdr_mcp_api::{
-    AgentsResponse, AutoVariablesResponse, ConfigResponse, CreateRecipeRequest,
-    SaveVariableRequest, ToolsResponse, UpdateRecipeRequest,
+    AgentsResponse, AutoVariablesResponse, ConfigResponse, CreateRecipeRequest, ResolveRequest,
+    ResolveResponse, SaveVariableRequest, ToolsResponse, UpdateRecipeRequest,
 };
 use regex::Regex;
 use tower_http::services::{ServeDir, ServeFile};
@@ -2065,6 +2065,7 @@ fn http_router(server: HerdrMcpServer, web_dir: Option<&std::path::Path>, bind: 
             get(list_variables_handler).post(save_variable_handler),
         )
         .route("/api/variables/auto", get(auto_variables_handler))
+        .route("/api/variables/resolve", post(resolve_handler))
         .route(
             "/api/playground",
             get(get_playground_handler).post(save_playground_handler),
@@ -2285,9 +2286,17 @@ fn start_error_to_http(e: crate::runs::StartError) -> (StatusCode, String) {
         crate::runs::StartError::RecipeNotFound => {
             (StatusCode::NOT_FOUND, "Recipe not found".to_string())
         }
+        crate::runs::StartError::UnknownStep(id) => (
+            StatusCode::BAD_REQUEST,
+            format!("the recipe has no step `{id}`"),
+        ),
         crate::runs::StartError::Persist(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
+
+/// A `{{ path }}` placeholder.
+static VARIABLE_RE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"\{\{([^}]+)\}\}").expect("a valid regex literal"));
 
 pub(crate) fn resolve_variables(
     value: &mut serde_json::Value,
@@ -2295,8 +2304,6 @@ pub(crate) fn resolve_variables(
 ) {
     match value {
         serde_json::Value::String(s) => {
-            static VARIABLE_RE: std::sync::LazyLock<Regex> =
-                std::sync::LazyLock::new(|| Regex::new(r"\{\{([^}]+)\}\}").unwrap());
             *s = VARIABLE_RE
                 .replace_all(s, |caps: &regex::Captures| {
                     let path = caps[1].trim();
@@ -2343,7 +2350,7 @@ fn resolve_json_path(
 }
 
 /// A tool result as its text content; any other value as-is.
-fn step_text(v: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn step_text(v: &serde_json::Value) -> serde_json::Value {
     if v.get("content").is_some() {
         serde_json::Value::String(herdr_mcp_api::tool_text(v))
     } else {
@@ -2352,7 +2359,7 @@ fn step_text(v: &serde_json::Value) -> serde_json::Value {
 }
 
 /// Follow `a.b[0].c` into `value`.
-fn navigate(value: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
+pub(crate) fn navigate(value: &serde_json::Value, path: &str) -> Option<serde_json::Value> {
     let mut current = value;
     for segment in path.split('.') {
         current = match segment.split_once('[') {
@@ -2811,6 +2818,50 @@ async fn auto_variables_handler(
         workspace_id: ws.unwrap_or_default(),
         variables: merged,
     })
+}
+
+/// `POST /api/variables/resolve` — `value` resolved in the scope a run of
+/// the same recipe, workspace and variables would start with
+/// ([`crate::runs::scope`]), so a preview never disagrees with a run.
+async fn resolve_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Json(req): Json<ResolveRequest>,
+) -> Result<Json<ResolveResponse>, (StatusCode, String)> {
+    let collection = match req.recipe_id {
+        Some(id) => {
+            server
+                .persistence
+                .load_recipe(&id)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .ok_or((StatusCode::NOT_FOUND, "Recipe not found".to_string()))?
+                .variables
+        }
+        None => HashMap::new(),
+    };
+    let ws = crate::runs::run_workspace(req.session_id, &collection, &req.variables);
+    let scope = crate::runs::scope(&server, &ws, collection, req.variables).await;
+    let mut value = req.value;
+    resolve_variables(&mut value, &scope);
+    let mut unresolved = Vec::new();
+    placeholders(&value, &mut unresolved);
+    unresolved.sort();
+    unresolved.dedup();
+    Ok(Json(ResolveResponse { value, unresolved }))
+}
+
+/// Every `{{ path }}` left in `value`'s strings, trimmed.
+fn placeholders(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(s) => out.extend(
+            VARIABLE_RE
+                .captures_iter(s)
+                .map(|c| c[1].trim().to_string()),
+        ),
+        serde_json::Value::Object(map) => map.values().for_each(|v| placeholders(v, out)),
+        serde_json::Value::Array(arr) => arr.iter().for_each(|v| placeholders(v, out)),
+        _ => {}
+    }
 }
 
 /// Live panes (by pane id) with the registry handles (by pane id and role,
@@ -3612,6 +3663,18 @@ esac
         api.save_variable(&req).await.unwrap();
         assert_eq!(api.get_variable("greeting").await.unwrap().value, "hi");
         assert_eq!(api.list_variables().await.unwrap().len(), 1);
+        // Resolve: the scope a run starts with; the request's own variables
+        // win, globals fill in, the rest is reported.
+        let resolved = api
+            .resolve(&ResolveRequest {
+                variables: HashMap::from([("who".into(), serde_json::json!("you"))]),
+                value: serde_json::json!({ "text": "{{ greeting }} {{ who }}", "n": "{{ later.out }}" }),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(resolved.value["text"], "hi you");
+        assert_eq!(resolved.unresolved, ["later.out"]);
         api.delete_variable("greeting").await.unwrap();
         // Path traversal through the key is a client error, not a write.
         let evil = herdr_mcp_api::SaveVariableRequest {
@@ -3634,6 +3697,7 @@ esac
             tool: "list_templates".into(),
             params: serde_json::json!({}),
             description: None,
+            extract: Vec::new(),
         };
         let started = api
             .start_run(&herdr_mcp_api::StartRunRequest {
@@ -3747,6 +3811,7 @@ esac
                     tool: "status".into(),
                     params: serde_json::json!({}),
                     description: None,
+                    extract: Vec::new(),
                 }],
                 variables: HashMap::new(),
                 category: None,

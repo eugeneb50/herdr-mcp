@@ -426,6 +426,12 @@ impl ApiClient {
         Self::json(req).await
     }
 
+    /// `POST /api/variables/resolve` — `{{ }}` placeholders resolved the way
+    /// a run would resolve them.
+    pub async fn resolve(&self, req: &ResolveRequest) -> Result<ResolveResponse, ApiError> {
+        self.post(&["api", "variables", "resolve"], req).await
+    }
+
     /// `GET /api/playground?workspace_id=` — last-used playground values.
     pub async fn get_playground(&self, workspace_id: &str) -> Result<PlaygroundSnapshot, ApiError> {
         let req = Self::ws_query(

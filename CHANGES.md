@@ -1,6 +1,8 @@
 # Unreleased
 
-One binary, TUI first, no message trim. **(breaking)** throughout.
+One binary, TUI first, no message trim, and chained playground requests.
+The binary, TUI and trim changes are all breaking; the rest are marked
+**(breaking)** where they are.
 
 - **One binary.** `herdr-trim` is gone; `herdr-mcp` is the only binary, and
   the release archives, `scripts/install.sh` and the plugin ship just it.
@@ -33,6 +35,15 @@ One binary, TUI first, no message trim. **(breaking)** throughout.
 - **TUI tab keys.** Ctrl+2 and Ctrl+3 now switch tabs where the terminal
   supports the kitty keyboard protocol; elsewhere Ctrl+2 (sent as
   Ctrl+Space) works and Alt+1-5 switch tabs everywhere.
+- **Chaining across requests.** A recipe step can carry `extract` rules
+  (`{path, var, scope}`) that save part of its result as a global or a
+  collection (recipe) variable; later steps and later runs resolve it.
+- **One resolver (breaking).** Runs resolve `{{ }}` in one scope: live
+  agents < globals < the recipe's variables < the request's < step results.
+  Registry handles no longer override recipe variables.
+  `POST /api/variables/resolve` previews a value in that scope.
+- **Send one request.** `POST /api/runs` takes `step_ids` to run only those
+  steps of a recipe.
 
 # 0.2.0
 
