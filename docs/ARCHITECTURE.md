@@ -18,7 +18,7 @@ dashboard, and a recipe engine for chaining tool calls with variable
 interpolation.
 
 **License:** AGPL v3
-**Current test suite:** run `cargo nextest run --workspace` (217 passing)
+**Current test suite:** run `cargo nextest run --workspace` (220 passing)
 **Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---

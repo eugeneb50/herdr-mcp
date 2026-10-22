@@ -23,6 +23,16 @@ One binary, TUI first, no message trim. **(breaking)** throughout.
   split `herdr-mcp`. `scripts/plugin-build.sh` replaces `bin/herdr-mcp` by
   rename, so rebuilding while the bridge runs no longer fails with "Text
   file busy".
+- **Cross-site requests refused.** Any website could make a body-less
+  `POST /api/tools/{name}` from your browser (no CORS preflight), e.g.
+  `create_workspace`, opening focused workspaces on every page load. The
+  bridge now refuses a browser `Origin` that isn't a loopback page or the
+  bind name; MCP clients, the TUI and curl send none and are unaffected.
+- **Bind warning.** A non-loopback `http.bind-addr` logs a warning at
+  startup: the bridge has no auth.
+- **TUI tab keys.** Ctrl+2 and Ctrl+3 now switch tabs where the terminal
+  supports the kitty keyboard protocol; elsewhere Ctrl+2 (sent as
+  Ctrl+Space) works and Alt+1-5 switch tabs everywhere.
 
 # 0.2.0
 
