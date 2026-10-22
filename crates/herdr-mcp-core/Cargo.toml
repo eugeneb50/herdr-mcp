@@ -13,3 +13,6 @@ herdr-mcp-api = { path = "../herdr-mcp-api" }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

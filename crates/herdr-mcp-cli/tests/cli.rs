@@ -2,7 +2,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn bin() -> Command {
-    Command::cargo_bin("herdr-mcp").unwrap()
+    Command::cargo_bin("herdr-mcp").expect("the herdr-mcp binary is built for tests")
 }
 
 #[test]

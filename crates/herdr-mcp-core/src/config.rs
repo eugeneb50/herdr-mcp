@@ -362,15 +362,19 @@ pub fn set_clipboard_in_file(path: &std::path::Path, commands: Option<(&str, &st
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
-        .with_context(|| format!("opening {} for write", path.display()))?;
-    f.write_all(out.as_bytes())
-        .with_context(|| format!("writing {}", path.display()))?;
-    Ok(())
+    // Write a sibling temp file and rename it over the config, so a crash
+    // mid-write can't leave the user's hand-edited config truncated.
+    let tmp = path.with_extension(format!("toml.tmp-{}", std::process::id()));
+    let written = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(out.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written.with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]

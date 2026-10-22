@@ -83,7 +83,7 @@ pub async fn save(data_dir: &Path, profile: &AgentProfile) -> Result<(), SaveErr
         .await
         .map_err(|e| SaveError::Io(e.into()))?;
     // `problems` guarantees the id is [a-z0-9_-]+, so this stays in `dir`.
-    tokio::fs::write(dir.join(format!("{}.toml", profile.id)), src)
+    crate::persistence::write_atomic(dir.join(format!("{}.toml", profile.id)), src)
         .await
         .map_err(|e| SaveError::Io(e.into()))
 }

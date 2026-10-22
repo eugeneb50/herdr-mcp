@@ -112,8 +112,9 @@ fn validate_recipe(steps: &[RecipeStep]) -> Vec<String> {
     }
 
     // Validate each step
-    static STEP_REF_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"\{\{\s*(\w+)\.").unwrap());
+    static STEP_REF_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\{\{\s*(\w+)\.").expect("a valid regex literal")
+    });
     for (i, step) in steps.iter().enumerate() {
         let step_errors = validate_recipe_step(step, steps);
         for err in step_errors {
@@ -382,8 +383,9 @@ async fn handle_runner_fields(app: &mut App, code: KeyCode, mods: KeyModifiers) 
                     pg.editing_field = true;
                     let cur = pg.field_values.get(i).cloned().unwrap_or_default();
                     pg.edit_area = crate::TextArea::new(vec![cur]);
-                    pg.edit_area
-                        .input(crate::to_textarea_input(code, mods).unwrap());
+                    if let Some(input) = crate::to_textarea_input(code, mods) {
+                        pg.edit_area.input(input);
+                    }
                 }
                 Ok(true)
             }
@@ -822,7 +824,7 @@ async fn handle_builder_global(app: &mut App, code: KeyCode, mods: KeyModifiers)
                         recipe_id: Some(id),
                         ..Default::default()
                     };
-                    show_run(app, http.run_and_wait(&req).await);
+                    start_run(app, http, req);
                 }
             } else {
                 app.playground.builder_error =
@@ -986,11 +988,65 @@ async fn builder_run_inline(app: &mut App) {
     };
     app.playground.builder_loading = true;
     app.status_msg = "running recipe…".into();
-    show_run(app, http.run_and_wait(&req).await);
+    start_run(app, http, req);
+}
+
+/// A tool call or recipe run in flight. It runs as its own task so the TUI
+/// keeps drawing and reading keys; the main loop hands a finished one to
+/// [`finish_job`].
+pub(crate) enum Job {
+    Tool(String, tokio::task::JoinHandle<Result<Value, String>>),
+    Run(tokio::task::JoinHandle<Result<RunRecord, String>>),
+}
+
+impl Job {
+    pub(crate) fn is_finished(&self) -> bool {
+        match self {
+            Self::Tool(_, task) => task.is_finished(),
+            Self::Run(task) => task.is_finished(),
+        }
+    }
+}
+
+/// `false` (and says so) if a job is already running.
+fn idle(app: &mut App) -> bool {
+    if app.job.is_some() {
+        app.status_msg = "still running the last request…".into();
+        return false;
+    }
+    true
+}
+
+/// Start `req` and poll it to the end. Polling, not `?wait=true`, so a run
+/// longer than the client's request timeout isn't reported as failed.
+fn start_run(app: &mut App, http: herdr_mcp_api::ApiClient, req: StartRunRequest) {
+    if !idle(app) {
+        app.playground.builder_loading = false;
+        return;
+    }
+    app.job = Some(Job::Run(tokio::spawn(async move {
+        let mut run = http.start_run(&req).await.map_err(|e| e.to_string())?;
+        while !run.status.is_finished() {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            run = http.get_run(run.id).await.map_err(|e| e.to_string())?;
+        }
+        Ok(run)
+    })));
+}
+
+/// Show a finished [`Job`]'s result.
+pub(crate) async fn finish_job(app: &mut App, job: Job) {
+    let joined = |e: tokio::task::JoinError| format!("request task failed: {e}");
+    match job {
+        Job::Run(task) => show_run(app, task.await.map_err(joined).and_then(|r| r)),
+        Job::Tool(name, task) => {
+            show_tool_result(app, &name, task.await.map_err(joined).and_then(|r| r)).await
+        }
+    }
 }
 
 /// Put a finished run (or the request error) in the builder's result pane.
-fn show_run(app: &mut App, run: Result<RunRecord, herdr_mcp_api::ApiError>) {
+fn show_run(app: &mut App, run: Result<RunRecord, String>) {
     match run {
         Ok(run) => {
             app.playground.builder_result = serde_json::to_value(&run).ok();
@@ -1006,8 +1062,8 @@ fn show_run(app: &mut App, run: Result<RunRecord, herdr_mcp_api::ApiError>) {
             }
         }
         Err(e) => {
-            app.playground.builder_error = Some(e.to_string());
             app.playground.builder_result = None;
+            app.playground.builder_error = Some(e.clone());
             app.status_msg = format!("run failed: {e}");
         }
     }
@@ -1040,11 +1096,9 @@ async fn run_tool(app: &mut App) {
         }
         let val = match f.kind {
             FieldKind::Boolean => Value::Bool(v.trim() == "true"),
-            FieldKind::Number => match v.parse::<f64>() {
-                Ok(n) => Value::Number(
-                    serde_json::Number::from_f64(n).unwrap_or(serde_json::Number::from(0)),
-                ),
-                Err(_) => continue,
+            FieldKind::Number => match number_value(v) {
+                Some(n) => n,
+                None => continue,
             },
             _ => Value::String(v.clone()),
         };
@@ -1056,8 +1110,33 @@ async fn run_tool(app: &mut App) {
         app.playground.error = Some("HTTP bridge not reachable".into());
         return;
     };
+    if !idle(app) {
+        return;
+    }
     app.status_msg = format!("running {name}…");
-    match http.call_tool(&name, &params).await {
+    let name_for_task = name.clone();
+    let task = tokio::spawn(async move {
+        http.call_tool(&name_for_task, &params)
+            .await
+            .map_err(|e| e.to_string())
+    });
+    app.job = Some(Job::Tool(name, task));
+}
+
+/// A number field's JSON value: an integer when it parses as one, since
+/// integer parameters (`timeout_ms`, `lines`) reject `6000.0`; else a
+/// finite float; else `None` (the field is left out).
+fn number_value(text: &str) -> Option<Value> {
+    let text = text.trim();
+    text.parse::<i64>().map(Value::from).ok().or_else(|| {
+        let n = serde_json::Number::from_f64(text.parse().ok()?)?;
+        Some(Value::Number(n))
+    })
+}
+
+/// Show a finished tool call in the runner's result pane.
+async fn show_tool_result(app: &mut App, name: &str, result: Result<Value, String>) {
+    match result {
         Ok(v) => {
             app.playground.result = Some(v.clone());
             app.playground.error = None;
@@ -1067,12 +1146,14 @@ async fn run_tool(app: &mut App) {
             app.status_msg = format!("{name} ok");
 
             // The bridge saved any auto-variables for this tool; show them.
-            if let Ok(vars) = http.list_variables().await {
+            if let Some(http) = &app.http
+                && let Ok(vars) = http.list_variables().await
+            {
                 app.variables_state.entries = crate::parse_variables(&vars);
             }
         }
         Err(e) => {
-            app.playground.error = Some(e.to_string());
+            app.playground.error = Some(e.clone());
             app.playground.result = None;
             app.playground.result_area = crate::TextArea::new(vec![format!("error: {e}")]);
             app.status_msg = format!("{name} failed");
@@ -1922,4 +2003,18 @@ fn render_name_edit_overlay(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     );
     let ta = app.playground.builder_param_edit_area.clone();
     frame.render_widget(&ta, edit_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn number_fields_send_integers_as_integers() {
+        assert_eq!(number_value("6000"), Some(serde_json::json!(6000)));
+        assert_eq!(number_value(" -3 "), Some(serde_json::json!(-3)));
+        assert_eq!(number_value("0.5"), Some(serde_json::json!(0.5)));
+        assert_eq!(number_value("NaN"), None);
+        assert_eq!(number_value("abc"), None);
+    }
 }
