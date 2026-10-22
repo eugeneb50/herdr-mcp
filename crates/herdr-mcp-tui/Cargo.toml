@@ -18,3 +18,6 @@ herdr-mcp-api = { path = "../herdr-mcp-api" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -514,8 +514,9 @@ fn substitute_template_vars(
     vars: &HashMap<String, serde_json::Value>,
 ) {
     use regex::Regex;
-    static TEMPLATE_VAR_RE: std::sync::LazyLock<Regex> =
-        std::sync::LazyLock::new(|| Regex::new(r"\{\{\s*([\w.]+)\s*\}\}").unwrap());
+    static TEMPLATE_VAR_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"\{\{\s*([\w.]+)\s*\}\}").expect("a valid regex literal")
+    });
     match value {
         serde_json::Value::String(s) => {
             *s = TEMPLATE_VAR_RE

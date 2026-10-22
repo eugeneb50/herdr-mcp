@@ -112,8 +112,9 @@ fn validate_recipe(steps: &[RecipeStep]) -> Vec<String> {
     }
 
     // Validate each step
-    static STEP_REF_RE: std::sync::LazyLock<regex::Regex> =
-        std::sync::LazyLock::new(|| regex::Regex::new(r"\{\{\s*(\w+)\.").unwrap());
+    static STEP_REF_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"\{\{\s*(\w+)\.").expect("a valid regex literal")
+    });
     for (i, step) in steps.iter().enumerate() {
         let step_errors = validate_recipe_step(step, steps);
         for err in step_errors {
@@ -382,8 +383,9 @@ async fn handle_runner_fields(app: &mut App, code: KeyCode, mods: KeyModifiers) 
                     pg.editing_field = true;
                     let cur = pg.field_values.get(i).cloned().unwrap_or_default();
                     pg.edit_area = crate::TextArea::new(vec![cur]);
-                    pg.edit_area
-                        .input(crate::to_textarea_input(code, mods).unwrap());
+                    if let Some(input) = crate::to_textarea_input(code, mods) {
+                        pg.edit_area.input(input);
+                    }
                 }
                 Ok(true)
             }
