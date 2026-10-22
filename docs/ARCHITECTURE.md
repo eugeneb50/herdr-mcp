@@ -18,7 +18,7 @@ dashboard, and a recipe engine for chaining tool calls with variable
 interpolation.
 
 **License:** AGPL v3
-**Current test suite:** run `cargo nextest run --workspace` (223 passing)
+**Current test suite:** run `cargo nextest run --workspace` (225 passing)
 **Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---
@@ -534,7 +534,7 @@ Cron-based recipe scheduling using the `cron` crate:
 |---|---|---|
 | `/` | `Home` | Landing page: send to a pane by `pane_id` and/or `label` (typed, or picked from dropdowns of the panes and labels in `GET /api/variables/auto`; `ApiClient::send_to_pane` → `send_text` / `run_command`, `pane_id` wins), remembers the last target in `localStorage`; collapsed getting-started notes; pane table at the bottom from the same auto variables (click a row to target it) |
 | `/overview` | `Overview` | Pane browser: `GET /api/herdr/panes` with session/status/label filters, grouped by workspace and tab |
-| `/playground` | `Playground` | Tool runner (schema-driven form) + recipe builder/library; `pane_id` / `label` fields offer the same auto-variable pane dropdowns as Home (`components/pane_options.rs`) |
+| `/playground` | `Playground` | Collections, Postman style (`playground/collections.rs`): a collection is a saved recipe (folders = `category`), its requests are the steps. A request is any tool or a `herdr_api` method (picked from herdr's schema); its params preview through `POST /api/variables/resolve`; Send saves it and runs just that step (`step_ids`); clicking a path in the response adds an extract rule. The collection view edits its variables, request order and triggers and runs it in order. Globals reuse the Variables page table. Plus the herdr Events tab. Pane fields offer the auto-variable pane dropdowns (`components/pane_options.rs`) |
 | `/variables` | `Variables` | User variables (CRUD/import) + auto variables |
 | `/settings` | `Settings` | Runtime config + clipboard round-trip test |
 

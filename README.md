@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.2.0-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-223%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-225%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-6%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp

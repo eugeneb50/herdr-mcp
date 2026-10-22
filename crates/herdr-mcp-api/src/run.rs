@@ -29,7 +29,7 @@ impl RunStatus {
 
 /// One run of a recipe: what ran, where it got to, and what it produced.
 /// Stored at `data/runs/{id}/run.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunRecord {
     pub id: Uuid,
     /// The saved recipe this run came from; `None` for ad-hoc runs.

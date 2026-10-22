@@ -251,8 +251,31 @@ select.input { appearance: auto; }
 
 .runner-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
 @media (max-width: 64rem) { .runner-grid { grid-template-columns: 1fr; } }
-.builder-grid { display: grid; grid-template-columns: 17rem 1fr; gap: 1.5rem; }
-@media (max-width: 64rem) { .builder-grid { grid-template-columns: 1fr; } }
+/* Playground collections: sidebar tree + main panel. */
+.pg-grid { display: grid; grid-template-columns: 17rem 1fr; gap: 1.5rem; }
+@media (max-width: 64rem) { .pg-grid { grid-template-columns: 1fr; } }
+.pg-side, .pg-main { min-width: 0; }
+.pg-side .btn-block { margin: 0.5rem 0 0.25rem; }
+.tree-folder {
+  font-size: 0.7rem; font-family: ui-monospace, monospace; text-transform: uppercase;
+  letter-spacing: 0.08em; color: var(--muted); margin: 1rem 0 0.3rem;
+}
+.tree-item {
+  display: flex; align-items: center; gap: 0.5rem; width: 100%; min-width: 0;
+  text-align: left; background: none; border: none; color: var(--text);
+  padding: 0.35rem 0.5rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+}
+.tree-item:hover { background: rgba(52, 211, 153, 0.08); }
+.tree-sel { background: rgba(52, 211, 153, 0.15); }
+.tree-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-req { padding-left: 1.4rem; font-size: 0.78rem; }
+.tree-item .muted { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.req-row { display: flex; align-items: center; gap: 0.25rem; }
+.kv-row, .extract-row { display: grid; gap: 0.5rem; margin-bottom: 0.5rem; align-items: center; }
+.kv-row { grid-template-columns: 1fr 2fr auto; }
+.extract-row { grid-template-columns: 2fr 1.4fr 7rem auto; }
+.crumb { font-size: 0.85rem; color: var(--muted); margin-bottom: 0.75rem; }
+.crumb .link-btn { font-size: 0.85rem; padding: 0; }
 .runner-left, .runner-right { min-width: 0; }
 .btn-block { width: 100%; margin-top: 0.75rem; }
 
