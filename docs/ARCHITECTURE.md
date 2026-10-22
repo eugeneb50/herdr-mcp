@@ -18,7 +18,7 @@ dashboard, and a recipe engine for chaining tool calls with variable
 interpolation.
 
 **License:** AGPL v3
-**Current test suite:** run `cargo nextest run --workspace` (225 passing)
+**Current test suite:** run `cargo nextest run --workspace` (226 passing)
 **Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---
@@ -385,9 +385,11 @@ fails the step.
 What `herdr-mcp` opens when run in a terminal: VS Code-style tabs, mouse +
 keyboard navigation, sized for a herdr sidecar pane.
 
-**5 tabs** (`Ctrl+1`–`Ctrl+5` or `Alt+1`–`Alt+5`; opens on Send. Where
-the terminal lacks the kitty keyboard protocol, Ctrl+2 arrives as
-Ctrl+Space, which also works, and Ctrl+3 as Esc, so use Alt+3):
+**5 tabs**, opening on Send. Next / previous: `Alt+→` / `Alt+←` (any
+terminal) or `Ctrl+Tab` / `Ctrl+Shift+Tab`; directly: `Alt+1`–`Alt+5` or
+`Ctrl+1`–`Ctrl+5`. Without the kitty keyboard protocol (VTE terminals, for
+one) Ctrl+Tab arrives as a plain Tab and Ctrl+1 / Ctrl+3 as `1` / Esc, so
+use the Alt keys there. None of them type text or edit a field:
 | Tab | Content |
 |---|---|
 | Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "press Enter after" (`Ctrl+t`); addressed by pane id |

@@ -1525,7 +1525,7 @@ fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
 /// Footer with status message + keybindings.
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let bindings = "Ctrl/Alt+1-5:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
+    let bindings = "Ctrl+Tab/Alt+←→:next/prev tab  Alt+1-5:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
     let mut line = Line::from(vec![Span::styled(bindings, dim_style())]);
     if !app.status_msg.is_empty() {
         line = Line::from(vec![
@@ -1548,7 +1548,7 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
     }
 
     // Tab hotkeys win over the active tab, whatever has focus.
-    if let Some(t) = tab_hotkey(code, mods) {
+    if let Some(t) = tab_hotkey(code, mods, app.tab) {
         app.tab = t;
         app.status_msg.clear();
         return Ok(());
@@ -1600,12 +1600,22 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
     Ok(())
 }
 
-/// The tab a key switches to: Ctrl+1-5 or Alt+1-5. Without the kitty
-/// protocol a terminal sends Ctrl+2 as NUL, which crossterm reads as
-/// Ctrl+Space, and Ctrl+3 as a bare Esc; Ctrl+Space maps back to tab 2,
-/// and Alt+3 is the way to tab 3 there.
-fn tab_hotkey(code: KeyCode, mods: KeyModifiers) -> Option<Tab> {
+/// The tab a key switches to from `current`: Ctrl+Tab / Alt+→ next,
+/// Ctrl+Shift+Tab / Alt+← previous (wrapping), Ctrl+1-5 or Alt+1-5
+/// directly. Without the kitty protocol a terminal (VTE, for one) sends
+/// Ctrl+Tab as a plain Tab, Ctrl+2 as NUL, which crossterm reads as
+/// Ctrl+Space, and Ctrl+1 / Ctrl+3 as `1` / Esc; there Alt+←/→ and
+/// Alt+1-5 still work, and Ctrl+Space maps back to tab 2.
+fn tab_hotkey(code: KeyCode, mods: KeyModifiers, current: Tab) -> Option<Tab> {
+    let n = Tab::ALL.len();
+    let at = Tab::ALL.iter().position(|t| *t == current).unwrap_or(0);
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let alt_only = mods == KeyModifiers::ALT;
     let idx = match code {
+        KeyCode::Tab if ctrl && !mods.contains(KeyModifiers::SHIFT) => (at + 1) % n,
+        KeyCode::Right if alt_only => (at + 1) % n,
+        KeyCode::Tab | KeyCode::BackTab if ctrl => (at + n - 1) % n,
+        KeyCode::Left if alt_only => (at + n - 1) % n,
         KeyCode::Char(' ') if mods == KeyModifiers::CONTROL => 1,
         KeyCode::Char(c @ '1'..='5')
             if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
@@ -2162,19 +2172,83 @@ mod tests {
     #[test]
     fn tab_hotkeys_cover_legacy_encodings() {
         let ctrl = KeyModifiers::CONTROL;
-        assert_eq!(tab_hotkey(KeyCode::Char('1'), ctrl), Some(Tab::Send));
-        assert_eq!(tab_hotkey(KeyCode::Char('2'), ctrl), Some(Tab::Overview));
-        // Ctrl+2 without the kitty protocol: NUL, decoded as Ctrl+Space.
-        assert_eq!(tab_hotkey(KeyCode::Char(' '), ctrl), Some(Tab::Overview));
         assert_eq!(
-            tab_hotkey(KeyCode::Char('3'), KeyModifiers::ALT),
+            tab_hotkey(KeyCode::Char('1'), ctrl, Tab::Send),
+            Some(Tab::Send)
+        );
+        assert_eq!(
+            tab_hotkey(KeyCode::Char('2'), ctrl, Tab::Send),
+            Some(Tab::Overview)
+        );
+        // Ctrl+2 without the kitty protocol: NUL, decoded as Ctrl+Space.
+        assert_eq!(
+            tab_hotkey(KeyCode::Char(' '), ctrl, Tab::Send),
+            Some(Tab::Overview)
+        );
+        assert_eq!(
+            tab_hotkey(KeyCode::Char('3'), KeyModifiers::ALT, Tab::Send),
             Some(Tab::Playground)
         );
-        assert_eq!(tab_hotkey(KeyCode::Char('5'), ctrl), Some(Tab::Settings));
-        assert_eq!(tab_hotkey(KeyCode::Char('6'), ctrl), None);
-        assert_eq!(tab_hotkey(KeyCode::Char('2'), KeyModifiers::NONE), None);
-        assert_eq!(tab_hotkey(KeyCode::Char(' '), KeyModifiers::NONE), None);
-        assert_eq!(tab_hotkey(KeyCode::Esc, KeyModifiers::NONE), None);
+        assert_eq!(
+            tab_hotkey(KeyCode::Char('5'), ctrl, Tab::Send),
+            Some(Tab::Settings)
+        );
+        assert_eq!(tab_hotkey(KeyCode::Char('6'), ctrl, Tab::Send), None);
+        assert_eq!(
+            tab_hotkey(KeyCode::Char('2'), KeyModifiers::NONE, Tab::Send),
+            None
+        );
+        assert_eq!(
+            tab_hotkey(KeyCode::Char(' '), KeyModifiers::NONE, Tab::Send),
+            None
+        );
+        assert_eq!(
+            tab_hotkey(KeyCode::Esc, KeyModifiers::NONE, Tab::Send),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_hotkeys_cycle_and_wrap() {
+        let (ctrl, alt) = (KeyModifiers::CONTROL, KeyModifiers::ALT);
+        let next = |t| tab_hotkey(KeyCode::Tab, ctrl, t);
+        assert_eq!(next(Tab::Send), Some(Tab::Overview));
+        assert_eq!(next(Tab::Settings), Some(Tab::Send));
+        assert_eq!(
+            tab_hotkey(KeyCode::Right, alt, Tab::Overview),
+            Some(Tab::Playground)
+        );
+        // Ctrl+Shift+Tab: kitty reports Tab + Shift; crossterm may fold it to BackTab.
+        let back = ctrl | KeyModifiers::SHIFT;
+        assert_eq!(
+            tab_hotkey(KeyCode::Tab, back, Tab::Send),
+            Some(Tab::Settings)
+        );
+        assert_eq!(
+            tab_hotkey(KeyCode::BackTab, back, Tab::Overview),
+            Some(Tab::Send)
+        );
+        assert_eq!(
+            tab_hotkey(KeyCode::Left, alt, Tab::Send),
+            Some(Tab::Settings)
+        );
+        // Plain Tab / Shift+Tab / arrows stay with the tab (field focus, lists).
+        assert_eq!(
+            tab_hotkey(KeyCode::Tab, KeyModifiers::NONE, Tab::Send),
+            None
+        );
+        assert_eq!(
+            tab_hotkey(KeyCode::BackTab, KeyModifiers::SHIFT, Tab::Send),
+            None
+        );
+        assert_eq!(
+            tab_hotkey(KeyCode::Right, KeyModifiers::NONE, Tab::Send),
+            None
+        );
+        assert_eq!(
+            tab_hotkey(KeyCode::Left, alt | KeyModifiers::SHIFT, Tab::Send),
+            None
+        );
     }
 
     #[test]
