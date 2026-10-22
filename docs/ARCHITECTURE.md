@@ -375,7 +375,9 @@ Variables use `{{ path }}` syntax with dot/bracket navigation:
 What `herdr-mcp` opens when run in a terminal: VS Code-style tabs, mouse +
 keyboard navigation, sized for a herdr sidecar pane.
 
-**5 tabs** (`Ctrl+1`–`Ctrl+5`; opens on Send):
+**5 tabs** (`Ctrl+1`–`Ctrl+5` or `Alt+1`–`Alt+5`; opens on Send. Where
+the terminal lacks the kitty keyboard protocol, Ctrl+2 arrives as
+Ctrl+Space, which also works, and Ctrl+3 as Esc, so use Alt+3):
 | Tab | Content |
 |---|---|
 | Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "press Enter after" (`Ctrl+t`); addressed by pane id |

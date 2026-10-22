@@ -23,10 +23,14 @@ use anyhow::{Context, Result};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        MouseButton, MouseEvent, MouseEventKind,
+        KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -1284,12 +1288,25 @@ pub async fn run(opts: DashboardOptions) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    // Legacy encoding sends Ctrl+2 as NUL and Ctrl+3 as ESC, so those tab
+    // hotkeys never arrive as digits; the kitty protocol, where the
+    // terminal has it, reports them as Ctrl+'2' / Ctrl+'3'.
+    let enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    if enhanced {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).context("creating ratatui terminal")?;
 
     let result = main_loop(&mut terminal, &mut app).await;
 
+    if enhanced {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -1493,7 +1510,7 @@ fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
 /// Footer with status message + keybindings.
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let bindings = "Ctrl+1-5:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
+    let bindings = "Ctrl/Alt+1-5:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
     let mut line = Line::from(vec![Span::styled(bindings, dim_style())]);
     if !app.status_msg.is_empty() {
         line = Line::from(vec![
@@ -1512,6 +1529,13 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
     // The right-click context menu fully owns input while open.
     if app.context_menu.open {
         handle_context_menu_key(app, code, mods).await?;
+        return Ok(());
+    }
+
+    // Tab hotkeys win over the active tab, whatever has focus.
+    if let Some(t) = tab_hotkey(code, mods) {
+        app.tab = t;
+        app.status_msg.clear();
         return Ok(());
     }
 
@@ -1556,16 +1580,26 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
             app.refresh().await;
             app.status_msg = "refreshed".to_string();
         }
-        KeyCode::Char(c @ '1'..='5') if mods.contains(KeyModifiers::CONTROL) => {
-            let idx = (c as u8 - b'1') as usize;
-            if let Some(t) = Tab::ALL.get(idx).copied() {
-                app.tab = t;
-                app.status_msg.clear();
-            }
-        }
         _ => {}
     }
     Ok(())
+}
+
+/// The tab a key switches to: Ctrl+1-5 or Alt+1-5. Without the kitty
+/// protocol a terminal sends Ctrl+2 as NUL, which crossterm reads as
+/// Ctrl+Space, and Ctrl+3 as a bare Esc; Ctrl+Space maps back to tab 2,
+/// and Alt+3 is the way to tab 3 there.
+fn tab_hotkey(code: KeyCode, mods: KeyModifiers) -> Option<Tab> {
+    let idx = match code {
+        KeyCode::Char(' ') if mods == KeyModifiers::CONTROL => 1,
+        KeyCode::Char(c @ '1'..='5')
+            if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            (c as u8 - b'1') as usize
+        }
+        _ => return None,
+    };
+    Tab::ALL.get(idx).copied()
 }
 
 /// Key handling while the right-click context menu is open.
@@ -2108,6 +2142,24 @@ mod tests {
         let r2 = menu_rect(5, 5, 80, 24);
         assert_eq!(r2.x, 5);
         assert_eq!(r2.y, 5);
+    }
+
+    #[test]
+    fn tab_hotkeys_cover_legacy_encodings() {
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(tab_hotkey(KeyCode::Char('1'), ctrl), Some(Tab::Send));
+        assert_eq!(tab_hotkey(KeyCode::Char('2'), ctrl), Some(Tab::Overview));
+        // Ctrl+2 without the kitty protocol: NUL, decoded as Ctrl+Space.
+        assert_eq!(tab_hotkey(KeyCode::Char(' '), ctrl), Some(Tab::Overview));
+        assert_eq!(
+            tab_hotkey(KeyCode::Char('3'), KeyModifiers::ALT),
+            Some(Tab::Playground)
+        );
+        assert_eq!(tab_hotkey(KeyCode::Char('5'), ctrl), Some(Tab::Settings));
+        assert_eq!(tab_hotkey(KeyCode::Char('6'), ctrl), None);
+        assert_eq!(tab_hotkey(KeyCode::Char('2'), KeyModifiers::NONE), None);
+        assert_eq!(tab_hotkey(KeyCode::Char(' '), KeyModifiers::NONE), None);
+        assert_eq!(tab_hotkey(KeyCode::Esc, KeyModifiers::NONE), None);
     }
 
     #[test]

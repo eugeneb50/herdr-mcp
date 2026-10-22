@@ -57,7 +57,7 @@ fn render_tabs_guide(frame: &mut ratatui::Frame, area: Rect) {
         Line::from("3 Playground (tool runner + recipe builder)"),
         Line::from("4 Variables                 5 Settings"),
         Line::from(""),
-        Line::from("Press Ctrl+1-5 to switch tabs or click the tab strip above."),
+        Line::from("Press Ctrl+1-5 (or Alt+1-5) to switch tabs or click the tab strip above."),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
