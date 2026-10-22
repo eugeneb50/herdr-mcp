@@ -19,7 +19,7 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   `trim_*`, `*_folder_key`), `/api/trim/*`, trim policies on agents, savings
   badges and the Trim tabs in the web UI and TUI. `agent_message` and
   `agent_read` send and store plain text (their `compress` / `decompress`
-  parameters are gone). 41 tools remain. Leftover `trim_stats`, `pfc1_*` and
+  parameters are gone). Leftover `trim_stats`, `pfc1_*` and
   `folder_keys` files in a data dir are ignored.
 - **Plugin.** The bridge tab runs `herdr-mcp --http-only`, the dashboard
   split `herdr-mcp`. `scripts/plugin-build.sh` replaces `bin/herdr-mcp` by
@@ -35,6 +35,12 @@ The binary, TUI and trim changes are all breaking; the rest are marked
 - **TUI tab keys.** Ctrl+2 and Ctrl+3 now switch tabs where the terminal
   supports the kitty keyboard protocol; elsewhere Ctrl+2 (sent as
   Ctrl+Space) works and Alt+1-5 switch tabs everywhere.
+- **Duplicate agent tools removed (breaking).** `send_agent`, `read_agent`,
+  `get_agent`, `wait_agent_status` and `wait_pane_agent_status` repeated the
+  a2a tools: use `agent_message`, `agent_read`, `agent_list` and
+  `agent_wait`, whose `target` (role, label or pane id) now also takes a
+  pane the registry hasn't seen. The Dev Watch template's notify step uses `agent_message`; saved
+  recipes with the old tool names need the same edit. 36 tools remain.
 - **Chaining across requests.** A recipe step can carry `extract` rules
   (`{path, var, scope}`) that save part of its result as a global or a
   collection (recipe) variable; later steps and later runs resolve it.

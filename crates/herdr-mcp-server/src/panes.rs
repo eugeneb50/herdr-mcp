@@ -7,7 +7,7 @@ use herdr_mcp_api::{HerdrPane, HerdrSession, PaneFilter, PanesResponse, Sessions
 use rmcp::ErrorData as McpError;
 use serde::Deserialize;
 
-use crate::server::{herdr_cli, herdr_cli_at, to_mcp_err};
+use crate::server::{herdr_cli, herdr_cli_at, to_mcp_err, user_err};
 
 /// Every named herdr session (`herdr session list --json`).
 /// `current` marks the one whose socket is this server's (`HERDR_SOCKET_PATH`,
@@ -53,14 +53,6 @@ fn pick_socket(sessions: &[HerdrSession], name: &str) -> Result<String, String> 
                 known.join(", ")
             ))
         }
-    }
-}
-
-fn user_err(msg: String) -> McpError {
-    McpError {
-        code: rmcp::model::ErrorCode(-32000),
-        message: msg.into(),
-        data: None,
     }
 }
 

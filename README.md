@@ -21,7 +21,7 @@ MCP (Model Context Protocol) server written in Rust that exposes [herdr](https:/
   - [HTTP API](#http-api)
   - [Recipe format](#recipe-format)
   - [Environment](#environment)
-- [Tools (41)](#tools-41)
+- [Tools (36)](#tools-36)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
@@ -68,7 +68,7 @@ herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 ## Features
 
 - **MCP mode** — plug into any MCP client (Claude Desktop, Cursor, Claude Code, Continue, OpenCode) to control herdr workspaces, tabs, panes and agents
-- **41 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, recipe templates, scheduler and clipboard; `herdr_api` reaches every method the installed herdr exposes
+- **36 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, recipe templates, scheduler and clipboard; `herdr_api` reaches every method the installed herdr exposes
 - **herdr plugin** — `herdr plugin install eugeneb50/herdr-mcp` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
 - **Recipe engine** — chain tool calls with variable interpolation (`{{ stepId.result.path }}`); runs are tracked (`/api/runs`) with per-step events, pause/resume/cancel
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
@@ -337,7 +337,7 @@ All endpoints return JSON unless noted. Request/response types live in
 | `GET` | `/*` | Web playground (Dioxus bundle, SPA fallback to `index.html`) |
 | `GET` | `/api/health` | Health check |
 | `GET` / `PUT` | `/api/config`, `/api/config/clipboard` | Resolved config / set clipboard commands |
-| `GET` | `/api/tools` | All 41 tools with JSON schemas and categories |
+| `GET` | `/api/tools` | All 36 tools with JSON schemas and categories |
 | `POST` | `/api/tools/{name}` | Call a tool; body is its parameter object |
 | `GET` | `/api/agents?workspace_id=` | Live panes from the agent registry |
 | `GET` | `/api/workspaces` | Workspaces via herdr |
@@ -408,11 +408,11 @@ every `herdr` child process, so CLI calls and the event subscriber hit the same 
 
 ---
 
-## Tools (41)
+## Tools (36)
 
-Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-41-tools-total).
+Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-36-tools-total).
 
-### Discovery (7)
+### Discovery (6)
 | Tool | Description |
 |------|-------------|
 | `status` | herdr server status |
@@ -421,7 +421,6 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `list_panes` | List panes (optionally by workspace) |
 | `list_agents` | List detected agents |
 | `get_pane` | Pane details by pane_id or label |
-| `get_agent` | Agent details |
 
 ### Lifecycle (4)
 | Tool | Description |
@@ -431,24 +430,20 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `split_pane` | Split a pane right or down |
 | `close_pane` | Close a pane |
 
-### Read (2) / Write (6)
+### Read (1) / Write (5)
 | Tool | Description |
 |------|-------------|
 | `read_pane` | Read a pane's output |
-| `read_agent` | Read an agent's output |
 | `send_text` | Send text to a pane (no Enter) |
 | `send_keys` | Send key presses to a pane |
 | `run_command` | Type a command into a pane and press Enter |
 | `pane_exec` | Run a command in a pane's shell, wait, return its output and exit code |
 | `herdr_api` | Call any herdr socket API method (`GET /api/herdr/schema` lists them) |
-| `send_agent` | Send text to an agent |
 
-### Synchronize (3)
+### Synchronize (1)
 | Tool | Description |
 |------|-------------|
 | `wait_output` | Wait for output in a pane |
-| `wait_pane_agent_status` | Wait for a pane's agent status |
-| `wait_agent_status` | Wait for an agent status by target |
 
 ### A2A primitives (7)
 | Tool | Description |
@@ -458,7 +453,7 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `agent_interrupt` | Stop an agent's turn, or quit it |
 | `agent_message` | Send a message to an agent and submit it |
 | `agent_read` | Read an agent's output and store it as its work product |
-| `agent_wait` | Wait for an agent by role/pane |
+| `agent_wait` | Wait for an agent status (role, label or pane id) |
 | `agent_list` | List registry agents |
 
 ### Variables (2) / Templates (3) / Scheduler (4) / Clipboard (2)

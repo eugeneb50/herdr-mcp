@@ -47,7 +47,7 @@ interpolation.
 │                        ▼                                     │
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │              HerdrMcpServer (server.rs)                  │ │
-│  │  - 41 tool definitions (discovery, lifecycle, read,     │ │
+│  │  - 36 tool definitions (discovery, lifecycle, read,     │ │
 │  │    write, synchronize, a2a, variables, templates,       │ │
 │  │    scheduler, clipboard)                                │ │
 │  │  - Recipe engine with {{ variable }} interpolation      │ │
@@ -149,9 +149,9 @@ herdr-mcp/
 
 ---
 
-## 4. MCP Tool Reference (41 tools total)
+## 4. MCP Tool Reference (36 tools total)
 
-### 4.1 Discovery Tools (8)
+### 4.1 Discovery Tools (7)
 
 `session?` (a name from `list_sessions`) points a Discovery or Read tool at
 another herdr session; the label in `get_pane`/`read_pane` is looked up
@@ -167,7 +167,6 @@ engine, always acts on the server's own session.
 | `list_panes` | `session?`, `workspace_id?`, `tab_id?`, `agent_status?`, `focused?`, `label?` | Typed `{panes: [HerdrPane]}`; every filter narrows (`label`: case-insensitive substring of label or agent) |
 | `list_agents` | `session?` | List all detected agents |
 | `get_pane` | `pane_id?`, `label?`, `session?` | Get pane details by ID or label |
-| `get_agent` | `target`, `session?` | Get agent details by terminal/name/pane |
 
 ### 4.2 Lifecycle Tools (4)
 
@@ -178,14 +177,13 @@ engine, always acts on the server's own session.
 | `split_pane` | `pane_id?`, `label?`, `direction?`, `cwd?`, `no_focus?` | Split a pane right or down |
 | `close_pane` | `pane_id?`, `label?` | Close a pane |
 
-### 4.3 Read Tools (2)
+### 4.3 Read Tools (1)
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `read_pane` | `pane_id?`, `label?`, `source?`, `lines?`, `session?` | Read pane output (visible/recent/recent-unwrapped) |
-| `read_agent` | `target`, `source?`, `lines?`, `session?` | Read agent output |
 
-### 4.4 Write Tools (6)
+### 4.4 Write Tools (5)
 
 | Tool | Parameters | Description |
 |---|---|---|
@@ -194,15 +192,12 @@ engine, always acts on the server's own session.
 | `run_command` | `pane_id?`, `label?`, `command` | Atomic text+Enter |
 | `pane_exec` | `pane_id?`, `label?`, `command`, `timeout_ms?`, `lines?`, `check?` | Run in the pane's shell, wait, return `{exit_code, output}` |
 | `herdr_api` | `method`, `params?`, `timeout_ms?` | Any herdr socket API method; returns herdr's response |
-| `send_agent` | `target`, `text` | Send text to agent stream |
 
-### 4.5 Synchronize Tools (3)
+### 4.5 Synchronize Tools (1)
 
 | Tool | Parameters | Description |
 |---|---|---|
 | `wait_output` | `pane_id?`, `label?`, `match_text`, `timeout_ms?`, `source?`, `use_regex?` | Wait for text in pane |
-| `wait_pane_agent_status` | `pane_id?`, `label?`, `status`, `timeout_ms?` | Wait for agent status |
-| `wait_agent_status` | `target`, `status`, `timeout_ms?` | Wait for agent status by target |
 
 ### 4.6 A2A Primitives (7)
 
@@ -213,7 +208,7 @@ engine, always acts on the server's own session.
 | `agent_interrupt` | `target`, `hard` | Stop the agent's turn (profile `interrupt` keys) or quit it (`hard`) |
 | `agent_message` | `target`, `text` | Send a message to an agent and submit it |
 | `agent_read` | `target`, `source?`, `lines?` | Read + store as work product |
-| `agent_wait` | `target`, `status?`, `timeout_ms?` | Wait for agent by role/pane |
+| `agent_wait` | `target`, `status?`, `timeout_ms?` | Wait for an agent status; `target` is a role, label or pane id |
 | `agent_list` | `workspace_id?` | List registry agents |
 
 ### 4.7 Session Variables (2)

@@ -153,7 +153,6 @@ through deliberate team decision.
 - `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the tool runner, herdr API, recipe builder and herdr events tabs; built into `herdr-mcp` and served by the HTTP bridge
 - `data/` — runtime persistence (recipes, runs, variables, schedules, sessions, profiles)
 - `docs/` — `ARCHITECTURE.md` (reference), `SWARMS.md` (flow-engine proposal)
-- `herdr-mcp-context.toml` — project's evolving memory for resuming sessions
 
 ## Risk Tiers
 
@@ -170,7 +169,6 @@ When uncertain, classify as higher risk.
 3. **Implement minimal patch** — no speculative abstractions, no config keys without a concrete use case. Fix verified bugs; mention hypothetical ones instead of coding guards for them.
 4. **Validate by risk tier** — docs-only: lightweight checks. Code changes: all [gates](#gates).
 5. **Document impact** — update PR notes for behavior, risk, side effects, and rollback.
-6. **Update project memory** — at the end of each session, update `herdr-mcp-context.toml` with new spec facts, gotchas, and test counts.
 
 ## Branch/commit/PR rules
 
@@ -221,7 +219,6 @@ AI coding assistant skills live in `~/.config/opencode/skills/`. Useful here:
 
 ## Linked References
 
-- `@herdr-mcp-context.toml` — evolving project memory: architecture, spec facts tests rely on, known non-determinism, gotchas. Read first when resuming work.
 - `@docs/ARCHITECTURE.md` — comprehensive architecture reference (data flow, tool reference, HTTP API, recipe engine, triggers, agent registry, persistence, scheduler, web UI, plugin, build/run, design decisions, known gotchas).
 - `@docs/SWARMS.md` — swarm / flow engine design (proposal).
 - `@CHANGES.md` — notable changes.

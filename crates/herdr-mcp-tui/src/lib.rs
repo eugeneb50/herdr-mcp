@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-        KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, KeyboardEnhancementFlags, MouseButton, MouseEvent, MouseEventKind,
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
@@ -1253,35 +1253,10 @@ async fn execute_context_action(app: &mut App, action: ContextAction) {
     app.context_menu.open = false;
 }
 
-/// Convert a crossterm key event into a backend-agnostic `tui_textarea::Input`.
-///
-/// We build `Input` manually (rather than `Input::from(crossterm_event)`) so the
-/// TUI does not need to depend on tui-textarea's pinned crossterm version.
+/// A key as `tui_textarea` input; `None` for keys it has no use for.
 pub(crate) fn to_textarea_input(code: KeyCode, mods: KeyModifiers) -> Option<TaInput> {
-    let key = match code {
-        KeyCode::Char(c) => TaKey::Char(c),
-        KeyCode::Enter => TaKey::Enter,
-        KeyCode::Backspace => TaKey::Backspace,
-        KeyCode::Left => TaKey::Left,
-        KeyCode::Right => TaKey::Right,
-        KeyCode::Up => TaKey::Up,
-        KeyCode::Down => TaKey::Down,
-        KeyCode::Tab => TaKey::Tab,
-        KeyCode::Delete => TaKey::Delete,
-        KeyCode::Home => TaKey::Home,
-        KeyCode::End => TaKey::End,
-        KeyCode::PageUp => TaKey::PageUp,
-        KeyCode::PageDown => TaKey::PageDown,
-        KeyCode::Esc => TaKey::Esc,
-        KeyCode::F(n) => TaKey::F(n),
-        _ => return None,
-    };
-    Some(TaInput {
-        key,
-        ctrl: mods.contains(KeyModifiers::CONTROL),
-        alt: mods.contains(KeyModifiers::ALT),
-        shift: mods.contains(KeyModifiers::SHIFT),
-    })
+    let input = TaInput::from(KeyEvent::new(code, mods));
+    (input.key != TaKey::Null).then_some(input)
 }
 
 /// Entry point invoked from the CLI `dashboard` subcommand.
