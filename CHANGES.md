@@ -32,9 +32,11 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   bind name; MCP clients, the TUI and curl send none and are unaffected.
 - **Bind warning.** A non-loopback `http.bind-addr` logs a warning at
   startup: the bridge has no auth.
-- **TUI tab keys.** Ctrl+2 and Ctrl+3 now switch tabs where the terminal
-  supports the kitty keyboard protocol; elsewhere Ctrl+2 (sent as
-  Ctrl+Space) works and Alt+1-5 switch tabs everywhere.
+- **TUI tab keys.** Alt+→ / Alt+← go to the next / previous tab (wrapping)
+  in any terminal, Ctrl+Tab / Ctrl+Shift+Tab where the terminal speaks the
+  kitty keyboard protocol, and Alt+1-5 / Ctrl+1-5 jump directly. None of
+  them type text or edit a field. VTE terminals send Ctrl+Tab as Tab and
+  Ctrl+1 / Ctrl+3 as `1` / Esc, so use the Alt keys there.
 - **Duplicate agent tools removed (breaking).** `send_agent`, `read_agent`,
   `get_agent`, `wait_agent_status` and `wait_pane_agent_status` repeated the
   a2a tools: use `agent_message`, `agent_read`, `agent_list` and
