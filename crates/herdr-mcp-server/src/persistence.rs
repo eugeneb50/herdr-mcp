@@ -21,6 +21,30 @@ pub struct SessionVars {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Replace `path` with `data` atomically: write a sibling temp file, sync
+/// it, then rename it over `path`. A crash or a concurrent save leaves the
+/// old file or the new one, never a truncated mix. The temp name ends in
+/// `.tmp-<uuid>`, so loaders that read `*.json` / `*.toml` never see it.
+pub(crate) async fn write_atomic(
+    path: impl AsRef<std::path::Path>,
+    data: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let path = path.as_ref();
+    let tmp = path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
+    let written = async {
+        let mut f = fs::File::create(&tmp).await?;
+        f.write_all(data.as_ref()).await?;
+        f.sync_all().await?;
+        fs::rename(&tmp, path).await
+    }
+    .await;
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp).await;
+    }
+    written
+}
+
 /// Validate a caller-supplied name (variable key, workspace id, blob name)
 /// that becomes part of a file name under `data/`. It must be one plain path
 /// component: non-empty, not `.`/`..`, no separators or NUL. Rejected rather
@@ -63,7 +87,7 @@ impl Persistence {
             .join(format!("{}.json", recipe.id));
         fs::create_dir_all(self.data_dir.join("recipes")).await?;
         let json = serde_json::to_string_pretty(recipe)?;
-        fs::write(path, json).await?;
+        write_atomic(path, json).await?;
         Ok(())
     }
 
@@ -125,7 +149,7 @@ impl Persistence {
             .join(format!("{}.json", file_component(&var.key)?));
         fs::create_dir_all(self.data_dir.join("variables")).await?;
         let json = serde_json::to_string_pretty(var)?;
-        fs::write(path, json).await?;
+        write_atomic(path, json).await?;
         Ok(())
     }
 
@@ -218,7 +242,7 @@ impl Persistence {
             .data_dir
             .join("sessions")
             .join(format!("{}.json", file_component(&bag.session_id)?));
-        fs::write(path, serde_json::to_string_pretty(bag)?).await?;
+        write_atomic(path, serde_json::to_string_pretty(bag)?).await?;
         Ok(())
     }
 
@@ -253,7 +277,7 @@ impl Persistence {
             file_component(ws)?,
             file_component(name)?
         ));
-        fs::write(path, serde_json::to_string_pretty(value)?).await?;
+        write_atomic(path, serde_json::to_string_pretty(value)?).await?;
         Ok(())
     }
 
@@ -283,7 +307,7 @@ impl Persistence {
         let mut snapshot = snapshot.clone();
         snapshot.updated_at = chrono::Utc::now();
         let path = self.playground_path(&snapshot.workspace_id);
-        fs::write(path, serde_json::to_string_pretty(&snapshot)?).await?;
+        write_atomic(path, serde_json::to_string_pretty(&snapshot)?).await?;
         Ok(())
     }
 
@@ -322,7 +346,7 @@ impl Persistence {
     pub async fn save_run_header(&self, header: &RunHeader) -> anyhow::Result<()> {
         let dir = self.run_dir(&header.id);
         fs::create_dir_all(&dir).await?;
-        fs::write(dir.join("run.json"), serde_json::to_string_pretty(header)?).await?;
+        write_atomic(dir.join("run.json"), serde_json::to_string_pretty(header)?).await?;
         Ok(())
     }
 
@@ -398,7 +422,7 @@ impl Persistence {
             .join("schedules")
             .join(format!("{}.json", schedule.id));
         fs::create_dir_all(self.data_dir.join("schedules")).await?;
-        fs::write(path, serde_json::to_string_pretty(schedule)?).await?;
+        write_atomic(path, serde_json::to_string_pretty(schedule)?).await?;
         Ok(())
     }
 
@@ -443,6 +467,32 @@ impl Persistence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Racing saves of one file (two runs updating the same session vars).
+    // Plain `fs::write` truncates in place and leaves a torn mix here.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_atomic_writes_leave_one_whole_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("x.json");
+        let payloads: Vec<String> = (0..16u8)
+            .map(|n| {
+                char::from(b'a' + n)
+                    .to_string()
+                    .repeat((16 - usize::from(n)) << 16)
+            })
+            .collect();
+        let writes = payloads.iter().map(|p| {
+            let (path, p) = (path.clone(), p.clone());
+            tokio::spawn(async move { write_atomic(&path, p).await })
+        });
+        for r in futures_util::future::join_all(writes).await {
+            r.unwrap().unwrap();
+        }
+        let got = std::fs::read_to_string(&path).unwrap();
+        assert!(payloads.contains(&got), "torn file: {} bytes", got.len());
+        let names: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+        assert_eq!(names.len(), 1, "temp files left behind");
+    }
     use crate::variables::RecipeStep;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
