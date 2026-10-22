@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.2.0-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-217%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-220%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-6%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
@@ -399,7 +399,7 @@ watched and `idle` when it was.
 | `HERDR_MCP_DATA_DIR` | `./data` | Data directory |
 | `HERDR_MCP_HTTP_PORT` | 7676 | HTTP bridge port |
 | `HERDR_MCP_HTTP_ONLY` | — | `true`: HTTP bridge only (no TUI, no MCP stdio) |
-| `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address |
+| `HERDR_MCP_HTTP_BIND` | `127.0.0.1` | HTTP bind address. Keep it loopback: the bridge has no auth, so anyone who can reach a LAN or `0.0.0.0` bind can run commands in your panes (startup logs a warning) |
 | `HERDR_MCP_WEB_DIR` | the web UI built into the binary | Serve a `dx bundle` directory from disk instead |
 
 Socket resolution: `--herdr-socket` > `HERDR_SOCKET_PATH` > config file >

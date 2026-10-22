@@ -18,7 +18,7 @@ dashboard, and a recipe engine for chaining tool calls with variable
 interpolation.
 
 **License:** AGPL v3
-**Current test suite:** run `cargo nextest run --workspace` (217 passing)
+**Current test suite:** run `cargo nextest run --workspace` (220 passing)
 **Architecture:** Cargo workspace under `crates/`; all code lives there.
 
 ---
@@ -303,7 +303,11 @@ The bridge serves the Dioxus bundle built into the binary:
   `/api/*` keeps working
 - No CORS layer: the UI is same-origin with the API (and `dx serve` proxies
   `/api` server-side via `Dioxus.toml [web.proxy]`)
-- Binds `http.bind-addr` (default `127.0.0.1`)
+- Binds `http.bind-addr` (default `127.0.0.1`). There is no auth: a
+  non-loopback bind lets anyone who reaches it run commands in panes, so
+  startup logs a warning for one
+- Refuses a foreign `Host` (DNS rebinding) and a foreign browser `Origin`
+  (cross-site simple requests); requests without `Origin` pass
 
 ### 5.5 Wire Contract
 
@@ -375,7 +379,9 @@ Variables use `{{ path }}` syntax with dot/bracket navigation:
 What `herdr-mcp` opens when run in a terminal: VS Code-style tabs, mouse +
 keyboard navigation, sized for a herdr sidecar pane.
 
-**5 tabs** (`Ctrl+1`–`Ctrl+5`; opens on Send):
+**5 tabs** (`Ctrl+1`–`Ctrl+5` or `Alt+1`–`Alt+5`; opens on Send. Where
+the terminal lacks the kitty keyboard protocol, Ctrl+2 arrives as
+Ctrl+Space, which also works, and Ctrl+3 as Esc, so use Alt+3):
 | Tab | Content |
 |---|---|
 | Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "press Enter after" (`Ctrl+t`); addressed by pane id |
