@@ -1911,6 +1911,7 @@ dependencies = [
  "dirs",
  "herdr-mcp-api",
  "serde",
+ "serde_json",
  "tempfile",
  "toml",
  "toml_edit 0.22.27",

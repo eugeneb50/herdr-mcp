@@ -1,5 +1,6 @@
-//! Settings tab: herdr-mcp runtime settings + herdr sidecar context profiler +
-//! clipboard backend configuration.
+//! Settings tab: the Options registry (keybindings, timeouts, limits;
+//! `GET/PUT/DELETE /api/settings`), herdr-mcp runtime settings + herdr
+//! sidecar context profiler, and the clipboard backend configuration.
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -7,6 +8,8 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
+
+use herdr_mcp_api::settings;
 
 use crate::App;
 use crate::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
@@ -17,15 +20,23 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
     if app.settings.clipboard.editing {
         return handle_clipboard_edit(app, code, mods).await;
     }
+    if app.settings.options.editing {
+        return handle_option_edit(app, code, mods).await;
+    }
 
-    // Tab/BackTab cycle frames (2 frames: runtime=0, clipboard=1).
+    // Tab/BackTab cycle frames: options (2) → runtime (0) → clipboard (1).
+    const ORDER: [usize; 3] = [2, 0, 1];
+    let at = ORDER
+        .iter()
+        .position(|f| *f == app.settings.focused_frame)
+        .unwrap_or(0);
     match code {
         KeyCode::Tab => {
-            app.settings.focused_frame = (app.settings.focused_frame + 1) % 2;
+            app.settings.focused_frame = ORDER[(at + 1) % ORDER.len()];
             return Ok(true);
         }
         KeyCode::BackTab => {
-            app.settings.focused_frame = (app.settings.focused_frame + 1) % 2;
+            app.settings.focused_frame = ORDER[(at + ORDER.len() - 1) % ORDER.len()];
             return Ok(true);
         }
         _ => {}
@@ -34,8 +45,123 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
     match app.settings.focused_frame {
         0 => handle_frame_runtime(app, code).await,
         1 => handle_frame_clipboard(app, code, mods).await,
+        2 => handle_frame_options(app, code, mods).await,
         _ => Ok(false),
     }
+}
+
+/// Frame 2: Options — ↑/↓ pick, Enter edit, Delete reset to default,
+/// Shift+Delete reset everything.
+async fn handle_frame_options(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
+    let count = settings::SPECS.len();
+    let opts = &mut app.settings.options;
+    match code {
+        KeyCode::Up => opts.selected = opts.selected.saturating_sub(1),
+        KeyCode::Down => opts.selected = (opts.selected + 1).min(count.saturating_sub(1)),
+        KeyCode::Home => opts.selected = 0,
+        KeyCode::End => opts.selected = count.saturating_sub(1),
+        KeyCode::Enter => {
+            let Some(spec) = settings::SPECS.get(opts.selected) else {
+                return Ok(true);
+            };
+            let current = app
+                .knobs
+                .value(spec.key)
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            let opts = &mut app.settings.options;
+            opts.edit_area = tui_textarea::TextArea::new(vec![current]);
+            opts.edit_area.set_block(crate::theme::panel_block(
+                " Edit: Enter saves, Esc cancels ",
+            ));
+            opts.edit_area.move_cursor(tui_textarea::CursorMove::End);
+            opts.editing = true;
+            opts.msg.clear();
+        }
+        KeyCode::Delete if mods.contains(KeyModifiers::SHIFT) => {
+            let reply = match &app.http {
+                Some(http) => Some(http.reset_settings().await),
+                None => None,
+            };
+            settle(app, reply, "every setting is back on its default");
+        }
+        KeyCode::Delete => {
+            let Some(spec) = settings::SPECS.get(opts.selected) else {
+                return Ok(true);
+            };
+            let reply = match &app.http {
+                Some(http) => Some(http.reset_setting(spec.key).await),
+                None => None,
+            };
+            settle(
+                app,
+                reply,
+                &format!("{} is back on its default", spec.label),
+            );
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Keys while editing an option's value.
+async fn handle_option_edit(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
+    match code {
+        KeyCode::Esc => app.settings.options.editing = false,
+        KeyCode::Enter => {
+            let Some(spec) = settings::SPECS.get(app.settings.options.selected) else {
+                app.settings.options.editing = false;
+                return Ok(true);
+            };
+            let text = app.settings.options.edit_area.lines().join(" ");
+            let value = match settings::Value::parse(spec.kind, &text) {
+                Ok(v) => v,
+                Err(e) => {
+                    app.settings.options.msg = format!("✗ {e}");
+                    return Ok(true);
+                }
+            };
+            let reply = match &app.http {
+                Some(http) => Some(http.set_setting(spec.key, &value).await),
+                None => None,
+            };
+            if settle(app, reply, &format!("{} saved (active now)", spec.label)) {
+                app.settings.options.editing = false;
+            }
+        }
+        KeyCode::Char(c)
+            if mods.contains(KeyModifiers::CONTROL) && matches!(c, 'c' | 'v' | 'x') =>
+        {
+            return Ok(false);
+        }
+        _ => {
+            if let Some(input) = crate::to_textarea_input(code, mods) {
+                app.settings.options.edit_area.input(input);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Apply a settings write's answer: `true` if it was taken. The bridge's
+/// refusal (out of range, chord taken…) becomes the frame's message.
+fn settle(
+    app: &mut App,
+    reply: Option<Result<herdr_mcp_api::SettingsResponse, herdr_mcp_api::ApiError>>,
+    done: &str,
+) -> bool {
+    let msg = match reply {
+        None => "✗ HTTP bridge not connected".to_string(),
+        Some(Ok(response)) => {
+            app.apply_settings(response);
+            app.settings.options.msg = format!("✓ {done}");
+            return true;
+        }
+        Some(Err(herdr_mcp_api::ApiError::Status { body, .. })) => format!("✗ {body}"),
+        Some(Err(e)) => format!("✗ {e}"),
+    };
+    app.settings.options.msg = msg;
+    false
 }
 
 /// Frame 0: Runtime settings (env vars) — Up/Down navigation.
@@ -244,7 +370,7 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Settings", accent_style().add_modifier(Modifier::BOLD)),
         Span::styled(
-            "  runtime + clipboard config   (↑/↓ nav, Tab clipboard fields)",
+            "  options · runtime · clipboard   (Tab next panel, ↑/↓ nav)",
             dim_style(),
         ),
     ]));
@@ -257,28 +383,149 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         area.height.saturating_sub(1),
     );
 
-    // Top row: runtime + env/sidecar (original layout)
-    let top = Layout::default()
+    // Left: the options registry. Right: runtime, env/sidecar, clipboard.
+    let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(Rect::new(
-            body.x,
-            body.y,
-            body.width,
-            body.height.saturating_sub(14),
-        ));
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(body);
+    render_options(frame, cols[0], app);
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(6),
+            Constraint::Length(15),
+            Constraint::Min(8),
+        ])
+        .split(cols[1]);
+    render_runtime(frame, right[0], app);
+    render_env_and_sidecar(frame, right[1], app);
+    render_clipboard(frame, right[2], app);
+}
 
-    render_runtime(frame, top[0], app);
-    render_env_and_sidecar(frame, top[1], app);
+/// The settings registry: one row per spec, grouped by section; the
+/// highlighted row's help, bounds and default underneath.
+fn render_options(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
+    let focused = app.settings.focused_frame == 2;
+    let title = " Options: Enter edit · Del default · Shift+Del all defaults ";
+    let block = if focused {
+        focused_panel_block(title)
+    } else {
+        panel_block(title)
+    };
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
-    // Bottom: clipboard config panel
-    let clipboard_area = Rect::new(
-        body.x,
-        top[0].y + top[0].height,
-        body.width,
-        body.height.saturating_sub(top[0].height).min(14),
+    let opts = &app.settings.options;
+    let label_w = settings::SPECS
+        .iter()
+        .map(|s| s.label.len())
+        .max()
+        .unwrap_or(0);
+    let mut lines: Vec<Line> = Vec::new();
+    let mut section = "";
+    for (i, spec) in settings::SPECS.iter().enumerate() {
+        if spec.section() != section {
+            section = spec.section();
+            lines.push(Line::from(Span::styled(
+                format!("[{section}]"),
+                accent_style(),
+            )));
+        }
+        let value = app
+            .knobs
+            .value(spec.key)
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        let unit = if spec.kind == settings::Kind::Millis {
+            " ms"
+        } else {
+            ""
+        };
+        let mark = if app.knobs.is_set(spec.key) { "*" } else { " " };
+        let style = if focused && i == opts.selected {
+            selected_style()
+        } else {
+            Style::default()
+        };
+        lines.push(
+            Line::from(vec![
+                Span::styled(format!(" {mark}{:>label_w$}  ", spec.label), dim_style()),
+                Span::styled(format!("{value}{unit}"), style),
+            ])
+            .style(style),
+        );
+    }
+
+    let help_h = 5u16;
+    let list_h = inner.height.saturating_sub(help_h);
+    // Keep the highlighted row on screen: its line index counts headers.
+    let row_line = settings::SPECS
+        .iter()
+        .take(opts.selected + 1)
+        .enumerate()
+        .filter(|(i, s)| *i == 0 || settings::SPECS[i - 1].section() != s.section())
+        .count()
+        + opts.selected;
+    let scroll = row_line.saturating_sub(usize::from(list_h.saturating_sub(1)));
+    frame.render_widget(
+        Paragraph::new(lines).scroll((u16::try_from(scroll).unwrap_or(u16::MAX), 0)),
+        Rect::new(inner.x, inner.y, inner.width, list_h),
     );
-    render_clipboard(frame, clipboard_area, app);
+
+    let help_area = Rect::new(
+        inner.x,
+        inner.y + list_h,
+        inner.width,
+        help_h.min(inner.height),
+    );
+    if opts.editing {
+        frame.render_widget(
+            &opts.edit_area,
+            Rect::new(help_area.x, help_area.y, help_area.width, 3),
+        );
+        frame.render_widget(
+            Paragraph::new(Span::styled(opts.msg.clone(), warn_or_ok(&opts.msg))),
+            Rect::new(help_area.x, help_area.y + 3, help_area.width, 2),
+        );
+        return;
+    }
+    let Some(spec) = settings::SPECS.get(opts.selected) else {
+        return;
+    };
+    let bounds = match spec.kind {
+        settings::Kind::Keys => "comma-separated chords, e.g. alt+right, ctrl+tab".to_string(),
+        _ => format!("{}..={}", spec.min, spec.max),
+    };
+    let default = settings::Settings::default()
+        .value(spec.key)
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let restart = if spec.restart {
+        "  (applies on restart)"
+    } else {
+        ""
+    };
+    let help = vec![
+        Line::from(Span::styled(
+            format!("{}{restart}", spec.key),
+            accent_style(),
+        )),
+        Line::from(Span::styled(spec.help, dim_style())),
+        Line::from(Span::styled(
+            format!("default {default} · {bounds}"),
+            dim_style(),
+        )),
+        Line::from(Span::styled(opts.msg.clone(), warn_or_ok(&opts.msg))),
+    ];
+    frame.render_widget(Paragraph::new(help).wrap(Wrap { trim: true }), help_area);
+}
+
+fn warn_or_ok(msg: &str) -> Style {
+    if msg.starts_with('✗') {
+        crate::theme::warn_style()
+    } else {
+        accent_style()
+    }
 }
 
 fn render_clipboard(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {

@@ -13,6 +13,7 @@ pub mod herdr;
 pub mod profile;
 pub mod recipe;
 pub mod run;
+pub mod settings;
 pub mod variables;
 
 pub use agents::{AgentHandle, AgentsResponse};
@@ -27,6 +28,7 @@ pub use recipe::{
     TemplateVariable, UpdateRecipeRequest, VarScope,
 };
 pub use run::{RunAction, RunEvent, RunEventKind, RunRecord, RunStatus, StartRunRequest};
+pub use settings::{Chord, SettingInfo, Settings, SettingsResponse};
 /// Re-exported so clients name recipe/execution ids without their own uuid dep.
 pub use uuid::Uuid;
 pub use variables::{

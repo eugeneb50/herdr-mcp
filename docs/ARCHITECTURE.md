@@ -254,6 +254,9 @@ Both go through `clipboard.rs` (see §14.6).
 |---|---|---|---|---|
 | `GET` | `/*` | `web::serve` / `ServeDir` fallback | Serves the Dioxus web UI built into the binary, or from `http.web-dir` (see §5.4) |
 | `GET` | `/api/health` | `health_handler` | Returns `"ok"` |
+| `GET` | `/api/settings` | `settings_handler` | `SettingsResponse`: every spec in `herdr_mcp_api::settings::SPECS` with default, bounds, value in effect, plus the config file's invalid entries (`warnings`) |
+| `PUT` / `DELETE` | `/api/settings/{key}` | `save_setting_handler` / `reset_setting_handler` | Validate (range; chords: Ctrl/Alt or F-key, not reserved by a tab, not bound twice), write `[settings.<section>]` atomically, apply live; 400 with the reason, nothing written |
+| `DELETE` | `/api/settings` | `reset_settings_handler` | Remove every override: all defaults |
 | `GET` | `/api/tools` | `list_tools_handler` | Lists all tools with JSON schemas |
 | `POST` | `/api/tools/{name}` | `call_tool_handler` | Dispatch tool by name |
 | `GET` | `/api/agents?workspace_id=` | `agents_handler` | Live pane list from AgentRegistry |
@@ -385,18 +388,21 @@ fails the step.
 What `herdr-mcp` opens when run in a terminal: VS Code-style tabs, mouse +
 keyboard navigation, sized for a herdr sidecar pane.
 
-**5 tabs**, opening on Send. Next / previous: `Alt+→` / `Alt+←` (any
-terminal) or `Ctrl+Tab` / `Ctrl+Shift+Tab`; directly: `Alt+1`–`Alt+5` or
-`Ctrl+1`–`Ctrl+5`. Without the kitty keyboard protocol (VTE terminals, for
-one) Ctrl+Tab arrives as a plain Tab and Ctrl+1 / Ctrl+3 as `1` / Esc, so
-use the Alt keys there. None of them type text or edit a field:
+**5 tabs**, opening on Send. The global keys come from the `keys.*`
+settings (Settings → Options, applied live); the defaults: next / previous
+`Alt+→` / `Alt+←` (any terminal) or `Ctrl+Tab` / `Ctrl+Shift+Tab`; directly
+`Alt+1`–`Alt+5` or `Ctrl+1`–`Ctrl+5`; `Ctrl+r` refresh, `Ctrl+q` quit.
+Without the kitty keyboard protocol (VTE terminals, for one) Ctrl+Tab
+arrives as a plain Tab and Ctrl+1 / Ctrl+3 as `1` / Esc, so use the Alt
+keys there. A binding must use Ctrl or Alt (or an F-key), so none of them
+type text or edit a field:
 | Tab | Content |
 |---|---|
 | Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "press Enter after" (`Ctrl+t`); addressed by pane id |
 | Overview | Welcome, stats, pane table (tab/label/agent/status/cwd) for the shown session; `s` cycles sessions |
 | Playground | Tool runner + recipe builder (same as web playground) |
 | Variables | Workspace-scoped variable editor |
-| Settings | Runtime info, clipboard config, keyboard shortcuts |
+| Settings | Options (every `/api/settings` knob: Enter edit, Del default, Shift+Del all defaults), runtime info, clipboard config |
 
 **Architecture:**
 - Runs **in-process on top of the serve stack** (`serve_core`): the HTTP

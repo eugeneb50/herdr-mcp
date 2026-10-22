@@ -166,6 +166,36 @@ impl ApiClient {
         .await
     }
 
+    /// `GET /api/settings` — every tunable (timeouts, limits, TUI keys)
+    /// with its default, bounds and value in effect.
+    pub async fn settings(&self) -> Result<SettingsResponse, ApiError> {
+        self.get(&["api", "settings"]).await
+    }
+
+    /// `PUT /api/settings/{key}` — validate, save to the config file and
+    /// apply. A bad value is a 400 [`ApiError::Status`] naming the problem.
+    pub async fn set_setting(
+        &self,
+        key: &str,
+        value: &crate::settings::Value,
+    ) -> Result<SettingsResponse, ApiError> {
+        Self::json(
+            self.request(Method::PUT, &["api", "settings", key])
+                .json(value),
+        )
+        .await
+    }
+
+    /// `DELETE /api/settings/{key}` — back to the built-in default.
+    pub async fn reset_setting(&self, key: &str) -> Result<SettingsResponse, ApiError> {
+        Self::json(self.request(Method::DELETE, &["api", "settings", key])).await
+    }
+
+    /// `DELETE /api/settings` — every setting back to its default.
+    pub async fn reset_settings(&self) -> Result<SettingsResponse, ApiError> {
+        Self::json(self.request(Method::DELETE, &["api", "settings"])).await
+    }
+
     /// `GET /api/tools` — every MCP tool definition with its JSON schema.
     pub async fn list_tools(&self) -> Result<Vec<Value>, ApiError> {
         self.get::<ToolsResponse>(&["api", "tools"])

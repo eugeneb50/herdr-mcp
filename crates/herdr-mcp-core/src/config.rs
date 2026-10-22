@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::env;
 use std::path::PathBuf;
 
@@ -18,6 +19,21 @@ pub struct Config {
     /// Clipboard backend override for the `clipboard_set` / `clipboard_get` tools.
     #[serde(default)]
     pub clipboard: ClipboardConfig,
+
+    /// `[settings.<section>]` overrides of the tunables in
+    /// [`herdr_mcp_api::settings::SPECS`], raw: [`Config::settings`] keeps
+    /// the valid ones, so a bad value falls back to its default instead of
+    /// failing startup.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub settings: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+}
+
+impl Config {
+    /// The valid `[settings.*]` overrides, plus a warning for each one
+    /// dropped (back on its default).
+    pub fn settings(&self) -> (herdr_mcp_api::Settings, Vec<String>) {
+        herdr_mcp_api::Settings::from_file(&self.settings)
+    }
 }
 
 /// Defined in `herdr-mcp-api` (it is also the `/api/config` wire type).
@@ -96,6 +112,7 @@ impl Default for Config {
             http: Default::default(),
             herdr: Default::default(),
             clipboard: Default::default(),
+            settings: BTreeMap::new(),
         }
     }
 }
@@ -123,22 +140,10 @@ impl Default for HttpConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct HerdrConfig {
     pub socket_path: Option<PathBuf>,
-    pub reconnect_attempts: u32,
-    pub reconnect_backoff_ms: u64,
-}
-
-impl Default for HerdrConfig {
-    fn default() -> Self {
-        Self {
-            socket_path: None,
-            reconnect_attempts: 3,
-            reconnect_backoff_ms: 500,
-        }
-    }
 }
 
 impl Config {
@@ -181,6 +186,7 @@ impl Config {
             http: other.http,
             herdr: other.herdr,
             clipboard: other.clipboard,
+            settings: other.settings,
         }
     }
 
@@ -321,6 +327,102 @@ pub fn config_file_or_default() -> PathBuf {
 /// preserving all other content (comments, tables, formatting). Creates the
 /// file if absent.
 pub fn set_clipboard_in_file(path: &std::path::Path, commands: Option<(&str, &str)>) -> Result<()> {
+    edit_config_file(path, |doc| {
+        if !doc.contains_table("clipboard") {
+            doc.insert("clipboard", toml_edit::table());
+        }
+        let tbl = doc
+            .get_mut("clipboard")
+            .and_then(|item| item.as_table_mut())
+            .context("[clipboard] is not a table")?;
+        match commands {
+            Some((copy, paste)) => {
+                tbl.insert("copy-command", toml_edit::value(copy));
+                tbl.insert("paste-command", toml_edit::value(paste));
+            }
+            None => {
+                tbl.remove("copy-command");
+                tbl.remove("paste-command");
+                if tbl.is_empty() {
+                    doc.remove("clipboard");
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Write setting `key` (`<section>.<name>`) as `[settings.<section>] name`
+/// in the config file at `path`; `None` removes it (back to its default).
+/// The value is not validated here: callers go through
+/// [`herdr_mcp_api::Settings::set`] first.
+pub fn set_setting_in_file(
+    path: &std::path::Path,
+    key: &str,
+    value: Option<&herdr_mcp_api::settings::Value>,
+) -> Result<()> {
+    use herdr_mcp_api::settings::Value;
+    let (section, name) = key
+        .split_once('.')
+        .context("a setting key is <section>.<name>")?;
+    edit_config_file(path, |doc| {
+        let settings = doc
+            .entry("settings")
+            .or_insert_with(implicit_table)
+            .as_table_mut()
+            .context("[settings] is not a table")?;
+        let tbl = settings
+            .entry(section)
+            .or_insert_with(toml_edit::table)
+            .as_table_mut()
+            .with_context(|| format!("[settings.{section}] is not a table"))?;
+        match value {
+            Some(Value::Number(n)) => {
+                let n = i64::try_from(*n).context("setting value too large")?;
+                tbl.insert(name, toml_edit::value(n));
+            }
+            Some(Value::Keys(keys)) => {
+                let list: toml_edit::Array = keys.iter().map(String::as_str).collect();
+                tbl.insert(name, toml_edit::value(list));
+            }
+            None => {
+                tbl.remove(name);
+                if tbl.is_empty() {
+                    settings.remove(section);
+                }
+            }
+        }
+        if settings.is_empty() {
+            doc.remove("settings");
+        }
+        Ok(())
+    })
+}
+
+/// Remove every `[settings.*]` override from the config file at `path`:
+/// all settings back to their defaults.
+pub fn reset_settings_in_file(path: &std::path::Path) -> Result<()> {
+    edit_config_file(path, |doc| {
+        doc.remove("settings");
+        Ok(())
+    })
+}
+
+/// `[settings]` holds only sub-tables, so it is never written as its own
+/// (empty) header.
+fn implicit_table() -> toml_edit::Item {
+    let mut t = toml_edit::Table::new();
+    t.set_implicit(true);
+    toml_edit::Item::Table(t)
+}
+
+/// Apply `edit` to the config file at `path` (created if absent), keeping
+/// everything else in it (comments, tables, formatting), and write it back
+/// atomically.
+fn edit_config_file(
+    path: &std::path::Path,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>,
+) -> Result<()> {
     use std::io::Write;
 
     let content = if path.exists() {
@@ -334,27 +436,7 @@ pub fn set_clipboard_in_file(path: &std::path::Path, commands: Option<(&str, &st
     let mut doc = content
         .parse::<toml_edit::DocumentMut>()
         .with_context(|| format!("{} is not valid TOML; fix it first", path.display()))?;
-
-    if !doc.contains_table("clipboard") {
-        doc.insert("clipboard", toml_edit::table());
-    }
-    let tbl = doc
-        .get_mut("clipboard")
-        .and_then(|item| item.as_table_mut())
-        .context("[clipboard] is not a table")?;
-    match commands {
-        Some((copy, paste)) => {
-            tbl.insert("copy-command", toml_edit::value(copy));
-            tbl.insert("paste-command", toml_edit::value(paste));
-        }
-        None => {
-            tbl.remove("copy-command");
-            tbl.remove("paste-command");
-            if tbl.is_empty() {
-                doc.remove("clipboard");
-            }
-        }
-    }
+    edit(&mut doc)?;
 
     let out = doc.to_string();
     let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
@@ -480,7 +562,8 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.http.port, Some(7676));
         assert_eq!(c.http.bind_addr.as_deref(), Some("127.0.0.1"));
-        assert_eq!(c.herdr.reconnect_attempts, 3);
+        assert_eq!(c.herdr.socket_path, None);
+        assert!(c.settings.is_empty());
     }
 
     #[test]
@@ -489,10 +572,32 @@ mod tests {
         let toml_str = toml::to_string(&original).unwrap();
         let restored: Config = toml::from_str(&toml_str).unwrap();
         assert_eq!(original.http.port, restored.http.port);
-        assert_eq!(
-            original.herdr.reconnect_attempts,
-            restored.herdr.reconnect_attempts
-        );
+        assert_eq!(original.settings, restored.settings);
+    }
+
+    #[test]
+    fn settings_write_keeps_the_rest_and_loads_back() {
+        use herdr_mcp_api::settings::{PANE_EXEC_MS, Value};
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("herdr-mcp.toml");
+        std::fs::write(&path, "# mine\ndata-dir = \"./d\"\n").unwrap();
+        set_setting_in_file(&path, PANE_EXEC_MS, Some(&Value::Number(9_000))).unwrap();
+        let keys = Value::Keys(vec!["alt+]".into(), "f6".into()]);
+        set_setting_in_file(&path, "keys.tab-next", Some(&keys)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# mine\ndata-dir = \"./d\"\n"), "{text}");
+        assert!(!text.contains("[settings]\n"), "{text}");
+        let cfg: Config = toml::from_str(&text).unwrap();
+        let (s, warnings) = cfg.settings();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(s.number(PANE_EXEC_MS), 9_000);
+        assert_eq!(s.value("keys.tab-next"), Some(keys));
+
+        set_setting_in_file(&path, PANE_EXEC_MS, None).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("timeouts"));
+        reset_settings_in_file(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "# mine\ndata-dir = \"./d\"\n");
     }
 
     #[test]
@@ -526,7 +631,6 @@ mod tests {
             },
             herdr: HerdrConfig {
                 socket_path: Some(PathBuf::from("/sock")),
-                ..Default::default()
             },
             ..Default::default()
         };
@@ -548,7 +652,7 @@ mod tests {
         assert_eq!(merged.data_dir, PathBuf::from("./data"));
         assert_eq!(merged.http.port, Some(1234));
         // untouched field keeps its default
-        assert_eq!(merged.herdr.reconnect_attempts, 3);
+        assert_eq!(merged.herdr.socket_path, None);
     }
 
     #[test]

@@ -16,6 +16,7 @@ pub mod http;
 pub mod tabs;
 pub mod theme;
 
+use herdr_mcp_api::settings;
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -265,6 +266,11 @@ pub struct DashboardOptions {
 /// The top-level interactive application state.
 pub struct App {
     pub opts: DashboardOptions,
+    /// Tunables and keybindings in effect (`GET /api/settings`; the
+    /// built-in defaults until the bridge answers).
+    pub knobs: herdr_mcp_api::Settings,
+    /// The last `GET /api/settings`, for the Settings tab.
+    pub settings_info: Option<herdr_mcp_api::SettingsResponse>,
     /// The tool call or recipe run in flight, if any.
     pub(crate) job: Option<tabs::playground::Job>,
     pub http: Option<ApiClient>,
@@ -472,8 +478,23 @@ pub struct SettingsState {
     pub selected: usize,
     /// Clipboard backend configuration.
     pub clipboard: ClipboardSettingsState,
-    /// Which frame has keyboard focus (0=runtime info, 1=clipboard config).
+    /// Which frame has keyboard focus (0=runtime info, 1=clipboard config,
+    /// 2=options: the settings registry).
     pub focused_frame: usize,
+    /// The Options frame (keys, timeouts, limits).
+    pub options: OptionsState,
+}
+
+/// The Settings tab's Options frame: one row per `herdr_mcp_api::settings::SPECS`.
+#[derive(Default)]
+pub struct OptionsState {
+    /// Highlighted row (index into `SPECS`).
+    pub selected: usize,
+    /// Editing the highlighted row's value in `edit_area`.
+    pub editing: bool,
+    pub edit_area: TextArea<'static>,
+    /// Outcome of the last save / reset (or why it was refused).
+    pub msg: String,
 }
 
 /// Clipboard config sub-state for the Settings tab.
@@ -571,11 +592,14 @@ impl App {
     }
 
     fn new(opts: DashboardOptions) -> Self {
-        let http = http::client_for(opts.http_port).ok();
+        let knobs = herdr_mcp_api::Settings::default();
+        let http = http::client_for(opts.http_port, knobs.duration(settings::TUI_REQUEST_MS)).ok();
         let http_port = opts.http_port;
         let data_dir = opts.data_dir.display().to_string();
         Self {
             opts,
+            knobs,
+            settings_info: None,
             job: None,
             http,
             tab: Tab::Send,
@@ -656,7 +680,8 @@ impl App {
                     test_msg: String::new(),
                     save_msg: String::new(),
                 },
-                focused_frame: 0,
+                focused_frame: 2,
+                options: OptionsState::default(),
             },
             bridge_connected: false,
             tab_rects: Vec::new(),
@@ -703,7 +728,8 @@ impl App {
     async fn refresh_inner(&mut self) {
         // If we're not connected, check for a live bridge first.
         if !self.bridge_connected {
-            if let Some(client) = http::live_bridge(self.opts.http_port).await {
+            let timeout = self.knobs.duration(settings::TUI_REQUEST_MS);
+            if let Some(client) = http::live_bridge(self.opts.http_port, timeout).await {
                 self.http = Some(client);
                 self.bridge_connected = true;
                 self.status_msg.clear();
@@ -717,7 +743,7 @@ impl App {
         }
 
         if self.bridge_connected
-            && let Some(http) = &self.http
+            && let Some(http) = self.http.clone()
         {
             let mut ok = true;
             // Always re-fetch tools on refresh so Ctrl+R picks up new tools.
@@ -741,6 +767,9 @@ impl App {
             {
                 self.set_config(c);
             }
+            if let Ok(s) = http.settings().await {
+                self.apply_settings(s);
+            }
             // Restore last-used playground values once per session so tab
             // navigation and restarts keep the user's context.
             if !self.playground_restored {
@@ -756,6 +785,21 @@ impl App {
     /// Keyed by tool name (not positional index) so list reorders never
     /// attach the wrong schema (B4). Preserves `field_values` when the same
     /// tool stays selected; resets to defaults on tool switch.
+    /// Take the bridge's settings: keys and intervals apply now; a new
+    /// request timeout rebuilds the client.
+    pub fn apply_settings(&mut self, response: herdr_mcp_api::SettingsResponse) {
+        let timeout = self.knobs.duration(settings::TUI_REQUEST_MS);
+        self.knobs = response.overrides();
+        self.settings_info = Some(response);
+        let next = self.knobs.duration(settings::TUI_REQUEST_MS);
+        if next != timeout
+            && self.http.is_some()
+            && let Ok(client) = http::client_for(self.opts.http_port, next)
+        {
+            self.http = Some(client);
+        }
+    }
+
     pub fn sync_tool_fields(&mut self) {
         let current_name = self
             .playground
@@ -1328,7 +1372,6 @@ async fn main_loop(
     app: &mut App,
 ) -> Result<()> {
     let frame_ms = 300u64;
-    let refresh = Duration::from_secs(3);
     let context_refresh = Duration::from_secs(15);
 
     let mut last_ctx = Instant::now();
@@ -1378,7 +1421,7 @@ async fn main_loop(
             tabs::playground::finish_job(app, job).await;
             app.dirty = true;
         }
-        if app.last_refresh.elapsed() > refresh {
+        if app.last_refresh.elapsed() > app.knobs.duration(settings::TUI_REFRESH_MS) {
             app.refresh().await;
             app.dirty = true;
         }
@@ -1525,8 +1568,17 @@ fn draw_content(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
 /// Footer with status message + keybindings.
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let bindings = "Ctrl+Tab/Alt+←→:next/prev tab  Alt+1-5:tab  ↑/↓/Home/End:nav  Ctrl+r:refresh  Ctrl+v:paste  Ctrl+c:copy  Ctrl+x:cut  right-click:menu  Ctrl+q:quit";
-    let mut line = Line::from(vec![Span::styled(bindings, dim_style())]);
+    let first = |key: &str| first_chord(&app.knobs, key);
+    let bindings = format!(
+        "{}/{}:next/prev tab  {}…{}:tab  ↑/↓/Home/End:nav  {}:refresh  ctrl+v:paste  ctrl+c:copy  ctrl+x:cut  right-click:menu  {}:quit",
+        first("keys.tab-next"),
+        first("keys.tab-prev"),
+        first("keys.tab-1"),
+        first("keys.tab-5"),
+        first("keys.refresh"),
+        first("keys.quit"),
+    );
+    let mut line = Line::from(vec![Span::styled(bindings.clone(), dim_style())]);
     if !app.status_msg.is_empty() {
         line = Line::from(vec![
             Span::styled(bindings, dim_style()),
@@ -1548,7 +1600,7 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
     }
 
     // Tab hotkeys win over the active tab, whatever has focus.
-    if let Some(t) = tab_hotkey(code, mods, app.tab) {
+    if let Some(t) = tab_hotkey(&app.knobs, code, mods, app.tab) {
         app.tab = t;
         app.status_msg.clear();
         return Ok(());
@@ -1585,13 +1637,10 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
         }
     }
 
-    // Global keys.
-    if mods.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('q') {
-        app.quitting = true;
-        return Ok(());
-    }
-    match code {
-        KeyCode::Char('r') if mods.contains(KeyModifiers::CONTROL) => {
+    // Global keys (Settings → keys.quit / keys.refresh).
+    match key_action(&app.knobs, code, mods) {
+        Some("quit") => app.quitting = true,
+        Some("refresh") => {
             app.refresh().await;
             app.status_msg = "refreshed".to_string();
         }
@@ -1606,25 +1655,85 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
 /// Ctrl+Tab as a plain Tab, Ctrl+2 as NUL, which crossterm reads as
 /// Ctrl+Space, and Ctrl+1 / Ctrl+3 as `1` / Esc; there Alt+←/→ and
 /// Alt+1-5 still work, and Ctrl+Space maps back to tab 2.
-fn tab_hotkey(code: KeyCode, mods: KeyModifiers, current: Tab) -> Option<Tab> {
+fn tab_hotkey(
+    knobs: &herdr_mcp_api::Settings,
+    code: KeyCode,
+    mods: KeyModifiers,
+    current: Tab,
+) -> Option<Tab> {
     let n = Tab::ALL.len();
     let at = Tab::ALL.iter().position(|t| *t == current).unwrap_or(0);
-    let ctrl = mods.contains(KeyModifiers::CONTROL);
-    let alt_only = mods == KeyModifiers::ALT;
-    let idx = match code {
-        KeyCode::Tab if ctrl && !mods.contains(KeyModifiers::SHIFT) => (at + 1) % n,
-        KeyCode::Right if alt_only => (at + 1) % n,
-        KeyCode::Tab | KeyCode::BackTab if ctrl => (at + n - 1) % n,
-        KeyCode::Left if alt_only => (at + n - 1) % n,
-        KeyCode::Char(' ') if mods == KeyModifiers::CONTROL => 1,
-        KeyCode::Char(c @ '1'..='5')
-            if mods.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            (c as u8 - b'1') as usize
-        }
-        _ => return None,
+    let idx = match key_action(knobs, code, mods)? {
+        "tab-next" => (at + 1) % n,
+        "tab-prev" => (at + n - 1) % n,
+        action => action
+            .strip_prefix("tab-")?
+            .parse::<usize>()
+            .ok()?
+            .checked_sub(1)?,
     };
     Tab::ALL.get(idx).copied()
+}
+
+/// The first chord bound to setting `key`, for hints ("-" if none).
+pub(crate) fn first_chord(knobs: &herdr_mcp_api::Settings, key: &str) -> String {
+    knobs
+        .chords(key)
+        .first()
+        .map_or_else(|| "-".to_string(), ToString::to_string)
+}
+
+/// The `keys.*` action (Settings) a key press is bound to.
+fn key_action(
+    knobs: &herdr_mcp_api::Settings,
+    code: KeyCode,
+    mods: KeyModifiers,
+) -> Option<&'static str> {
+    knobs.action_for(&chord_of(code, mods)?)
+}
+
+/// A key press as a Settings chord. Letters carry case in `shift`; other
+/// characters already encode it (`}` is shifted `]`), so a reported Shift is
+/// dropped there; BackTab is Shift+Tab.
+fn chord_of(code: KeyCode, mods: KeyModifiers) -> Option<herdr_mcp_api::Chord> {
+    use herdr_mcp_api::settings::Key;
+    let mut shift = mods.contains(KeyModifiers::SHIFT);
+    let key = match code {
+        KeyCode::Char(c) if c.is_alphabetic() => {
+            shift |= c.is_uppercase();
+            Key::Char(c.to_ascii_lowercase())
+        }
+        KeyCode::Char(c) => {
+            shift = false;
+            Key::Char(c)
+        }
+        KeyCode::F(n) => Key::F(n),
+        KeyCode::Tab => Key::Tab,
+        KeyCode::BackTab => {
+            shift = true;
+            Key::Tab
+        }
+        KeyCode::Enter => Key::Enter,
+        KeyCode::Esc => Key::Esc,
+        KeyCode::Backspace => Key::Backspace,
+        KeyCode::Delete => Key::Delete,
+        KeyCode::Insert => Key::Insert,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
+        KeyCode::PageUp => Key::PageUp,
+        KeyCode::PageDown => Key::PageDown,
+        KeyCode::Up => Key::Up,
+        KeyCode::Down => Key::Down,
+        KeyCode::Left => Key::Left,
+        KeyCode::Right => Key::Right,
+        _ => return None,
+    };
+    Some(herdr_mcp_api::Chord {
+        ctrl: mods.contains(KeyModifiers::CONTROL),
+        alt: mods.contains(KeyModifiers::ALT),
+        shift,
+        key,
+    })
 }
 
 /// Key handling while the right-click context menu is open.
@@ -2173,37 +2282,146 @@ mod tests {
     fn tab_hotkeys_cover_legacy_encodings() {
         let ctrl = KeyModifiers::CONTROL;
         assert_eq!(
-            tab_hotkey(KeyCode::Char('1'), ctrl, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Char('1'),
+                ctrl,
+                Tab::Send
+            ),
             Some(Tab::Send)
         );
         assert_eq!(
-            tab_hotkey(KeyCode::Char('2'), ctrl, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Char('2'),
+                ctrl,
+                Tab::Send
+            ),
             Some(Tab::Overview)
         );
         // Ctrl+2 without the kitty protocol: NUL, decoded as Ctrl+Space.
         assert_eq!(
-            tab_hotkey(KeyCode::Char(' '), ctrl, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Char(' '),
+                ctrl,
+                Tab::Send
+            ),
             Some(Tab::Overview)
         );
         assert_eq!(
-            tab_hotkey(KeyCode::Char('3'), KeyModifiers::ALT, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Char('3'),
+                KeyModifiers::ALT,
+                Tab::Send
+            ),
             Some(Tab::Playground)
         );
         assert_eq!(
-            tab_hotkey(KeyCode::Char('5'), ctrl, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Char('5'),
+                ctrl,
+                Tab::Send
+            ),
             Some(Tab::Settings)
         );
-        assert_eq!(tab_hotkey(KeyCode::Char('6'), ctrl, Tab::Send), None);
         assert_eq!(
-            tab_hotkey(KeyCode::Char('2'), KeyModifiers::NONE, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Char('6'),
+                ctrl,
+                Tab::Send
+            ),
             None
         );
         assert_eq!(
-            tab_hotkey(KeyCode::Char(' '), KeyModifiers::NONE, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Char('2'),
+                KeyModifiers::NONE,
+                Tab::Send
+            ),
             None
         );
         assert_eq!(
-            tab_hotkey(KeyCode::Esc, KeyModifiers::NONE, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Char(' '),
+                KeyModifiers::NONE,
+                Tab::Send
+            ),
+            None
+        );
+        assert_eq!(
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Esc,
+                KeyModifiers::NONE,
+                Tab::Send
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn chords_from_key_events_match_settings_spelling() {
+        let chord = |code, mods| chord_of(code, mods).map(|c| c.to_string());
+        let (ctrl, alt, shift) = (
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SHIFT,
+        );
+        assert_eq!(chord(KeyCode::Char('r'), ctrl).as_deref(), Some("ctrl+r"));
+        // Letters: case is Shift, however the terminal reports it.
+        assert_eq!(
+            chord(KeyCode::Char('R'), ctrl).as_deref(),
+            Some("ctrl+shift+r")
+        );
+        assert_eq!(
+            chord(KeyCode::Char('r'), ctrl | shift).as_deref(),
+            Some("ctrl+shift+r")
+        );
+        // Symbols carry their own shift: `}` is `}` with or without Shift.
+        assert_eq!(
+            chord(KeyCode::Char('}'), alt | shift).as_deref(),
+            Some("alt+}")
+        );
+        assert_eq!(
+            chord(KeyCode::BackTab, ctrl | shift).as_deref(),
+            Some("ctrl+shift+tab")
+        );
+        assert_eq!(
+            chord(KeyCode::Char(' '), ctrl).as_deref(),
+            Some("ctrl+space")
+        );
+        assert_eq!(
+            chord(KeyCode::F(6), KeyModifiers::NONE).as_deref(),
+            Some("f6")
+        );
+        assert_eq!(chord(KeyCode::Null, ctrl), None);
+    }
+
+    #[test]
+    fn remapped_tab_keys_take_effect_and_free_the_default() {
+        use herdr_mcp_api::settings::Value;
+        let mut knobs = herdr_mcp_api::Settings::default();
+        knobs
+            .set("keys.tab-next", Value::Keys(vec!["f6".into()]))
+            .unwrap();
+        knobs
+            .set("keys.quit", Value::Keys(vec!["alt+q".into()]))
+            .unwrap();
+        let alt = KeyModifiers::ALT;
+        assert_eq!(
+            tab_hotkey(&knobs, KeyCode::F(6), KeyModifiers::NONE, Tab::Send),
+            Some(Tab::Overview)
+        );
+        assert_eq!(tab_hotkey(&knobs, KeyCode::Right, alt, Tab::Send), None);
+        assert_eq!(key_action(&knobs, KeyCode::Char('q'), alt), Some("quit"));
+        assert_eq!(
+            key_action(&knobs, KeyCode::Char('q'), KeyModifiers::CONTROL),
             None
         );
     }
@@ -2211,42 +2429,82 @@ mod tests {
     #[test]
     fn tab_hotkeys_cycle_and_wrap() {
         let (ctrl, alt) = (KeyModifiers::CONTROL, KeyModifiers::ALT);
-        let next = |t| tab_hotkey(KeyCode::Tab, ctrl, t);
+        let next = |t| tab_hotkey(&herdr_mcp_api::Settings::default(), KeyCode::Tab, ctrl, t);
         assert_eq!(next(Tab::Send), Some(Tab::Overview));
         assert_eq!(next(Tab::Settings), Some(Tab::Send));
         assert_eq!(
-            tab_hotkey(KeyCode::Right, alt, Tab::Overview),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Right,
+                alt,
+                Tab::Overview
+            ),
             Some(Tab::Playground)
         );
         // Ctrl+Shift+Tab: kitty reports Tab + Shift; crossterm may fold it to BackTab.
         let back = ctrl | KeyModifiers::SHIFT;
         assert_eq!(
-            tab_hotkey(KeyCode::Tab, back, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Tab,
+                back,
+                Tab::Send
+            ),
             Some(Tab::Settings)
         );
         assert_eq!(
-            tab_hotkey(KeyCode::BackTab, back, Tab::Overview),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::BackTab,
+                back,
+                Tab::Overview
+            ),
             Some(Tab::Send)
         );
         assert_eq!(
-            tab_hotkey(KeyCode::Left, alt, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Left,
+                alt,
+                Tab::Send
+            ),
             Some(Tab::Settings)
         );
         // Plain Tab / Shift+Tab / arrows stay with the tab (field focus, lists).
         assert_eq!(
-            tab_hotkey(KeyCode::Tab, KeyModifiers::NONE, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Tab,
+                KeyModifiers::NONE,
+                Tab::Send
+            ),
             None
         );
         assert_eq!(
-            tab_hotkey(KeyCode::BackTab, KeyModifiers::SHIFT, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::BackTab,
+                KeyModifiers::SHIFT,
+                Tab::Send
+            ),
             None
         );
         assert_eq!(
-            tab_hotkey(KeyCode::Right, KeyModifiers::NONE, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Right,
+                KeyModifiers::NONE,
+                Tab::Send
+            ),
             None
         );
         assert_eq!(
-            tab_hotkey(KeyCode::Left, alt | KeyModifiers::SHIFT, Tab::Send),
+            tab_hotkey(
+                &herdr_mcp_api::Settings::default(),
+                KeyCode::Left,
+                alt | KeyModifiers::SHIFT,
+                Tab::Send
+            ),
             None
         );
     }

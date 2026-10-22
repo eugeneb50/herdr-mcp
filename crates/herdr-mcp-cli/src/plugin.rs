@@ -314,7 +314,9 @@ fn read_line(prompt: &str) -> String {
 }
 
 async fn bridge(port: u16) -> Option<ApiClient> {
-    herdr_mcp_tui::http::live_bridge(port).await
+    let timeout =
+        herdr_mcp_api::Settings::default().duration(herdr_mcp_api::settings::TUI_REQUEST_MS);
+    herdr_mcp_tui::http::live_bridge(port, timeout).await
 }
 
 async fn web(port: u16) -> Result<()> {

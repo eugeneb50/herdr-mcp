@@ -4,6 +4,21 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Settings: one place for every knob (breaking).** Keybindings, timeouts,
+  limits and intervals live in one registry (`herdr_mcp_api::settings`),
+  stored as `[settings.<section>]` tables in the config file and edited
+  on the Settings page (web: Options card; TUI: Options panel), applied
+  live. `/api/settings` lists, sets and resets them. The TUI's tab, refresh
+  and quit keys are remappable; a chord must use Ctrl or Alt (or an
+  F-key), must not be one a tab uses, and can't be bound twice. Invalid
+  values are refused with the reason; a bad entry in the file falls back
+  to its default with a startup warning, and Reset (one or all) restores
+  the defaults. Server defaults that were hard-coded (pane_exec timeout
+  and scrollback, herdr_api, agent_spawn / agent_prompt / agent start
+  timeouts, watcher interval and error limit) are now these settings.
+  `[herdr] reconnect-attempts` / `reconnect-backoff-ms` moved to
+  `[settings.limits] reconnect-attempts` / `[settings.intervals]
+  reconnect-backoff-ms`; the old keys now fail to load.
 - **One binary.** `herdr-trim` is gone; `herdr-mcp` is the only binary, and
   the release archives, `scripts/install.sh` and the plugin ship just it.
   Remove a stale `herdr-trim` from an earlier install by hand.
