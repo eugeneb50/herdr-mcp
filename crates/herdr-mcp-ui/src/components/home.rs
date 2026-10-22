@@ -11,6 +11,7 @@ use herdr_mcp_api::HerdrPane;
 use super::highlight::tokens;
 use super::pane_options::{PaneOptions, pane_list};
 use crate::client::use_api;
+use crate::local::{remember, remembered};
 use crate::vars::auto_panes;
 
 /// Browser-local keys for the last target sent to, as typed.
@@ -20,22 +21,6 @@ const LAST_LABEL: &str = "herdr-mcp.send.label";
 const HIGHLIGHT: &str = "herdr-mcp.send.highlight";
 /// The highlight layer, scrolled along with the textarea.
 const HIGHLIGHT_ID: &str = "send-highlight";
-
-fn storage() -> Option<web_sys::Storage> {
-    web_sys::window()?.local_storage().ok().flatten()
-}
-
-fn remembered(key: &str) -> String {
-    storage()
-        .and_then(|s| s.get_item(key).ok().flatten())
-        .unwrap_or_default()
-}
-
-fn remember(key: &str, value: &str) {
-    if let Some(s) = storage() {
-        let _ = s.set_item(key, value);
-    }
-}
 
 /// A field as a tool parameter: trimmed, absent when blank.
 fn param(s: &str) -> Option<&str> {

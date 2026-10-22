@@ -279,3 +279,24 @@ select.input { appearance: auto; }
 .lib-desc { font-size: 0.7rem; color: var(--muted); margin-top: 0.2rem; }
 .lib-row { display: flex; gap: 0.5rem; align-items: start; }
 .lib-item-flex { flex: 1; }
+
+/* Overview deck: watched panes' terminal text, newest line kept in view. */
+.deck { display: grid; grid-template-columns: repeat(auto-fill, minmax(26rem, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
+.deck .card { margin-bottom: 0; min-width: 0; }
+.deck-wide { grid-column: 1 / -1; }
+.deck-actions { display: flex; gap: 0.4rem; margin-left: auto; }
+.deck-actions .btn { padding: 0.2rem 0.5rem; }
+.deck-screen {
+  display: flex; flex-direction: column-reverse; overflow: auto;
+  height: 22rem; background: #000; border-radius: 8px; padding: 0.75rem;
+}
+.deck-wide .deck-screen { height: 36rem; }
+.deck-screen pre { margin: 0; white-space: pre; line-height: 1.35; }
+@media (max-width: 40rem) { .deck { grid-template-columns: 1fr; } }
+
+/* Overview pane tree: workspace → tab → panes, each level collapsible. */
+.tree { border-top: 1px solid var(--border); }
+.tree > summary { cursor: pointer; padding: 0.6rem 0; font-size: 0.85rem; }
+.tree > summary .tree-name { font-weight: 600; }
+.tree-tab { margin-left: 1.25rem; }
+.tree-tab .table { margin-bottom: 0.75rem; }
