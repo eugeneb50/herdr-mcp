@@ -850,6 +850,9 @@ fn RequestEditor(
                         Ok(run) => response.set(Some(run)),
                         Err(e) => error.set(Some(format!("send failed: {e}"))),
                     }
+                    // Extract rules may have written collection variables;
+                    // the save's refresh fetched the list before they did.
+                    refresh += 1;
                 }
                 busy.set(false);
             });
