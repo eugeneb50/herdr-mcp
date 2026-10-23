@@ -304,6 +304,8 @@ pub struct App {
     pub result_inner: Rect,
     /// Hit-area for the Overview pane table (mouse click → select pane).
     pub pane_table_inner: Rect,
+    /// Hit-area for the Overview pane text (drag to select).
+    pub pane_text_inner: Rect,
     /// hit-areas for clipboard preset rows in Settings (one Rect per preset)
     pub clipboard_preset_rects: Vec<Rect>,
     /// hit-areas for clipboard action buttons (0=Test, 1=Save)
@@ -449,8 +451,12 @@ pub struct SendState {
 pub struct OverviewState {
     /// Selected row in the pane table.
     pub pane_index: usize,
-    /// Which frame has keyboard focus (0 = pane table).
+    /// Which frame has keyboard focus (0 = pane table, 1 = pane text).
     pub focused_frame: usize,
+    /// First pane the table shows (it scrolls to keep the pick in view).
+    pub table_offset: usize,
+    /// The picked pane's text.
+    pub view: tabs::overview::PaneView,
 }
 
 /// Variables tab state.
@@ -655,6 +661,8 @@ impl App {
             overview: OverviewState {
                 pane_index: 0,
                 focused_frame: 0,
+                table_offset: 0,
+                view: Default::default(),
             },
             variables_state: VariablesState {
                 entries: Vec::new(),
@@ -689,6 +697,7 @@ impl App {
             var_list_inner: Rect::default(),
             result_inner: Rect::default(),
             pane_table_inner: Rect::default(),
+            pane_text_inner: Rect::default(),
             clipboard_preset_rects: Vec::new(),
             clipboard_btn_rects: Vec::new(),
             clipboard_field_rects: Vec::new(),
@@ -954,6 +963,54 @@ impl App {
         self.herdr.panes = panes;
     }
 
+    /// The pane picked in the Overview table, if any.
+    fn picked_pane(&self) -> Option<&str> {
+        let panes = &self.herdr.panes;
+        panes
+            .get(self.overview.pane_index.min(panes.len().saturating_sub(1)))
+            .map(|p| p.pane_id.as_str())
+    }
+
+    /// Whether the Overview's pane text needs a read: another pane was
+    /// picked, or the interval passed and no selection holds it still.
+    fn pane_read_due(&self) -> bool {
+        let view = &self.overview.view;
+        let picked = self.picked_pane();
+        if picked != view.pane_id.as_deref() {
+            return true;
+        }
+        picked.is_some()
+            && !view.frozen()
+            && view
+                .read_at
+                .is_none_or(|t| t.elapsed() > self.knobs.duration(settings::TUI_PANE_MS))
+    }
+
+    /// Read the picked pane (screen or scrollback) into the Overview.
+    async fn read_picked_pane(&mut self) {
+        let Some(pane_id) = self.picked_pane().map(str::to_string) else {
+            self.overview.view.clear();
+            return;
+        };
+        let Some(http) = self.http.clone() else {
+            self.overview
+                .view
+                .update(&pane_id, Err("bridge not connected".into()));
+            return;
+        };
+        let (source, lines) = if self.overview.view.scrollback {
+            ("recent", Some(tabs::overview::SCROLLBACK))
+        } else {
+            ("visible", None)
+        };
+        let read = http.read_pane(&pane_id, self.herdr.session.as_deref(), source, lines);
+        let text = match tokio::time::timeout(Duration::from_secs(2), read).await {
+            Ok(r) => r.map_err(|e| e.to_string()),
+            Err(_) => Err("read timed out".into()),
+        };
+        self.overview.view.update(&pane_id, text);
+    }
+
     fn note_herdr_error(&mut self, msg: String) {
         self.log_debug(msg.clone());
         self.herdr.last_error = Some(msg);
@@ -1042,6 +1099,9 @@ impl App {
     /// value of the focused target. Priority: focused Result pane → active
     /// editable field/variable → non-editing focused playground field.
     fn selection_or_full_text(&self) -> Option<String> {
+        if self.tab == Tab::Overview && self.overview.focused_frame == 1 {
+            return Some(self.overview.view.copy_text());
+        }
         if self.tab == Tab::Playground && self.playground.focused_frame == 2 {
             let ta = &self.playground.result_area;
             let full = ta.lines().join("\n");
@@ -1095,7 +1155,8 @@ impl App {
     /// True when the current copy target is the read-only Result pane (so
     /// Cut/Paste must be suppressed).
     fn copy_target_is_readonly(&self) -> bool {
-        self.tab == Tab::Playground && self.playground.focused_frame == 2
+        (self.tab == Tab::Playground && self.playground.focused_frame == 2)
+            || (self.tab == Tab::Overview && self.overview.focused_frame == 1)
     }
 
     /// Feed a key event into the active editable `TextArea` (if any).
@@ -1423,6 +1484,10 @@ async fn main_loop(
         }
         if app.last_refresh.elapsed() > app.knobs.duration(settings::TUI_REFRESH_MS) {
             app.refresh().await;
+            app.dirty = true;
+        }
+        if app.tab == Tab::Overview && app.pane_read_due() {
+            app.read_picked_pane().await;
             app.dirty = true;
         }
         if last_ctx.elapsed() > context_refresh {
@@ -1782,6 +1847,11 @@ async fn handle_context_menu_key(app: &mut App, code: KeyCode, mods: KeyModifier
     }
 }
 
+/// Whether mouse event `m` is inside `area`.
+fn inside(area: Rect, m: &MouseEvent) -> bool {
+    m.column >= area.x && m.column < area.right() && m.row >= area.y && m.row < area.bottom()
+}
+
 /// Mouse event handler: click tabs to switch, click lists to select, wheel scroll.
 async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
     match m.kind {
@@ -1804,6 +1874,10 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 app.playground.editing_field = false;
             } else if app.tab == Tab::Playground {
                 app.playground.focused_frame = 0;
+            }
+            // Over the Overview's pane text, Copy takes its selection.
+            if app.tab == Tab::Overview {
+                app.overview.focused_frame = usize::from(inside(app.pane_text_inner, &m));
             }
             // Open the right-click context menu at the cursor.
             app.context_menu.open = true;
@@ -1884,17 +1958,28 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 }
                 return Ok(());
             }
-            // Overview pane table click.
-            if app.tab == Tab::Overview
-                && m.column >= app.pane_table_inner.x
-                && m.column < app.pane_table_inner.right()
-                && m.row >= app.pane_table_inner.y
-                && m.row < app.pane_table_inner.bottom()
-            {
-                let idx = (m.row - app.pane_table_inner.y) as usize;
-                if idx < app.herdr.panes.len() {
-                    app.overview.pane_index = idx;
+            // Overview pane table click (row 0 is the header).
+            if app.tab == Tab::Overview && inside(app.pane_table_inner, &m) {
+                app.overview.focused_frame = 0;
+                if let Some(row) = (m.row - app.pane_table_inner.y).checked_sub(1) {
+                    let idx = app.overview.table_offset + row as usize;
+                    if idx < app.herdr.panes.len() {
+                        app.overview.pane_index = idx;
+                    }
                 }
+                return Ok(());
+            }
+            // Overview pane text: start a selection.
+            if app.tab == Tab::Overview && inside(app.pane_text_inner, &m) {
+                app.overview.focused_frame = 1;
+                let view = &mut app.overview.view;
+                let pos = view.pos_at(
+                    (m.row - app.pane_text_inner.y) as usize,
+                    (m.column - app.pane_text_inner.x) as usize,
+                );
+                view.anchor = Some(pos);
+                view.head = pos;
+                view.dragging = true;
                 return Ok(());
             }
             // Clipboard preset rows (Settings tab).
@@ -1939,6 +2024,33 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                     }
                 }
             }
+        }
+        MouseEventKind::Drag(MouseButton::Left)
+            if app.tab == Tab::Overview && app.overview.view.dragging =>
+        {
+            // Past the top or bottom edge scrolls, so a selection can run
+            // longer than the panel.
+            let area = app.pane_text_inner;
+            let view = &mut app.overview.view;
+            if m.row < area.y {
+                view.scroll(-1);
+            } else if m.row >= area.bottom() {
+                view.scroll(1);
+            }
+            let row = m.row.clamp(area.y, area.bottom().saturating_sub(1)) - area.y;
+            let col = m.column.saturating_sub(area.x);
+            view.head = view.pos_at(row as usize, col as usize);
+        }
+        MouseEventKind::Up(MouseButton::Left) if app.overview.view.dragging => {
+            app.overview.view.dragging = false;
+        }
+        MouseEventKind::ScrollDown
+            if app.tab == Tab::Overview && inside(app.pane_text_inner, &m) =>
+        {
+            app.overview.view.scroll(3);
+        }
+        MouseEventKind::ScrollUp if app.tab == Tab::Overview && inside(app.pane_text_inner, &m) => {
+            app.overview.view.scroll(-3);
         }
         MouseEventKind::ScrollDown => match app.tab {
             Tab::Variables

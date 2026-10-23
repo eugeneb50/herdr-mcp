@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.2.0-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-242%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-245%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-6%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
@@ -239,7 +239,7 @@ tab-next = ["alt+right", "ctrl+tab"]
 |---|---|
 | `timeouts` | `pane-exec-ms`, `herdr-api-ms`, `agent-wait-ms`, `agent-prompt-ms`, `agent-start-ms`, `tui-request-ms` |
 | `limits` | `pane-exec-lines`, `reply-fallback-lines`, `watcher-give-up`, `reconnect-attempts` |
-| `intervals` | `watcher-poll-ms`, `reconnect-backoff-ms`, `tui-refresh-ms` |
+| `intervals` | `watcher-poll-ms`, `reconnect-backoff-ms`, `tui-refresh-ms`, `tui-pane-ms` |
 | `keys` (TUI) | `tab-next`, `tab-prev`, `tab-1`…`tab-5`, `refresh`, `quit` |
 
 Tool calls that pass their own `timeout_ms` / `lines` still win. Key chords
