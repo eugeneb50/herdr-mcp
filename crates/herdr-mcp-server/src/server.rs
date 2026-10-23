@@ -211,6 +211,26 @@ pub struct WaitOutputParams {
     pub use_regex: Option<bool>,
 }
 
+/// Parameters for `pane_watch`.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+#[serde(deny_unknown_fields)]
+pub struct PaneWatchParams {
+    /// Pane ID to watch (alternative to label).
+    pub pane_id: Option<String>,
+    /// Pane label (alternative to pane_id).
+    pub label: Option<String>,
+    /// Text (or regex, with use_regex) to watch for.
+    pub match_text: String,
+    /// Whether to treat match_text as a regex pattern.
+    pub use_regex: Option<bool>,
+    /// Snapshot source: "visible", "recent" (default) or "recent-unwrapped".
+    pub source: Option<String>,
+    /// Give up after this long; without it, watch until matched or the run
+    /// is cancelled.
+    pub timeout_ms: Option<u32>,
+}
+
 /// Parameters for the `agent_spawn` a2a step. Starts an agent, registers its
 /// role→pane mapping, optionally waits for dependencies (`needs`) to go idle,
 /// and captures its work product on idle.
@@ -239,6 +259,11 @@ pub struct AgentSpawnParams {
     /// `target`). Renames the pane and stores the label in the registry.
     #[serde(default)]
     pub label: Option<String>,
+    /// Start the agent in this existing pane (e.g. a new workspace's
+    /// `root_pane`) instead of splitting a new one. It keeps its directory,
+    /// so `cwd`/`split`/`tab_id` don't apply.
+    #[serde(default)]
+    pub in_pane: Option<String>,
 }
 
 /// Parameters for the `agent_message` a2a step (agent-to-agent message).
@@ -325,6 +350,82 @@ pub struct VarSetParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 pub struct ListTemplatesParams {}
+
+/// Parameters for `recipe_list`.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+pub struct RecipeListParams {}
+
+/// Parameters for `recipe_get`.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+#[serde(deny_unknown_fields)]
+pub struct RecipeGetParams {
+    pub recipe_id: String,
+}
+
+/// Parameters for `recipe_save`: no `recipe_id` creates a recipe (`name`
+/// and `steps` required); with one, the fields given replace the saved ones.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+#[serde(deny_unknown_fields)]
+pub struct RecipeSaveParams {
+    pub recipe_id: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    /// Run in order; a failing step stops the run. Each step's `params` may
+    /// use `{{ stepId.path }}` (an earlier step's result) and `{{ var }}`.
+    pub steps: Option<Vec<herdr_mcp_api::RecipeStep>>,
+    /// The recipe's own variables (`{{ name }}` in its steps).
+    pub variables: Option<HashMap<String, serde_json::Value>>,
+    /// herdr events that start a run of this recipe.
+    pub triggers: Option<Vec<herdr_mcp_api::RecipeTrigger>>,
+    /// Playground folder; "" clears it.
+    pub category: Option<String>,
+}
+
+/// Parameters for `recipe_run`.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+#[serde(deny_unknown_fields)]
+pub struct RecipeRunParams {
+    /// A saved recipe to run (or pass ad-hoc `steps`).
+    pub recipe_id: Option<String>,
+    /// Ad-hoc steps, run without saving a recipe.
+    pub steps: Option<Vec<herdr_mcp_api::RecipeStep>>,
+    /// Name for an ad-hoc run.
+    pub name: Option<String>,
+    /// herdr workspace id the run is scoped to (default: the recipe's hint, else w1).
+    pub session_id: Option<String>,
+    /// Added to the run's scope over the recipe's own variables.
+    #[serde(default)]
+    pub variables: HashMap<String, serde_json::Value>,
+    /// Run only these steps, in recipe order.
+    #[serde(default)]
+    pub step_ids: Vec<String>,
+    /// Wait for the run to finish and return its final record (default
+    /// false: return at once; poll `run_get`).
+    #[serde(default)]
+    pub wait: bool,
+}
+
+/// Parameters for `run_get`.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+#[serde(deny_unknown_fields)]
+pub struct RunGetParams {
+    pub run_id: String,
+}
+
+/// Parameters for `run_control`.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+#[serde(deny_unknown_fields)]
+pub struct RunControlParams {
+    pub run_id: String,
+    /// "pause", "resume" or "cancel".
+    pub action: String,
+}
 
 /// Parameters for the `get_template` tool.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
@@ -463,6 +564,57 @@ fn category(name: &str) -> rmcp::model::Meta {
 impl HerdrMcpServer {
     pub fn new(persistence: Persistence, registry: AgentRegistry) -> Self {
         Self::with_config(persistence, registry, &herdr_mcp_core::Config::default())
+    }
+
+    /// Save `req` as a new recipe.
+    pub async fn create_recipe(&self, req: CreateRecipeRequest) -> anyhow::Result<Recipe> {
+        let now = chrono::Utc::now();
+        let recipe = Recipe {
+            id: uuid::Uuid::new_v4(),
+            name: req.name,
+            description: req.description,
+            steps: req.steps,
+            variables: req.variables,
+            created_at: now,
+            updated_at: now,
+            is_template: false,
+            category: req.category,
+            triggers: req.triggers,
+        };
+        self.persistence.save_recipe(&recipe).await?;
+        Ok(recipe)
+    }
+
+    /// Replace the fields `req` sets on recipe `id` (`None`: no such recipe).
+    pub async fn update_recipe(
+        &self,
+        id: uuid::Uuid,
+        req: UpdateRecipeRequest,
+    ) -> anyhow::Result<Option<Recipe>> {
+        let Some(mut recipe) = self.persistence.load_recipe(&id).await? else {
+            return Ok(None);
+        };
+        if let Some(name) = req.name {
+            recipe.name = name;
+        }
+        if let Some(desc) = req.description {
+            recipe.description = Some(desc);
+        }
+        if let Some(steps) = req.steps {
+            recipe.steps = steps;
+        }
+        if let Some(vars) = req.variables {
+            recipe.variables = vars;
+        }
+        if let Some(triggers) = req.triggers {
+            recipe.triggers = triggers;
+        }
+        if let Some(category) = req.category {
+            recipe.category = Some(category).filter(|c| !c.trim().is_empty());
+        }
+        recipe.updated_at = chrono::Utc::now();
+        self.persistence.save_recipe(&recipe).await?;
+        Ok(Some(recipe))
     }
 
     /// Snapshot of the clipboard commands in effect right now.
@@ -995,6 +1147,72 @@ impl HerdrMcpServer {
         run_herdr_json(&as_strs(&args)).await
     }
 
+    #[tool(
+        meta = category("Synchronize"),
+        description = "Watch a pane until NEW text matching match_text appears, then return {pane_id, matched_line, matches}. Unlike wait_output, matches already in the pane when the watch starts (e.g. the marker inside a prompt you just sent) don't count: it fires when the number of matches goes up. In a recipe, the next step runs once it fires. Without timeout_ms it watches until matched or the run is cancelled."
+    )]
+    async fn pane_watch(
+        &self,
+        Parameters(PaneWatchParams {
+            pane_id,
+            label,
+            match_text,
+            use_regex,
+            source,
+            timeout_ms,
+        }): Parameters<PaneWatchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if match_text.is_empty() {
+            return Err(user_err("match_text is required"));
+        }
+        let pid = resolve_pane_id(pane_id, label).await?;
+        let regex = use_regex
+            .unwrap_or(false)
+            .then(|| Regex::new(&match_text))
+            .transpose()
+            .map_err(|e| user_err(format!("match_text: {e}")))?;
+        let source = source.as_deref().unwrap_or("recent");
+        let read = || async {
+            herdr_cli(&[
+                "pane",
+                "read",
+                &pid,
+                "--source",
+                source,
+                "--lines",
+                WATCH_LINES,
+            ])
+            .await
+        };
+        let deadline = timeout_ms
+            .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms.into()));
+        let mut seen = watch_matches(&read().await?, &match_text, regex.as_ref()).0;
+        loop {
+            tokio::time::sleep(WATCH_POLL).await;
+            let text = read().await?;
+            let (n, line) = watch_matches(&text, &match_text, regex.as_ref());
+            if n > seen {
+                return Ok(CallToolResult::success(vec![
+                    Content::json(serde_json::json!({
+                        "pane_id": pid,
+                        "matched_line": line,
+                        "matches": n,
+                    }))
+                    .map_err(to_mcp_err)?,
+                ]));
+            }
+            // Matches that scrolled out or were redrawn away lower the bar,
+            // so the text showing up again still counts as new.
+            seen = n;
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                return Err(user_err(format!(
+                    "pane_watch: no new {match_text:?} in {pid} within {} ms",
+                    timeout_ms.unwrap_or_default()
+                )));
+            }
+        }
+    }
+
     // ── A2A primitives ─────────────────────────────────────────────────
     //
     // These amplify herdr's model: a pane *is* an agent, and the live registry
@@ -1019,8 +1237,14 @@ impl HerdrMcpServer {
             needs,
             wait_idle,
             label,
+            in_pane,
         }): Parameters<AgentSpawnParams>,
     ) -> Result<CallToolResult, McpError> {
+        if in_pane.is_some() && (cwd.is_some() || split.is_some() || tab_id.is_some()) {
+            return Err(user_err(
+                "in_pane starts the agent in that pane as it is: drop cwd, split and tab_id",
+            ));
+        }
         // Wait for dependencies first (driven by herdr's agent state).
         let ws_for_resolve = workspace_id.clone().unwrap_or_default();
         for dep in &needs {
@@ -1061,6 +1285,7 @@ impl HerdrMcpServer {
                 tab: tab_id.as_deref(),
                 direction: split.as_deref(),
                 cwd: cwd.as_deref(),
+                pane: in_pane.as_deref(),
             },
         )
         .await?;
@@ -1405,6 +1630,192 @@ impl HerdrMcpServer {
         ]))
     }
 
+    // ── Recipes ────────────────────────────────────────────────────────
+
+    #[tool(
+        meta = category("Recipes"),
+        description = "List the saved recipes: id, name, description, category, step ids and trigger count. Run one with recipe_run."
+    )]
+    async fn recipe_list(
+        &self,
+        Parameters(_): Parameters<RecipeListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let recipes = self
+            .persistence
+            .list_recipes(None)
+            .await
+            .map_err(to_mcp_err)?;
+        let list: Vec<_> = recipes
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "name": r.name,
+                    "description": r.description,
+                    "category": r.category,
+                    "steps": r.steps.iter().map(|s| &s.id).collect::<Vec<_>>(),
+                    "triggers": r.triggers.len(),
+                })
+            })
+            .collect();
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({ "recipes": list })).map_err(to_mcp_err)?,
+        ]))
+    }
+
+    #[tool(meta = category("Recipes"), description = "Get a saved recipe by id: its steps, variables and triggers.")]
+    async fn recipe_get(
+        &self,
+        Parameters(RecipeGetParams { recipe_id }): Parameters<RecipeGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = parse_id("recipe_id", &recipe_id)?;
+        let recipe = self
+            .persistence
+            .load_recipe(&id)
+            .await
+            .map_err(to_mcp_err)?
+            .ok_or_else(|| user_err(format!("no recipe {recipe_id}")))?;
+        Ok(CallToolResult::success(vec![
+            Content::json(recipe).map_err(to_mcp_err)?,
+        ]))
+    }
+
+    #[tool(
+        meta = category("Recipes"),
+        description = "Save a recipe. Without recipe_id it creates one (name and steps required); with recipe_id the fields given replace the saved ones. Steps run in order and a failing step stops the run; a step's params may use {{ stepId.path }} (an earlier step's result) and {{ var }} (variables). Returns the saved recipe."
+    )]
+    async fn recipe_save(
+        &self,
+        Parameters(RecipeSaveParams {
+            recipe_id,
+            name,
+            description,
+            steps,
+            variables,
+            triggers,
+            category,
+        }): Parameters<RecipeSaveParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let recipe = match recipe_id {
+            Some(raw) => {
+                let id = parse_id("recipe_id", &raw)?;
+                let req = UpdateRecipeRequest {
+                    name,
+                    description,
+                    steps,
+                    variables,
+                    triggers,
+                    category,
+                };
+                self.update_recipe(id, req)
+                    .await
+                    .map_err(to_mcp_err)?
+                    .ok_or_else(|| user_err(format!("no recipe {raw}")))?
+            }
+            None => {
+                let (Some(name), Some(steps)) = (name, steps) else {
+                    return Err(user_err("a new recipe needs name and steps"));
+                };
+                let req = CreateRecipeRequest {
+                    name,
+                    description,
+                    steps,
+                    variables: variables.unwrap_or_default(),
+                    category,
+                    triggers: triggers.unwrap_or_default(),
+                };
+                self.create_recipe(req).await.map_err(to_mcp_err)?
+            }
+        };
+        Ok(CallToolResult::success(vec![
+            Content::json(recipe).map_err(to_mcp_err)?,
+        ]))
+    }
+
+    #[tool(
+        meta = category("Recipes"),
+        description = "Run a saved recipe (recipe_id) or ad-hoc steps. Returns the run record at once ({id, status, steps, results, ...}); follow it with run_get, or pass wait: true to get the finished record. variables are added to the run's scope."
+    )]
+    async fn recipe_run(
+        &self,
+        Parameters(RecipeRunParams {
+            recipe_id,
+            steps,
+            name,
+            session_id,
+            variables,
+            step_ids,
+            wait,
+        }): Parameters<RecipeRunParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if recipe_id.is_none() && steps.is_none() {
+            return Err(user_err("pass recipe_id or steps"));
+        }
+        let req = herdr_mcp_api::StartRunRequest {
+            recipe_id: recipe_id
+                .as_deref()
+                .map(|raw| parse_id("recipe_id", raw))
+                .transpose()?,
+            steps,
+            name,
+            session_id,
+            variables,
+            step_ids,
+        };
+        let (run, done) = crate::runs::start_run(self, req)
+            .await
+            .map_err(|e| user_err(start_error_to_http(e).1))?;
+        let run = if wait {
+            done.await.map_err(to_mcp_err)?
+        } else {
+            run
+        };
+        Ok(CallToolResult::success(vec![
+            Content::json(run).map_err(to_mcp_err)?,
+        ]))
+    }
+
+    #[tool(
+        meta = category("Recipes"),
+        description = "Get a run's record: status (running, paused, completed, failed, cancelled, interrupted), each step's state and result, and the error of a failed step."
+    )]
+    async fn run_get(
+        &self,
+        Parameters(RunGetParams { run_id }): Parameters<RunGetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = parse_id("run_id", &run_id)?;
+        let run = crate::runs::load(self, id)
+            .await
+            .map_err(to_mcp_err)?
+            .ok_or_else(|| user_err(format!("no run {run_id}")))?;
+        Ok(CallToolResult::success(vec![
+            Content::json(run).map_err(to_mcp_err)?,
+        ]))
+    }
+
+    #[tool(
+        meta = category("Recipes"),
+        description = "Pause, resume or cancel a run. Pause takes effect at the next step; cancel also stops the step in flight (e.g. a pane_watch)."
+    )]
+    async fn run_control(
+        &self,
+        Parameters(RunControlParams { run_id, action }): Parameters<RunControlParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = parse_id("run_id", &run_id)?;
+        let act = herdr_mcp_api::RunAction::parse(&action).ok_or_else(|| {
+            user_err(format!(
+                "action must be pause, resume or cancel, not {action:?}"
+            ))
+        })?;
+        if !self.runs.control(id, act) {
+            return Err(user_err(format!("run {run_id} is not executing")));
+        }
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({ "run_id": id, "action": act.as_str() }))
+                .map_err(to_mcp_err)?,
+        ]))
+    }
+
     // ── Scheduler ──────────────────────────────────────────────────────
 
     #[tool(
@@ -1538,14 +1949,24 @@ impl HerdrMcpServer {
                     Manage workspaces, tabs, and panes; spawn agents; \
                     read output; send text, keys, and commands; \
                     wait for output or agent status changes. \
-                    All commands shell out to the local 'herdr' CLI \
-                    binary which must be installed and in PATH (https://herdr.dev). \
+                    Recipes chain tool calls into saved, persisted runs: \
+                    recipe_list / recipe_save, then recipe_run and follow it \
+                    with run_get. pane_watch fires on NEW text in a pane, so \
+                    a recipe step can wait for an agent's reply before the \
+                    next one sends more. Needs herdr installed (https://herdr.dev). \
                     IDs are session-local and may compact when items are closed — \
-                    re-read IDs from list commands after structural changes."
+                    re-read IDs from list commands after structural changes; \
+                    prefer labels. Guide: docs/AGENT-GUIDE.md in the herdr-mcp repo."
 )]
 impl ServerHandler for HerdrMcpServer {}
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+/// Parse a uuid argument named `what`.
+fn parse_id(what: &str, raw: &str) -> Result<uuid::Uuid, McpError> {
+    raw.parse()
+        .map_err(|_| user_err(format!("{what}: {raw:?} is not a uuid")))
+}
 
 /// Map any displayable error into an `McpError` for `#[tool]` methods.
 pub(crate) fn to_mcp_err(e: impl std::fmt::Display) -> McpError {
@@ -1612,6 +2033,32 @@ pub(crate) fn agent_wait_args(target: &str, status: &str, timeout_ms: Option<u32
         args.extend(["--timeout".to_string(), ms.to_string()]);
     }
     args
+}
+
+/// How often `pane_watch` reads its pane, and how many lines it reads.
+const WATCH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
+const WATCH_LINES: &str = "500";
+
+/// How many times `needle` (or `regex`) occurs in `text`'s lines, and the
+/// last line holding an occurrence.
+fn watch_matches<'t>(
+    text: &'t str,
+    needle: &str,
+    regex: Option<&Regex>,
+) -> (usize, Option<&'t str>) {
+    let mut total = 0;
+    let mut last = None;
+    for line in text.lines() {
+        let n = match regex {
+            Some(re) => re.find_iter(line).count(),
+            None => line.matches(needle).count(),
+        };
+        if n > 0 {
+            total += n;
+            last = Some(line);
+        }
+    }
+    (total, last)
 }
 
 /// `pane wait-output <pane> (--match T | --regex P) [--source S] [--timeout ms]`
@@ -2429,27 +2876,11 @@ async fn create_recipe_handler(
     State(AppState { server, .. }): State<AppState>,
     Json(req): Json<CreateRecipeRequest>,
 ) -> Result<Json<Recipe>, (StatusCode, String)> {
-    let now = chrono::Utc::now();
-    let recipe = Recipe {
-        id: uuid::Uuid::new_v4(),
-        name: req.name,
-        description: req.description,
-        steps: req.steps,
-        variables: req.variables,
-        created_at: now,
-        updated_at: now,
-        is_template: false,
-        category: req.category,
-        triggers: req.triggers,
-    };
-
     server
-        .persistence
-        .save_recipe(&recipe)
+        .create_recipe(req)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(recipe))
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 async fn get_recipe_handler(
@@ -2470,40 +2901,12 @@ async fn update_recipe_handler(
     Path(id): Path<uuid::Uuid>,
     Json(req): Json<UpdateRecipeRequest>,
 ) -> Result<Json<Recipe>, (StatusCode, String)> {
-    let mut recipe = server
-        .persistence
-        .load_recipe(&id)
+    server
+        .update_recipe(id, req)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .ok_or((StatusCode::NOT_FOUND, "Recipe not found".to_string()))?;
-
-    if let Some(name) = req.name {
-        recipe.name = name;
-    }
-    if let Some(desc) = req.description {
-        recipe.description = Some(desc);
-    }
-    if let Some(steps) = req.steps {
-        recipe.steps = steps;
-    }
-    if let Some(vars) = req.variables {
-        recipe.variables = vars;
-    }
-    if let Some(triggers) = req.triggers {
-        recipe.triggers = triggers;
-    }
-    if let Some(category) = req.category {
-        recipe.category = Some(category).filter(|c| !c.trim().is_empty());
-    }
-    recipe.updated_at = chrono::Utc::now();
-
-    server
-        .persistence
-        .save_recipe(&recipe)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(recipe))
+        .map(Json)
+        .ok_or((StatusCode::NOT_FOUND, "Recipe not found".to_string()))
 }
 
 async fn delete_recipe_handler(
@@ -2729,17 +3132,12 @@ async fn control_run_handler(
     State(AppState { server, .. }): State<AppState>,
     Path((id, action)): Path<(uuid::Uuid, String)>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    let action = match action.as_str() {
-        "pause" => herdr_mcp_api::RunAction::Pause,
-        "resume" => herdr_mcp_api::RunAction::Resume,
-        "cancel" => herdr_mcp_api::RunAction::Cancel,
-        other => {
-            return Err((
-                StatusCode::NOT_FOUND,
-                format!("unknown run action {other:?}"),
-            ));
-        }
-    };
+    let action = herdr_mcp_api::RunAction::parse(&action).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("unknown run action {action:?}"),
+        )
+    })?;
     if server.runs.control(id, action) {
         return Ok(StatusCode::NO_CONTENT);
     }
@@ -3537,6 +3935,16 @@ mod tests {
                 "10"
             ]
         );
+    }
+
+    #[test]
+    fn watch_matches_counts_occurrences_and_finds_the_last_line() {
+        let text = "say DONE when finished\nworking\nDONE\n";
+        assert_eq!(watch_matches(text, "DONE", None), (2, Some("DONE")));
+        assert_eq!(watch_matches(text, "nope", None), (0, None));
+        // Lines are matched one at a time, so `^`/`$` anchor each line.
+        let re = Regex::new(r"^DONE$").unwrap();
+        assert_eq!(watch_matches(text, "", Some(&re)), (1, Some("DONE")));
     }
 
     #[tokio::test]

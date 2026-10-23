@@ -112,10 +112,12 @@ pub struct Placement<'a> {
     /// `right` (default) or `down`.
     pub direction: Option<&'a str>,
     pub cwd: Option<&'a str>,
+    /// An existing pane to start in instead of splitting a new one.
+    pub pane: Option<&'a str>,
 }
 
-/// Start an agent from `profile` (plus `extra` args) in a new pane named
-/// `name`. Returns the pane id once the agent is started (native: herdr saw
+/// Start an agent from `profile` (plus `extra` args) in a new pane (or
+/// `at.pane`) named `name`. Returns the pane id once the agent is started (native: herdr saw
 /// it ready; command: launched, with its watcher running).
 pub async fn spawn(
     knobs: &Settings,
@@ -124,16 +126,20 @@ pub async fn spawn(
     extra: &[String],
     at: Placement<'_>,
 ) -> Result<String, McpError> {
-    let anchor = anchor_pane(at.workspace, at.tab).await?;
-    let split = herdr(&split_args(
-        &anchor,
-        at.direction.unwrap_or("right"),
-        at.cwd,
-    ))
-    .await?;
-    let json: serde_json::Value = serde_json::from_str(&split).map_err(to_mcp_err)?;
-    let pane =
-        extract_pane_id(&json).ok_or_else(|| to_mcp_err("pane split returned no pane id"))?;
+    let pane = match at.pane {
+        Some(pane) => pane.to_string(),
+        None => {
+            let anchor = anchor_pane(at.workspace, at.tab).await?;
+            let split = herdr(&split_args(
+                &anchor,
+                at.direction.unwrap_or("right"),
+                at.cwd,
+            ))
+            .await?;
+            let json: serde_json::Value = serde_json::from_str(&split).map_err(to_mcp_err)?;
+            extract_pane_id(&json).ok_or_else(|| to_mcp_err("pane split returned no pane id"))?
+        }
+    };
 
     match &profile.kind {
         Some(kind) => {

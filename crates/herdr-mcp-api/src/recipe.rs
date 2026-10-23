@@ -25,10 +25,14 @@ pub struct Recipe {
 
 /// One request in a collection (recipe): a tool call, plus the variables
 /// its result sets for later requests.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RecipeStep {
+    /// Unique within the recipe; later steps read this one's result as
+    /// `{{ id.path }}`.
     pub id: String,
+    /// The herdr-mcp tool to call.
     pub tool: String,
+    /// The tool's arguments; strings may hold `{{ ... }}` placeholders.
     pub params: serde_json::Value,
     pub description: Option<String>,
     /// Applied in order once the step succeeds.
@@ -39,7 +43,7 @@ pub struct RecipeStep {
 /// Save part of a step's result as a variable: `path` is followed into the
 /// result like a `{{ step.path }}` placeholder (`panes[0].pane_id`; empty
 /// for the whole text the tool returned).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Extract {
     pub path: String,
     pub var: String,
@@ -49,7 +53,9 @@ pub struct Extract {
 
 /// Where an [`Extract`] saves its variable. Either way, later steps of the
 /// same run see it at once.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum VarScope {
     /// `/api/variables`: every run and request sees it.

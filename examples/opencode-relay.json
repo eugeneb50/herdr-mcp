@@ -1,0 +1,49 @@
+{
+  "name": "opencode relay",
+  "description": "New workspace with opencode in `dir`; when it answers the first prompt, send the second.",
+  "variables": {
+    "dir": "/tmp",
+    "first": "Reply with the word 'ready' in uppercase letters and nothing else.",
+    "first_marker": "READY",
+    "second": "Now reply with the word 'second' in uppercase letters and nothing else.",
+    "second_marker": "SECOND"
+  },
+  "steps": [
+    {
+      "id": "ws",
+      "tool": "create_workspace",
+      "params": { "cwd": "{{dir}}", "label": "opencode-relay", "no_focus": true },
+      "description": "A new workspace in the project directory"
+    },
+    {
+      "id": "oc",
+      "tool": "agent_spawn",
+      "params": {
+        "agent": "opencode",
+        "label": "relay-oc",
+        "in_pane": "{{ws.result.root_pane.pane_id}}",
+        "args": ["--prompt", "{{first}}"],
+        "wait_idle": false
+      },
+      "description": "opencode in the workspace's first pane, started with the first prompt"
+    },
+    {
+      "id": "first_done",
+      "tool": "pane_watch",
+      "params": { "label": "relay-oc", "match_text": "{{first_marker}}", "timeout_ms": 300000 },
+      "description": "Fires when opencode prints the first marker"
+    },
+    {
+      "id": "send",
+      "tool": "agent_message",
+      "params": { "target": "relay-oc", "text": "{{second}}" },
+      "description": "Second step: type the next prompt and submit it"
+    },
+    {
+      "id": "second_done",
+      "tool": "pane_watch",
+      "params": { "label": "relay-oc", "match_text": "{{second_marker}}", "timeout_ms": 300000 },
+      "description": "Fires when opencode prints the second marker"
+    }
+  ]
+}
