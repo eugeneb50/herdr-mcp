@@ -1,6 +1,7 @@
 //! Playground: collections of saved requests (Postman style) and the live
 //! herdr event stream.
 
+pub mod builders;
 pub mod collections;
 pub mod events;
 pub mod forms;

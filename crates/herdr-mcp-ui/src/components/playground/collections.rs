@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+use super::builders::{HttpBuilder, LlmWizard};
 use super::forms::{DynamicForm, ResponseViewer, build_params};
 use super::herdr_api::{Method, method_groups, methods};
 use super::recipes::{RunResults, TemplateForm, TriggerEditor};
@@ -23,6 +24,8 @@ use herdr_mcp_api::{
 
 /// The tool whose requests call any herdr socket method.
 const HERDR_API: &str = "herdr_api";
+const HTTP_REQUEST: &str = "http_request";
+const LLM_CALL: &str = "llm_call";
 
 /// What the main panel shows.
 #[derive(Clone, PartialEq, Debug)]
@@ -211,14 +214,20 @@ async fn set_steps(client: ApiClient, id: Uuid, steps: Vec<RecipeStep>) -> Resul
         .map_err(|e| e.to_string())
 }
 
-/// Append a new `list_panes` request to collection `id`; its id.
-async fn add_request(client: ApiClient, id: Uuid) -> Result<String, String> {
+/// Append a new `tool` request (starting from `params`) to collection
+/// `id`; its id.
+async fn add_request(
+    client: ApiClient,
+    id: Uuid,
+    tool: &str,
+    params: Value,
+) -> Result<String, String> {
     let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
     let step_id = fresh_request_id(&recipe.steps);
     recipe.steps.push(RecipeStep {
         id: step_id.clone(),
-        tool: "list_panes".into(),
-        params: serde_json::json!({}),
+        tool: tool.into(),
+        params,
         ..Default::default()
     });
     set_steps(client, id, recipe.steps).await?;
@@ -494,10 +503,10 @@ fn CollectionView(recipe: Recipe, pick: Signal<Pick>, refresh: Signal<u32>) -> E
             }
         });
     };
-    let new_request = move |_| {
+    let new_request = move |tool: &'static str, params: Value| {
         let client = client();
         spawn(async move {
-            match add_request(client, id).await {
+            match add_request(client, id, tool, params).await {
                 Ok(step) => {
                     pick.set(Pick::Request(id, step));
                     refresh += 1;
@@ -622,7 +631,23 @@ fn CollectionView(recipe: Recipe, pick: Signal<Pick>, refresh: Signal<u32>) -> E
                 }
             }
             div { class: "btn-row",
-                button { class: "btn", onclick: new_request, "+ Request" }
+                button {
+                    class: "btn",
+                    onclick: move |_| new_request("list_panes", serde_json::json!({})),
+                    "+ Request"
+                }
+                button {
+                    class: "btn",
+                    title: "A custom HTTP request: method, URL, query, headers, body",
+                    onclick: move |_| new_request(HTTP_REQUEST, serde_json::json!({ "method": "GET", "url": "https://" })),
+                    "+ HTTP"
+                }
+                button {
+                    class: "btn",
+                    title: "An OpenRouter / OpenAI-compatible model call",
+                    onclick: move |_| new_request(LLM_CALL, serde_json::json!({ "model": "" })),
+                    "+ LLM"
+                }
                 button {
                     class: "btn btn-primary",
                     disabled: busy() || steps.is_empty(),
@@ -734,6 +759,8 @@ fn RequestEditor(
     });
     let mut extract = use_signal(|| step.extract.clone());
     let mut filter = use_signal(String::new);
+    // HTTP and LLM requests open in their builder; this shows the plain fields.
+    let mut raw_form = use_signal(|| false);
     let mut response: Signal<Option<RunRecord>> = use_signal(|| None);
     let mut busy = use_signal(|| false);
     let mut error: Signal<Option<String>> = use_signal(|| None);
@@ -976,7 +1003,29 @@ fn RequestEditor(
                         }
                     }
                 }
-                if props.is_empty() {
+                if *tool.read() == HTTP_REQUEST || *tool.read() == LLM_CALL {
+                    label { class: "check-row",
+                        input {
+                            r#type: "checkbox",
+                            checked: raw_form(),
+                            onchange: move |_| raw_form.toggle(),
+                        }
+                        span { class: "muted", "Plain fields" }
+                    }
+                }
+                if *tool.read() == HTTP_REQUEST && !raw_form() {
+                    HttpBuilder {
+                        key: "{rid}/{step_id}/http",
+                        values: values.read().clone(),
+                        on_change: move |next| values.set(next),
+                    }
+                } else if *tool.read() == LLM_CALL && !raw_form() {
+                    LlmWizard {
+                        key: "{rid}/{step_id}/llm",
+                        values: values.read().clone(),
+                        on_change: move |next| values.set(next),
+                    }
+                } else if props.is_empty() {
                     p { class: "muted", "No parameters" }
                 } else {
                     DynamicForm {

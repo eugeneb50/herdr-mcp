@@ -6,6 +6,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::herdr_client::{AgentRegistry, HerdrClient, SubscriberPhase};
 use crate::persistence::Persistence;
@@ -350,6 +351,74 @@ pub struct VarSetParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 pub struct ListTemplatesParams {}
+
+/// Parameters for `http_request`.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+#[serde(deny_unknown_fields)]
+pub struct HttpRequestParams {
+    /// GET (default), POST, PUT, PATCH, DELETE, HEAD, …
+    pub method: Option<String>,
+    /// Absolute URL, e.g. https://api.example.com/v1/items
+    pub url: String,
+    /// Request headers, e.g. {"Authorization": "Bearer {{token}}"}.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// Query parameters, added to the URL encoded.
+    #[serde(default)]
+    pub query: BTreeMap<String, String>,
+    /// Text body, sent as is (set a Content-Type header to match).
+    pub body: Option<String>,
+    /// JSON body (object or array), sent with Content-Type application/json.
+    #[schemars(with = "Option<serde_json::Map<String, serde_json::Value>>")]
+    pub json: Option<serde_json::Value>,
+    /// A non-2xx status fails the call (and stops a recipe). Default false.
+    #[serde(default)]
+    pub check: bool,
+    pub timeout_ms: Option<u32>,
+}
+
+/// Parameters for `llm_call`.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+#[serde(deny_unknown_fields)]
+pub struct LlmCallParams {
+    /// Model id, e.g. "openai/gpt-4o-mini" on OpenRouter, "gpt-4o-mini" on OpenAI.
+    pub model: String,
+    /// The user message.
+    pub prompt: Option<String>,
+    /// System message.
+    pub system: Option<String>,
+    /// Earlier turns, [{"role": "user"|"assistant", "content": "…"}], sent before prompt.
+    #[serde(default)]
+    pub messages: Vec<serde_json::Value>,
+    /// OpenAI-compatible API base (default https://openrouter.ai/api/v1;
+    /// OpenAI: https://api.openai.com/v1; Ollama: http://localhost:11434/v1).
+    pub base_url: Option<String>,
+    /// The key itself; prefer api_key_env or a {{variable}}.
+    pub api_key: Option<String>,
+    /// Environment variable holding the key (default OPENROUTER_API_KEY /
+    /// OPENAI_API_KEY by base_url; none for other servers).
+    pub api_key_env: Option<String>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u32>,
+    /// Extra request-body fields, e.g. {"response_format": {"type": "json_object"}}.
+    pub extra: Option<serde_json::Map<String, serde_json::Value>>,
+    pub timeout_ms: Option<u32>,
+}
+
+/// Parameters for `llm_models`.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
+#[must_use]
+#[serde(deny_unknown_fields)]
+pub struct LlmModelsParams {
+    /// OpenAI-compatible API base (default https://openrouter.ai/api/v1).
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub api_key_env: Option<String>,
+    /// Only models whose id contains this (case-insensitive).
+    pub filter: Option<String>,
+}
 
 /// Parameters for `recipe_list`.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
@@ -1630,6 +1699,142 @@ impl HerdrMcpServer {
         ]))
     }
 
+    // ── HTTP & LLM ─────────────────────────────────────────────────────
+
+    #[tool(
+        meta = category("HTTP"),
+        description = "Send an HTTP request and return {status, ok, headers, body} (the response body parsed as JSON when it is). Send a text body with body or a JSON one with json; url, headers, query and bodies may use {{ }} placeholders in recipes. A non-2xx status is returned, not raised, unless check is true."
+    )]
+    async fn http_request(
+        &self,
+        Parameters(HttpRequestParams {
+            method,
+            url,
+            headers,
+            query,
+            body,
+            json,
+            check,
+            timeout_ms,
+        }): Parameters<HttpRequestParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let body = match (body, json) {
+            (Some(_), Some(_)) => return Err(user_err("pass body or json, not both")),
+            (Some(text), None) => Some(serde_json::Value::String(text)),
+            (None, json) => json,
+        };
+        let ms = timeout_ms.unwrap_or_else(|| self.timeout_ms(settings::HTTP_REQUEST_MS));
+        let out = crate::outbound::send(crate::outbound::Request {
+            method: method.as_deref().unwrap_or("GET"),
+            url: &url,
+            headers: &headers,
+            query: &query,
+            body: body.as_ref(),
+            timeout: std::time::Duration::from_millis(ms.into()),
+        })
+        .await
+        .map_err(|e| user_err(format!("{e:#}")))?;
+        if check && out["ok"] != true {
+            return Err(user_err(format!(
+                "{url}: HTTP {}: {}",
+                out["status"], out["body"]
+            )));
+        }
+        Ok(CallToolResult::success(vec![
+            Content::json(out).map_err(to_mcp_err)?,
+        ]))
+    }
+
+    #[tool(
+        meta = category("LLM"),
+        description = "Call an OpenAI-compatible chat model (OpenRouter by default; OpenAI, Ollama, LM Studio, … via base_url) and return {text, model, finish_reason, usage}. The key comes from api_key, else the api_key_env environment variable (default OPENROUTER_API_KEY / OPENAI_API_KEY). In recipes, {{step.text}} is the reply."
+    )]
+    async fn llm_call(
+        &self,
+        Parameters(LlmCallParams {
+            model,
+            prompt,
+            system,
+            messages,
+            base_url,
+            api_key,
+            api_key_env,
+            temperature,
+            max_tokens,
+            extra,
+            timeout_ms,
+        }): Parameters<LlmCallParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::outbound as out;
+        let base = base_url.as_deref().unwrap_or(out::OPENROUTER);
+        let key = out::api_key(base, api_key.as_deref(), api_key_env.as_deref());
+        let body = out::chat_body(&out::Chat {
+            model: &model,
+            system: system.as_deref(),
+            prompt: prompt.as_deref(),
+            messages: &messages,
+            temperature,
+            max_tokens,
+            extra: extra.as_ref(),
+        })
+        .map_err(|e| user_err(e.to_string()))?;
+        let ms = timeout_ms.unwrap_or_else(|| self.timeout_ms(settings::LLM_CALL_MS));
+        let resp = out::api(
+            base,
+            "chat/completions",
+            key.as_deref(),
+            Some(&body),
+            std::time::Duration::from_millis(ms.into()),
+        )
+        .await
+        .map_err(|e| user_err(llm_error(e, base, api_key_env.as_deref(), key.is_some())))?;
+        let reply = out::chat_reply(&resp).map_err(|e| user_err(e.to_string()))?;
+        Ok(CallToolResult::success(vec![
+            Content::json(reply).map_err(to_mcp_err)?,
+        ]))
+    }
+
+    #[tool(
+        meta = category("LLM"),
+        description = "List the models an OpenAI-compatible API offers ({base_url, models: [{id, name, context_length}]}), OpenRouter by default. Same key rules as llm_call."
+    )]
+    async fn llm_models(
+        &self,
+        Parameters(LlmModelsParams {
+            base_url,
+            api_key,
+            api_key_env,
+            filter,
+        }): Parameters<LlmModelsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::outbound as out;
+        let base = base_url.as_deref().unwrap_or(out::OPENROUTER);
+        let key = out::api_key(base, api_key.as_deref(), api_key_env.as_deref());
+        let ms = self.timeout_ms(settings::LLM_CALL_MS);
+        let resp = out::api(
+            base,
+            "models",
+            key.as_deref(),
+            None,
+            std::time::Duration::from_millis(ms.into()),
+        )
+        .await
+        .map_err(|e| user_err(llm_error(e, base, api_key_env.as_deref(), key.is_some())))?;
+        let needle = filter.unwrap_or_default().to_lowercase();
+        let models: Vec<_> = out::model_list(&resp)
+            .into_iter()
+            .filter(|m| {
+                m["id"]
+                    .as_str()
+                    .is_some_and(|id| id.to_lowercase().contains(&needle))
+            })
+            .collect();
+        Ok(CallToolResult::success(vec![
+            Content::json(serde_json::json!({ "base_url": base, "models": models }))
+                .map_err(to_mcp_err)?,
+        ]))
+    }
+
     // ── Recipes ────────────────────────────────────────────────────────
 
     #[tool(
@@ -1961,6 +2166,18 @@ impl HerdrMcpServer {
 impl ServerHandler for HerdrMcpServer {}
 
 // ── Helpers ────────────────────────────────────────────────────────────
+
+/// An LLM API error, with a hint naming the key's variable when no key
+/// was sent.
+fn llm_error(e: anyhow::Error, base: &str, key_env: Option<&str>, had_key: bool) -> String {
+    let hint = match key_env.or_else(|| crate::outbound::default_key_env(base)) {
+        Some(var) if !had_key => {
+            format!(" (no API key: set {var} or pass api_key / api_key_env)")
+        }
+        _ => String::new(),
+    };
+    format!("{e:#}{hint}")
+}
 
 /// Parse a uuid argument named `what`.
 fn parse_id(what: &str, raw: &str) -> Result<uuid::Uuid, McpError> {

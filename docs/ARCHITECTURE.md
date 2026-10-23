@@ -47,7 +47,7 @@ interpolation.
 │                        ▼                                     │
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │              HerdrMcpServer (server.rs)                  │ │
-│  │  - 43 tool definitions (discovery, lifecycle, read,     │ │
+│  │  - 46 tool definitions (discovery, lifecycle, read,     │ │
 │  │    write, synchronize, a2a, variables, templates,       │ │
 │  │    scheduler, clipboard)                                │ │
 │  │  - Recipe engine with {{ variable }} interpolation      │ │
@@ -149,7 +149,7 @@ herdr-mcp/
 
 ---
 
-## 4. MCP Tool Reference (43 tools total)
+## 4. MCP Tool Reference (46 tools total)
 
 ### 4.1 Discovery Tools (7)
 
@@ -227,7 +227,22 @@ engine, always acts on the server's own session.
 | `get_template` | `template_id` | Get template by ID |
 | `instantiate_template` | `template_id`, `variables`, `name?` | Instantiate template → recipe, auto-save |
 
-### 4.9 Recipe & Run Tools (6)
+### 4.9 HTTP & LLM Tools (3)
+
+Outbound calls from the server (`outbound.rs`, reqwest + rustls). Timeouts
+default to the `timeouts.http-request-ms` / `timeouts.llm-call-ms` settings.
+
+| Tool | Parameters | Description |
+|---|---|---|
+| `http_request` | `method?`, `url`, `headers`, `query`, `body?` (text) or `json?`, `check?`, `timeout_ms?` | `{status, ok, headers, body}`; the response body parsed as JSON when it is. A non-2xx is a result unless `check` |
+| `llm_call` | `model`, `prompt?`, `system?`, `messages`, `base_url?`, `api_key?`, `api_key_env?`, `temperature?`, `max_tokens?`, `extra?`, `timeout_ms?` | `POST {base_url}/chat/completions` (default OpenRouter); returns `{text, model, finish_reason, usage}`. Key: `api_key`, else env `api_key_env`, else `OPENROUTER_API_KEY` / `OPENAI_API_KEY` by host, else none |
+| `llm_models` | `base_url?`, `api_key?`, `api_key_env?`, `filter?` | `GET {base_url}/models` as `{base_url, models: [{id, name, context_length}]}` |
+
+The web playground's request editor shows `HttpBuilder` / `LlmWizard`
+(`playground/builders.rs`) for these two tools instead of the schema form;
+both edit the same raw values, and "Plain fields" switches back.
+
+### 4.10 Recipe & Run Tools (6)
 
 The MCP face of `/api/recipes` and `/api/runs`: the same server methods
 (`create_recipe` / `update_recipe`, `runs::start_run` / `load` / `Runs::control`).
@@ -241,7 +256,7 @@ The MCP face of `/api/recipes` and `/api/runs`: the same server methods
 | `run_get` | `run_id` | A run's record |
 | `run_control` | `run_id`, `action` | Pause, resume or cancel (an error if it isn't executing) |
 
-### 4.10 Scheduler Tools (4)
+### 4.11 Scheduler Tools (4)
 
 | Tool | Parameters | Description |
 |---|---|---|
@@ -250,7 +265,7 @@ The MCP face of `/api/recipes` and `/api/runs`: the same server methods
 | `delete_schedule` | `id` | Delete schedule |
 | `enable_schedule` | `id`, `enabled` | Enable/disable schedule |
 
-### 4.11 Clipboard Tools (2)
+### 4.12 Clipboard Tools (2)
 
 | Tool | Parameters | Description |
 |---|---|---|

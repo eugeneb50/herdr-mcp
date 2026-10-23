@@ -81,6 +81,18 @@ sees it live in the TUI and web playground.
 Long recipes: start without `wait` and poll `run_get`, so your own tool
 call doesn't time out.
 
+## Calling APIs and models
+
+- `http_request` calls any HTTP API: `{"method": "POST", "url": "…",
+  "headers": {"Authorization": "Bearer {{token}}"}, "json": {…}}`. A
+  non-2xx status comes back as a result (`status`, `ok`); pass
+  `check: true` to make it fail the step instead.
+- `llm_call` asks a model: `{"model": "openai/gpt-4o-mini", "prompt":
+  "Summarise: {{read.output}}"}` goes to OpenRouter with
+  `OPENROUTER_API_KEY`; set `base_url` for OpenAI, Ollama
+  (`http://localhost:11434/v1`) or any OpenAI-compatible server. The
+  reply is `{{step.text}}`. `llm_models` lists model ids.
+
 ## Worked example: opencode relay
 
 Start opencode in a new workspace on a project, wait for it to finish
