@@ -45,7 +45,7 @@ impl HerdrEvent {
 /// gets `herdr` = the event's `data` plus `event` (so steps use
 /// `{{herdr.pane_id}}`, `{{herdr.pane.pane_id}}`, …) and runs in the event's
 /// workspace.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct RecipeTrigger {
     /// herdr subscription name, e.g. `pane.agent_status_changed`.
     pub on: String,

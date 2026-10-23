@@ -894,6 +894,77 @@ mod tests {
         assert!(done.results.is_empty());
     }
 
+    /// Call a tool the way a recipe step or MCP client does; its JSON payload.
+    async fn call(server: &HerdrMcpServer, tool: &str, args: Value) -> Result<Value, String> {
+        crate::server::dispatch_tool(server, tool, args)
+            .await
+            .map(|r| tool_payload(&serde_json::to_value(r).unwrap()))
+            .map_err(|(_, e)| e)
+    }
+
+    #[tokio::test]
+    async fn recipe_tools_save_run_and_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = test_server(dir.path());
+        let steps = serde_json::to_value(vec![var_set("a", "1", Vec::new())]).unwrap();
+        let saved = call(
+            &server,
+            "recipe_save",
+            serde_json::json!({ "name": "r", "steps": steps }),
+        )
+        .await
+        .unwrap();
+        let id = saved["id"].as_str().unwrap().to_string();
+
+        let renamed = call(
+            &server,
+            "recipe_save",
+            serde_json::json!({ "recipe_id": id, "name": "r2" }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(renamed["name"], "r2");
+        assert_eq!(renamed["steps"][0]["id"], "a");
+        let list = call(&server, "recipe_list", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert_eq!(list["recipes"][0]["steps"], serde_json::json!(["a"]));
+
+        let run = call(
+            &server,
+            "recipe_run",
+            serde_json::json!({ "recipe_id": id, "wait": true }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(run["status"], "completed");
+        let got = call(
+            &server,
+            "run_get",
+            serde_json::json!({ "run_id": run["id"] }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(got["status"], "completed");
+
+        let err = call(
+            &server,
+            "recipe_save",
+            serde_json::json!({ "name": "no steps" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("name and steps"), "{err}");
+        let err = call(
+            &server,
+            "run_control",
+            serde_json::json!({ "run_id": run["id"], "action": "cancel" }),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("not executing"), "{err}");
+    }
+
     #[tokio::test]
     async fn saved_recipe_runs_and_missing_recipe_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();

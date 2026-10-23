@@ -83,6 +83,15 @@ pub enum RunAction {
 }
 
 impl RunAction {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pause" => Some(Self::Pause),
+            "resume" => Some(Self::Resume),
+            "cancel" => Some(Self::Cancel),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Pause => "pause",

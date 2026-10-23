@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.2.0-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-245%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-247%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-6%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
@@ -21,7 +21,7 @@ MCP (Model Context Protocol) server written in Rust that exposes [herdr](https:/
   - [HTTP API](#http-api)
   - [Recipe format](#recipe-format)
   - [Environment](#environment)
-- [Tools (36)](#tools-36)
+- [Tools (43)](#tools-43)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
@@ -68,7 +68,7 @@ herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 ## Features
 
 - **MCP mode** — plug into any MCP client (Claude Desktop, Cursor, Claude Code, Continue, OpenCode) to control herdr workspaces, tabs, panes and agents
-- **36 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, recipe templates, scheduler and clipboard; `herdr_api` reaches every method the installed herdr exposes
+- **43 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, recipes and runs, recipe templates, scheduler and clipboard; `herdr_api` reaches every method the installed herdr exposes
 - **herdr plugin** — `herdr plugin install eugeneb50/herdr-mcp` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
 - **Recipe engine** — chain tool calls with variable interpolation (`{{ stepId.result.path }}`); runs are tracked (`/api/runs`) with per-step events, pause/resume/cancel
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
@@ -156,6 +156,7 @@ every `/api/*` shape is defined once.
 | Document | Description |
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full reference: data flow, tools, HTTP API, recipe engine, triggers, agent registry, persistence, scheduler, web UI, plugin, build/run, design decisions, gotchas |
+| [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md) | For agents using herdr-mcp: targeting panes, waiting, building and launching recipes, a worked opencode example |
 | [docs/SWARMS.md](docs/SWARMS.md) | Swarm / flow engine design (proposal) |
 | [AGENTS.md](AGENTS.md) | Instructions for AI coding assistants (conventions, risk tiers, workflow, anti-patterns) |
 | [CHANGES.md](CHANGES.md) | Notable changes |
@@ -361,7 +362,7 @@ All endpoints return JSON unless noted. Request/response types live in
 | `GET` / `PUT` | `/api/config`, `/api/config/clipboard` | Resolved config / set clipboard commands |
 | `GET` / `DELETE` | `/api/settings` | Every tunable (default, bounds, value) / reset all to defaults |
 | `PUT` / `DELETE` | `/api/settings/{key}` | Set one (400 with the reason if refused) / reset it to its default |
-| `GET` | `/api/tools` | All 36 tools with JSON schemas and categories |
+| `GET` | `/api/tools` | All 43 tools with JSON schemas and categories |
 | `POST` | `/api/tools/{name}` | Call a tool; body is its parameter object |
 | `GET` | `/api/agents?workspace_id=` | Live panes from the agent registry |
 | `GET` | `/api/workspaces` | Workspaces via herdr |
@@ -432,14 +433,16 @@ every `herdr` child process, so CLI calls and the event subscriber hit the same 
 
 ---
 
-## Tools (36)
+## Tools (43)
 
-Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-36-tools-total).
+Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-43-tools-total).
+Agents: [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md) shows how to combine them.
 
-### Discovery (6)
+### Discovery (7)
 | Tool | Description |
 |------|-------------|
 | `status` | herdr server status |
+| `list_sessions` | Named herdr sessions |
 | `list_workspaces` | List workspaces |
 | `list_tabs` | List tabs (optionally by workspace) |
 | `list_panes` | List panes (optionally by workspace) |
@@ -464,21 +467,30 @@ Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-
 | `pane_exec` | Run a command in a pane's shell, wait, return its output and exit code |
 | `herdr_api` | Call any herdr socket API method (`GET /api/herdr/schema` lists them) |
 
-### Synchronize (1)
+### Synchronize (2)
 | Tool | Description |
 |------|-------------|
-| `wait_output` | Wait for output in a pane |
+| `wait_output` | Wait for text anywhere in a pane (already there counts) |
+| `pane_watch` | Wait for NEW matching text in a pane; a recipe's next step runs when it fires |
 
 ### A2A primitives (7)
 | Tool | Description |
 |------|-------------|
-| `agent_spawn` | Start an agent from a profile in a new pane and register it under a role |
+| `agent_spawn` | Start an agent from a profile in a new pane (or `in_pane`) and register it under a role |
 | `agent_prompt` | Prompt an agent and wait for its reply |
 | `agent_interrupt` | Stop an agent's turn, or quit it |
 | `agent_message` | Send a message to an agent and submit it |
 | `agent_read` | Read an agent's output and store it as its work product |
 | `agent_wait` | Wait for an agent status (role, label or pane id) |
 | `agent_list` | List registry agents |
+
+### Recipes (6)
+| Tool | Description |
+|------|-------------|
+| `recipe_list` / `recipe_get` | Saved recipes / one recipe |
+| `recipe_save` | Create or update a recipe |
+| `recipe_run` | Run a saved recipe or ad-hoc steps (`wait` for the finished run) |
+| `run_get` / `run_control` | A run's record / pause, resume or cancel it |
 
 ### Variables (2) / Templates (3) / Scheduler (4) / Clipboard (2)
 | Tool | Description |

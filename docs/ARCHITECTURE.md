@@ -47,7 +47,7 @@ interpolation.
 │                        ▼                                     │
 │  ┌─────────────────────────────────────────────────────────┐ │
 │  │              HerdrMcpServer (server.rs)                  │ │
-│  │  - 36 tool definitions (discovery, lifecycle, read,     │ │
+│  │  - 43 tool definitions (discovery, lifecycle, read,     │ │
 │  │    write, synchronize, a2a, variables, templates,       │ │
 │  │    scheduler, clipboard)                                │ │
 │  │  - Recipe engine with {{ variable }} interpolation      │ │
@@ -149,7 +149,7 @@ herdr-mcp/
 
 ---
 
-## 4. MCP Tool Reference (36 tools total)
+## 4. MCP Tool Reference (43 tools total)
 
 ### 4.1 Discovery Tools (7)
 
@@ -193,17 +193,18 @@ engine, always acts on the server's own session.
 | `pane_exec` | `pane_id?`, `label?`, `command`, `timeout_ms?`, `lines?`, `check?` | Run in the pane's shell, wait, return `{exit_code, output}` |
 | `herdr_api` | `method`, `params?`, `timeout_ms?` | Any herdr socket API method; returns herdr's response |
 
-### 4.5 Synchronize Tools (1)
+### 4.5 Synchronize Tools (2)
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `wait_output` | `pane_id?`, `label?`, `match_text`, `timeout_ms?`, `source?`, `use_regex?` | Wait for text in pane |
+| `wait_output` | `pane_id?`, `label?`, `match_text`, `timeout_ms?`, `source?`, `use_regex?` | Wait for text in pane (herdr's `pane wait-output`: text already there matches) |
+| `pane_watch` | `pane_id?`, `label?`, `match_text`, `use_regex?`, `source?`, `timeout_ms?` | Poll the pane (500 ms, last 500 lines) and fire when the number of matching occurrences rises above what was there at the start; a drop (scrolled out, redrawn) lowers the bar. No timeout: until matched or the run is cancelled |
 
 ### 4.6 A2A Primitives (7)
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `agent_spawn` | `role`, `agent`, `args`, `cwd?`, `workspace_id?`, `tab_id?`, `split?`, `needs`, `wait_idle`, `label?` | Spawn agent, register role→pane, wait for deps, capture output |
+| `agent_spawn` | `role`, `agent`, `args`, `cwd?`, `workspace_id?`, `tab_id?`, `split?`, `needs`, `wait_idle`, `label?`, `in_pane?` | Spawn agent (in a new split, or in the existing `in_pane`), register role→pane, wait for deps, capture output |
 | `agent_prompt` | `target`, `text`, `timeout_ms?` | Prompt an agent and wait for its turn to finish; returns its reply |
 | `agent_interrupt` | `target`, `hard` | Stop the agent's turn (profile `interrupt` keys) or quit it (`hard`) |
 | `agent_message` | `target`, `text` | Send a message to an agent and submit it |
@@ -226,7 +227,21 @@ engine, always acts on the server's own session.
 | `get_template` | `template_id` | Get template by ID |
 | `instantiate_template` | `template_id`, `variables`, `name?` | Instantiate template → recipe, auto-save |
 
-### 4.9 Scheduler Tools (4)
+### 4.9 Recipe & Run Tools (6)
+
+The MCP face of `/api/recipes` and `/api/runs`: the same server methods
+(`create_recipe` / `update_recipe`, `runs::start_run` / `load` / `Runs::control`).
+
+| Tool | Parameters | Description |
+|---|---|---|
+| `recipe_list` | — | Saved recipes: id, name, description, category, step ids, trigger count |
+| `recipe_get` | `recipe_id` | One recipe |
+| `recipe_save` | `recipe_id?`, `name?`, `description?`, `steps?`, `variables?`, `triggers?`, `category?` | Create (no id: `name` + `steps`) or update the fields given |
+| `recipe_run` | `recipe_id?` or `steps?`, `name?`, `session_id?`, `variables`, `step_ids`, `wait` | Start a run; returns its first record, or the final one with `wait` |
+| `run_get` | `run_id` | A run's record |
+| `run_control` | `run_id`, `action` | Pause, resume or cancel (an error if it isn't executing) |
+
+### 4.10 Scheduler Tools (4)
 
 | Tool | Parameters | Description |
 |---|---|---|
@@ -235,7 +250,7 @@ engine, always acts on the server's own session.
 | `delete_schedule` | `id` | Delete schedule |
 | `enable_schedule` | `id`, `enabled` | Enable/disable schedule |
 
-### 4.10 Clipboard Tools (2)
+### 4.11 Clipboard Tools (2)
 
 | Tool | Parameters | Description |
 |---|---|---|

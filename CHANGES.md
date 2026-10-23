@@ -4,6 +4,16 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Agents can launch and follow recipes.** New MCP tools `recipe_list`,
+  `recipe_get`, `recipe_save`, `recipe_run` (optionally waiting for the
+  finished run), `run_get` and `run_control` expose what `/api/recipes`
+  and `/api/runs` already did. `pane_watch` waits for *new* matching text
+  in a pane (text already there, like the marker in a prompt just sent,
+  doesn't count), so a recipe step can wait for an agent's reply before the
+  next sends more. `agent_spawn` takes `in_pane` to start the agent in an
+  existing pane, such as a new workspace's first one. The recipe step and
+  trigger types now carry JSON schemas, and `docs/AGENT-GUIDE.md` (with
+  `examples/opencode-relay.json`) shows agents how to use all of it.
 - **Settings: one place for every knob (breaking).** Keybindings, timeouts,
   limits and intervals live in one registry (`herdr_mcp_api::settings`),
   stored as `[settings.<section>]` tables in the config file and edited
