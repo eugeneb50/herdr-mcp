@@ -269,8 +269,6 @@ pub struct App {
     /// Tunables and keybindings in effect (`GET /api/settings`; the
     /// built-in defaults until the bridge answers).
     pub knobs: herdr_mcp_api::Settings,
-    /// The last `GET /api/settings`, for the Settings tab.
-    pub settings_info: Option<herdr_mcp_api::SettingsResponse>,
     /// The tool call or recipe run in flight, if any.
     pub(crate) job: Option<tabs::playground::Job>,
     pub http: Option<ApiClient>,
@@ -605,7 +603,6 @@ impl App {
         Self {
             opts,
             knobs,
-            settings_info: None,
             job: None,
             http,
             tab: Tab::Send,
@@ -799,7 +796,6 @@ impl App {
     pub fn apply_settings(&mut self, response: herdr_mcp_api::SettingsResponse) {
         let timeout = self.knobs.duration(settings::TUI_REQUEST_MS);
         self.knobs = response.overrides();
-        self.settings_info = Some(response);
         let next = self.knobs.duration(settings::TUI_REQUEST_MS);
         if next != timeout
             && self.http.is_some()

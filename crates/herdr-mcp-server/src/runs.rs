@@ -10,7 +10,7 @@
 //! a terminal event and without a live run reads as `interrupted`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
 use chrono::{DateTime, Utc};
@@ -69,7 +69,7 @@ impl Default for Runs {
 
 impl Runs {
     fn live(&self) -> std::sync::MutexGuard<'_, HashMap<Uuid, watch::Sender<Control>>> {
-        self.live.lock().unwrap_or_else(PoisonError::into_inner)
+        crate::lock(&self.live)
     }
 
     pub fn is_live(&self, id: Uuid) -> bool {
