@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
 use crate::persistence::Persistence;
@@ -81,11 +81,7 @@ impl Scheduler {
     /// disabled (so it is reported once, not on every pass).
     pub async fn sync(&self) -> anyhow::Result<()> {
         for mut schedule in self.inner.persistence.list_schedules().await? {
-            let running = self
-                .inner
-                .runners
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
+            let running = crate::lock(&self.inner.runners)
                 .get(&schedule.id)
                 .is_some_and(|h| !h.is_finished());
             if running || !schedule.enabled {
@@ -112,26 +108,14 @@ impl Scheduler {
     fn spawn_runner(&self, id: Uuid) {
         let inner = Arc::clone(&self.inner);
         let handle = tokio::spawn(async move { inner.run_schedule(id).await });
-        if let Some(old) = self
-            .inner
-            .runners
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, handle)
-        {
+        if let Some(old) = crate::lock(&self.inner.runners).insert(id, handle) {
             old.abort();
         }
     }
 
     pub async fn remove(&self, id: Uuid) -> anyhow::Result<bool> {
         let removed = self.inner.persistence.delete_schedule(&id).await?;
-        if let Some(handle) = self
-            .inner
-            .runners
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&id)
-        {
+        if let Some(handle) = crate::lock(&self.inner.runners).remove(&id) {
             handle.abort();
         }
         Ok(removed)
@@ -196,12 +180,7 @@ impl SchedulerInner {
                 tracing::warn!("schedule {id}: no executor set; skipping tick");
                 continue;
             };
-            if !self
-                .in_flight
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(sched.recipe_id)
-            {
+            if !crate::lock(&self.in_flight).insert(sched.recipe_id) {
                 tracing::debug!(
                     "schedule {id}: recipe {} still running; skipping tick",
                     sched.recipe_id
@@ -229,10 +208,7 @@ struct InFlight<'a>(&'a Mutex<HashSet<Uuid>>, Uuid);
 
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.1);
+        crate::lock(self.0).remove(&self.1);
     }
 }
 

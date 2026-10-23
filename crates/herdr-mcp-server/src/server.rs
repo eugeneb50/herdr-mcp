@@ -467,21 +467,18 @@ impl HerdrMcpServer {
 
     /// Snapshot of the clipboard commands in effect right now.
     pub fn clipboard_config(&self) -> herdr_mcp_core::ClipboardConfig {
-        self.clipboard
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        crate::read(&self.clipboard).clone()
     }
 
-    /// Save clipboard commands to the config file at `path` (`None`: the
+    /// Save clipboard commands to the config file (`None`: the
     /// built-in OS clipboard) and apply them to the running server. The file
     /// is written first, so a failed write leaves the live config unchanged.
     pub async fn save_clipboard_config(
         &self,
-        path: std::path::PathBuf,
         commands: Option<(String, String)>,
     ) -> anyhow::Result<()> {
         let _edit = self.config_edit.lock().await;
+        let path = self.config_path.clone();
         let saved = commands.clone();
         tokio::task::spawn_blocking(move || {
             let commands = saved.as_ref().map(|(c, p)| (c.as_str(), p.as_str()));
@@ -489,10 +486,7 @@ impl HerdrMcpServer {
         })
         .await??;
         let (copy_command, paste_command) = commands.unzip();
-        *self
-            .clipboard
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = herdr_mcp_core::ClipboardConfig {
+        *crate::write(&self.clipboard) = herdr_mcp_core::ClipboardConfig {
             copy_command,
             paste_command,
         };
@@ -501,10 +495,7 @@ impl HerdrMcpServer {
 
     /// The tunables in effect right now.
     pub fn settings(&self) -> herdr_mcp_api::Settings {
-        self.settings
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        crate::read(&self.settings).clone()
     }
 
     /// A millisecond setting as a herdr `--timeout` / `timeout_ms` value.
@@ -513,15 +504,15 @@ impl HerdrMcpServer {
     }
 
     /// Validate `value` for setting `key` (`None`: back to its default),
-    /// write it to the config file at `path`, then apply it. `Ok(Err)` is a
+    /// write it to the config file, then apply it. `Ok(Err)` is a
     /// value the caller must fix; nothing is written then.
     pub async fn save_setting(
         &self,
-        path: std::path::PathBuf,
         key: String,
         value: Option<herdr_mcp_api::settings::Value>,
     ) -> anyhow::Result<Result<(), String>> {
         let _edit = self.config_edit.lock().await;
+        let path = self.config_path.clone();
         let mut next = self.settings();
         let stored = match value {
             Some(v) => match next.set(&key, v) {
@@ -535,24 +526,17 @@ impl HerdrMcpServer {
             herdr_mcp_core::set_setting_in_file(&path, &key, stored.as_ref())
         })
         .await??;
-        *self
-            .settings
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+        *crate::write(&self.settings) = next;
         Ok(Ok(()))
     }
 
-    /// Every setting back to its default, in the config file at `path` and
-    /// live.
-    pub async fn reset_settings(&self, path: std::path::PathBuf) -> anyhow::Result<()> {
+    /// Every setting back to its default, in the config file and live.
+    pub async fn reset_settings(&self) -> anyhow::Result<()> {
         let _edit = self.config_edit.lock().await;
+        let path = self.config_path.clone();
         tokio::task::spawn_blocking(move || herdr_mcp_core::reset_settings_in_file(&path))
             .await??;
-        *self
-            .settings
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            herdr_mcp_api::Settings::default();
+        *crate::write(&self.settings) = herdr_mcp_api::Settings::default();
         Ok(())
     }
 
@@ -2120,7 +2104,7 @@ async fn write_setting(
     value: Option<settings::Value>,
 ) -> Result<Json<herdr_mcp_api::SettingsResponse>, (StatusCode, String)> {
     server
-        .save_setting(server.config_path.clone(), key, value)
+        .save_setting(key, value)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?
         .map_err(bad_request)?;
@@ -2133,7 +2117,7 @@ async fn reset_settings_handler(
     State(AppState { server, .. }): State<AppState>,
 ) -> Result<Json<herdr_mcp_api::SettingsResponse>, (StatusCode, String)> {
     server
-        .reset_settings(server.config_path.clone())
+        .reset_settings()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
     Ok(Json(settings_response(&server)))
@@ -2162,7 +2146,7 @@ async fn set_clipboard_config_handler(
         }
     };
     server
-        .save_clipboard_config(server.config_path.clone(), commands)
+        .save_clipboard_config(commands)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?;
     Ok(Json(config_response(&server)))
@@ -3245,21 +3229,14 @@ mod tests {
     #[tokio::test]
     async fn concurrent_setting_saves_keep_both() {
         use herdr_mcp_api::settings::{PANE_EXEC_MS, TUI_REFRESH_MS, Value};
-        let server = clipboard_test_server();
+        let mut server = clipboard_test_server();
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("herdr-mcp.toml");
+        server.config_path = path.clone();
         for _ in 0..20 {
             let (a, b) = tokio::join!(
-                server.save_setting(
-                    path.clone(),
-                    PANE_EXEC_MS.into(),
-                    Some(Value::Number(5_000))
-                ),
-                server.save_setting(
-                    path.clone(),
-                    TUI_REFRESH_MS.into(),
-                    Some(Value::Number(1_000))
-                ),
+                server.save_setting(PANE_EXEC_MS.into(), Some(Value::Number(5_000))),
+                server.save_setting(TUI_REFRESH_MS.into(), Some(Value::Number(1_000))),
             );
             a.unwrap().unwrap();
             b.unwrap().unwrap();
@@ -3269,19 +3246,20 @@ mod tests {
             let file: herdr_mcp_core::Config =
                 toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             assert_eq!(file.settings().0, live);
-            server.reset_settings(path.clone()).await.unwrap();
+            server.reset_settings().await.unwrap();
         }
     }
 
     #[tokio::test]
     async fn save_clipboard_config_writes_file_and_applies_live() {
-        let server = clipboard_test_server();
+        let mut server = clipboard_test_server();
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("herdr-mcp.toml");
+        server.config_path = path.clone();
         std::fs::write(&path, "# keep me\n[http]\nport = 1\n").unwrap();
 
         server
-            .save_clipboard_config(path.clone(), Some(("wl-copy".into(), "wl-paste".into())))
+            .save_clipboard_config(Some(("wl-copy".into(), "wl-paste".into())))
             .await
             .unwrap();
 
@@ -3295,7 +3273,7 @@ mod tests {
         std::fs::write(&path, "[http\n").unwrap();
         assert!(
             server
-                .save_clipboard_config(path.clone(), Some(("a".into(), "b".into())))
+                .save_clipboard_config(Some(("a".into(), "b".into())))
                 .await
                 .is_err()
         );
@@ -3308,10 +3286,7 @@ mod tests {
             "[clipboard]\ncopy-command = \"a\"\npaste-command = \"b\"\n",
         )
         .unwrap();
-        server
-            .save_clipboard_config(path.clone(), None)
-            .await
-            .unwrap();
+        server.save_clipboard_config(None).await.unwrap();
         assert_eq!(server.clipboard_config().commands(), None);
         assert!(
             !std::fs::read_to_string(&path)

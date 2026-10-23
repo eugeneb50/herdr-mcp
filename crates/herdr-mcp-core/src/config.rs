@@ -423,8 +423,6 @@ fn edit_config_file(
     path: &std::path::Path,
     edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>,
 ) -> Result<()> {
-    use std::io::Write;
-
     let content = if path.exists() {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?
     } else {
@@ -444,19 +442,32 @@ fn edit_config_file(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
-    // Write a sibling temp file and rename it over the config, so a crash
-    // mid-write can't leave the user's hand-edited config truncated.
-    let tmp = path.with_extension(format!("toml.tmp-{}", std::process::id()));
+    // Atomic, so a crash mid-write can't leave the user's hand-edited
+    // config truncated.
+    write_atomic(path, out.as_bytes()).with_context(|| format!("writing {}", path.display()))
+}
+
+/// Replace `path` with `data` atomically: write a sibling temp file, sync
+/// it, then rename it over `path`. A crash or a concurrent save leaves the
+/// old file or the new one, never a truncated mix. The temp name ends in
+/// `.tmp-<pid>-<n>` (unique per call), so loaders that read `*.json` /
+/// `*.toml` never see it.
+pub fn write_atomic(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
     let written = (|| {
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(out.as_bytes())?;
+        f.write_all(data)?;
         f.sync_all()?;
         std::fs::rename(&tmp, path)
     })();
     if written.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
-    written.with_context(|| format!("writing {}", path.display()))
+    written
 }
 
 #[cfg(test)]

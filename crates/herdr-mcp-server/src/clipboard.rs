@@ -3,7 +3,7 @@
 //! through arboard (macOS, Windows, X11, and Wayland compositors with the
 //! data-control protocol, falling back to XWayland).
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
 use herdr_mcp_core::ClipboardConfig;
@@ -17,7 +17,7 @@ static NATIVE: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
 /// Drop the OS clipboard handle so copied text outlives the process. Blocks
 /// while arboard hands it over; call once, on the way out.
 pub fn release() {
-    drop(NATIVE.lock().unwrap_or_else(PoisonError::into_inner).take());
+    drop(crate::lock(&NATIVE).take());
 }
 
 /// Write `text` to the clipboard.
@@ -46,7 +46,7 @@ pub async fn get(cfg: &ClipboardConfig) -> Result<String> {
 
 /// Run `f` on the process's clipboard handle (blocking: call off the runtime).
 fn native<T>(f: impl FnOnce(&mut arboard::Clipboard) -> Result<T, arboard::Error>) -> Result<T> {
-    let mut slot = NATIVE.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut slot = crate::lock(&NATIVE);
     let cb = match slot.take() {
         Some(cb) => cb,
         None => arboard::Clipboard::new()

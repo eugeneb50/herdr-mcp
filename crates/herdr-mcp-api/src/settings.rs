@@ -133,14 +133,8 @@ const fn count(
     max: u64,
 ) -> Spec {
     Spec {
-        key,
-        label,
-        help,
         kind: Kind::Count,
-        default: DefaultValue::Number(d),
-        min,
-        max,
-        restart: false,
+        ..ms(key, label, help, d, min, max)
     }
 }
 

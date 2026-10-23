@@ -21,28 +21,15 @@ pub struct SessionVars {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Replace `path` with `data` atomically: write a sibling temp file, sync
-/// it, then rename it over `path`. A crash or a concurrent save leaves the
-/// old file or the new one, never a truncated mix. The temp name ends in
-/// `.tmp-<uuid>`, so loaders that read `*.json` / `*.toml` never see it.
+/// [`herdr_mcp_core::write_atomic`] off the async runtime.
 pub(crate) async fn write_atomic(
     path: impl AsRef<std::path::Path>,
     data: impl AsRef<[u8]>,
 ) -> std::io::Result<()> {
-    use tokio::io::AsyncWriteExt;
-    let path = path.as_ref();
-    let tmp = path.with_extension(format!("tmp-{}", Uuid::new_v4().simple()));
-    let written = async {
-        let mut f = fs::File::create(&tmp).await?;
-        f.write_all(data.as_ref()).await?;
-        f.sync_all().await?;
-        fs::rename(&tmp, path).await
-    }
-    .await;
-    if written.is_err() {
-        let _ = fs::remove_file(&tmp).await;
-    }
-    written
+    let (path, data) = (path.as_ref().to_path_buf(), data.as_ref().to_vec());
+    tokio::task::spawn_blocking(move || herdr_mcp_core::write_atomic(&path, &data))
+        .await
+        .map_err(std::io::Error::other)?
 }
 
 /// Validate a caller-supplied name (variable key, workspace id, blob name)
