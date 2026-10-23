@@ -433,6 +433,10 @@ pub struct HerdrMcpServer {
     pub settings_warnings: std::sync::Arc<Vec<String>>,
     /// The config file Settings saves write to (resolved at startup).
     pub config_path: std::path::PathBuf,
+    /// Held across each config-file edit and the live update after it, so
+    /// concurrent saves neither share a temp file nor apply a stale
+    /// snapshot over each other.
+    config_edit: std::sync::Arc<tokio::sync::Mutex<()>>,
     /// The herdr event subscriber client (for status reporting), once
     /// attached. Shared by every clone, including the scheduler's.
     pub herdr_client: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<HerdrClient>>>,
@@ -477,6 +481,7 @@ impl HerdrMcpServer {
         path: std::path::PathBuf,
         commands: Option<(String, String)>,
     ) -> anyhow::Result<()> {
+        let _edit = self.config_edit.lock().await;
         let saved = commands.clone();
         tokio::task::spawn_blocking(move || {
             let commands = saved.as_ref().map(|(c, p)| (c.as_str(), p.as_str()));
@@ -516,6 +521,7 @@ impl HerdrMcpServer {
         key: String,
         value: Option<herdr_mcp_api::settings::Value>,
     ) -> anyhow::Result<Result<(), String>> {
+        let _edit = self.config_edit.lock().await;
         let mut next = self.settings();
         let stored = match value {
             Some(v) => match next.set(&key, v) {
@@ -539,6 +545,7 @@ impl HerdrMcpServer {
     /// Every setting back to its default, in the config file at `path` and
     /// live.
     pub async fn reset_settings(&self, path: std::path::PathBuf) -> anyhow::Result<()> {
+        let _edit = self.config_edit.lock().await;
         tokio::task::spawn_blocking(move || herdr_mcp_core::reset_settings_in_file(&path))
             .await??;
         *self
@@ -571,6 +578,7 @@ impl HerdrMcpServer {
             settings: std::sync::Arc::new(std::sync::RwLock::new(settings)),
             settings_warnings: std::sync::Arc::new(warnings),
             config_path: herdr_mcp_core::config_file_or_default(),
+            config_edit: std::sync::Arc::default(),
             herdr_client: std::sync::Arc::default(),
             runs: crate::runs::Runs::default(),
             tool_session: ToolSession::default(),
@@ -3230,6 +3238,39 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    /// Two saves at once (two rows, or the web UI and the TUI) both land,
+    /// live and in the file.
+    #[tokio::test]
+    async fn concurrent_setting_saves_keep_both() {
+        use herdr_mcp_api::settings::{PANE_EXEC_MS, TUI_REFRESH_MS, Value};
+        let server = clipboard_test_server();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("herdr-mcp.toml");
+        for _ in 0..20 {
+            let (a, b) = tokio::join!(
+                server.save_setting(
+                    path.clone(),
+                    PANE_EXEC_MS.into(),
+                    Some(Value::Number(5_000))
+                ),
+                server.save_setting(
+                    path.clone(),
+                    TUI_REFRESH_MS.into(),
+                    Some(Value::Number(1_000))
+                ),
+            );
+            a.unwrap().unwrap();
+            b.unwrap().unwrap();
+            let live = server.settings();
+            assert_eq!(live.number(PANE_EXEC_MS), 5_000);
+            assert_eq!(live.number(TUI_REFRESH_MS), 1_000);
+            let file: herdr_mcp_core::Config =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(file.settings().0, live);
+            server.reset_settings(path.clone()).await.unwrap();
+        }
     }
 
     #[tokio::test]

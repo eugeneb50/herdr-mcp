@@ -19,6 +19,15 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   `[herdr] reconnect-attempts` / `reconnect-backoff-ms` moved to
   `[settings.limits] reconnect-attempts` / `[settings.intervals]
   reconnect-backoff-ms`; the old keys now fail to load.
+- **Fixes (settings, collections).** A key rebinding the API accepted
+  (say `alt+right` moved from next-tab to the Send tab) no longer drops
+  back to its default on restart because of the order the keys sort in
+  the file. Two settings or clipboard saves at once no longer fail with
+  "No such file or directory" or undo each other live. A chord with
+  Shift on a non-letter (`alt+shift+]`) is refused: terminals send the
+  shifted character, so it could never fire. The web Collections view
+  reloads after Send, so saving the collection right after a request no
+  longer wipes the variables that request extracted.
 - **One binary.** `herdr-trim` is gone; `herdr-mcp` is the only binary, and
   the release archives, `scripts/install.sh` and the plugin ship just it.
   Remove a stale `herdr-trim` from an earlier install by hand.

@@ -504,13 +504,44 @@ impl Settings {
     ) -> (Self, Vec<String>) {
         let mut out = Self::default();
         let mut warnings = Vec::new();
+        let mut drop = |key: &str, e: String| {
+            warnings.push(format!("settings: {key}: {e}; using the default"));
+        };
         for (section, entries) in tables {
             for (name, raw) in entries {
                 let key = format!("{section}.{name}");
-                let parsed = serde_json::from_value::<Value>(raw.clone())
-                    .map_err(|_| format!("expected a number or a list of keys, got {raw}"));
-                if let Err(e) = parsed.and_then(|v| out.set(&key, v)) {
-                    warnings.push(format!("settings: {key}: {e}; using the default"));
+                match serde_json::from_value::<Value>(raw.clone()) {
+                    Ok(v) => {
+                        out.0.insert(key, v);
+                    }
+                    Err(_) => drop(
+                        &key,
+                        format!("expected a number or a list of keys, got {raw}"),
+                    ),
+                }
+            }
+        }
+        // Check each override against all the others, not just the ones
+        // before it, so a rebinding the API accepted loads whatever order
+        // the keys sort in. Dropping one can free or retake a chord, so
+        // recheck until every one passes.
+        loop {
+            let checked: Result<BTreeMap<String, Value>, (String, String)> = out
+                .0
+                .iter()
+                .map(|(k, v)| match out.check(k, v.clone()) {
+                    Ok(v) => Ok((k.clone(), v)),
+                    Err(e) => Err((k.clone(), e)),
+                })
+                .collect();
+            match checked {
+                Ok(all) => {
+                    out.0 = all;
+                    break;
+                }
+                Err((key, e)) => {
+                    out.0.remove(&key);
+                    drop(&key, e);
                 }
             }
         }
@@ -608,6 +639,13 @@ impl Settings {
             let name = chord.to_string();
             if chord.types_text() {
                 return Err(format!("{name}: plain keys type text; add ctrl or alt"));
+            }
+            // Terminals report the shifted character itself (`}`, not
+            // shift+`]`), so the TUI never sees Shift on a non-letter.
+            if chord.shift && matches!(chord.key, Key::Char(c) if !c.is_ascii_alphabetic()) {
+                return Err(format!(
+                    "{name}: never fires; write the shifted character instead (alt+}} for alt+shift+])"
+                ));
             }
             if RESERVED.contains(&name.as_str()) && !own_default.contains(&name) {
                 return Err(format!("{name}: a tab already uses it"));
@@ -793,6 +831,15 @@ mod tests {
                 .contains("previous tab")
         );
         assert!(s.set("keys.tab-next", keys(&[])).is_err());
+        for dead in ["alt+shift+]", "ctrl+shift+space", "alt+shift+1"] {
+            assert!(
+                s.set("keys.tab-next", keys(&[dead]))
+                    .unwrap_err()
+                    .contains("never fires"),
+                "{dead}"
+            );
+        }
+        assert!(s.set("keys.tab-next", keys(&["alt+shift+n"])).is_ok());
         // Own default may be reserved; a free chord is fine and normalized.
         assert!(s.set("keys.refresh", keys(&["ctrl+r"])).is_ok());
         s.set("keys.tab-next", keys(&["Alt+]", "f6", "alt+]"]))
@@ -802,6 +849,25 @@ mod tests {
         assert_eq!(s.action_for(&f6), Some("tab-next"));
         // The default chord is free again once overridden.
         assert_eq!(s.action_for(&Chord::parse("alt+right").unwrap()), None);
+    }
+
+    /// A rebinding the API accepted loads back from the file whatever
+    /// order its keys sort in: `tab-1` takes `alt+right` after `tab-next`
+    /// gave it up, and `tab-1` sorts first.
+    #[test]
+    fn file_overrides_load_in_any_order() {
+        let keys = |k: &[&str]| Value::Keys(k.iter().map(|s| (*s).to_string()).collect());
+        let mut live = Settings::default();
+        live.set("keys.tab-next", keys(&["alt+n"])).unwrap();
+        live.set("keys.tab-1", keys(&["alt+right"])).unwrap();
+        let file: BTreeMap<String, BTreeMap<String, serde_json::Value>> =
+            serde_json::from_value(serde_json::json!({
+                "keys": {"tab-1": ["alt+right"], "tab-next": ["alt+n"]},
+            }))
+            .unwrap();
+        let (loaded, warnings) = Settings::from_file(&file);
+        assert_eq!(warnings, Vec::<String>::new());
+        assert_eq!(loaded, live);
     }
 
     #[test]
