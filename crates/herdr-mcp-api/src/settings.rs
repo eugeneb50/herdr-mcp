@@ -180,6 +180,7 @@ pub const RECONNECT_ATTEMPTS: &str = "limits.reconnect-attempts";
 pub const WATCHER_POLL_MS: &str = "intervals.watcher-poll-ms";
 pub const RECONNECT_BACKOFF_MS: &str = "intervals.reconnect-backoff-ms";
 pub const TUI_REFRESH_MS: &str = "intervals.tui-refresh-ms";
+pub const TUI_PANE_MS: &str = "intervals.tui-pane-ms";
 
 /// Every setting, in display order.
 pub const SPECS: &[Spec] = &[
@@ -285,6 +286,14 @@ pub const SPECS: &[Spec] = &[
         "How often the TUI re-reads tools, variables and recipes from the bridge.",
         3_000,
         500,
+        600_000,
+    ),
+    ms(
+        TUI_PANE_MS,
+        "TUI pane view interval",
+        "How often the TUI's Overview re-reads the picked pane's text.",
+        1_000,
+        250,
         600_000,
     ),
     keys(
@@ -751,6 +760,7 @@ mod tests {
             WATCHER_POLL_MS,
             RECONNECT_BACKOFF_MS,
             TUI_REFRESH_MS,
+            TUI_PANE_MS,
         ] {
             assert!(spec(key).is_some(), "{key}");
         }

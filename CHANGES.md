@@ -28,6 +28,15 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   shifted character, so it could never fire. The web Collections view
   reloads after Send, so saving the collection right after a request no
   longer wipes the variables that request extracted.
+- **TUI Overview shows the picked pane's text.** Like a web deck card:
+  the pane picked in the table (arrows or a click) is shown below it,
+  re-read every `intervals.tui-pane-ms` (1s), screen or scrollback (`r`).
+  Drag with the mouse to select (reading pauses while a selection is up),
+  then Ctrl+C or right-click Copy; with nothing selected, Copy takes the
+  whole text. Tab moves focus between the table and the text (arrows,
+  PgUp/PgDn, Home/End scroll it; End follows new output). Clicking a
+  table row now picks that row: it picked the one below it (the header
+  wasn't counted) and ignored the table's scroll.
 - **One binary.** `herdr-trim` is gone; `herdr-mcp` is the only binary, and
   the release archives, `scripts/install.sh` and the plugin ship just it.
   Remove a stale `herdr-trim` from an earlier install by hand.
