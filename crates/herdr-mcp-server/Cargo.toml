@@ -18,6 +18,7 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 chrono = { workspace = true, features = ["serde"] }
 cron = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true }
 toml = { workspace = true }
 
 herdr-mcp-api = { path = "../herdr-mcp-api" }
@@ -28,7 +29,6 @@ arboard = { version = "=3.6.1", default-features = false, features = ["wayland-d
 tokio = { workspace = true, features = ["full", "test-util"] }
 tempfile = { workspace = true }
 pretty_assertions = { workspace = true }
-reqwest = { workspace = true }
 
 [lints]
 workspace = true

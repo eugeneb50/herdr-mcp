@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.2.0-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-247%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-254%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-6%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
@@ -21,7 +21,7 @@ MCP (Model Context Protocol) server written in Rust that exposes [herdr](https:/
   - [HTTP API](#http-api)
   - [Recipe format](#recipe-format)
   - [Environment](#environment)
-- [Tools (43)](#tools-43)
+- [Tools (46)](#tools-46)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
@@ -68,7 +68,7 @@ herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 ## Features
 
 - **MCP mode** — plug into any MCP client (Claude Desktop, Cursor, Claude Code, Continue, OpenCode) to control herdr workspaces, tabs, panes and agents
-- **43 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, session variables, recipes and runs, recipe templates, scheduler and clipboard; `herdr_api` reaches every method the installed herdr exposes
+- **46 tools** — discovery, lifecycle, read, write, synchronize, a2a primitives, HTTP and LLM calls, session variables, recipes and runs, recipe templates, scheduler and clipboard; `herdr_api` reaches every method the installed herdr exposes
 - **herdr plugin** — `herdr plugin install eugeneb50/herdr-mcp` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
 - **Recipe engine** — chain tool calls with variable interpolation (`{{ stepId.result.path }}`); runs are tracked (`/api/runs`) with per-step events, pause/resume/cancel
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
@@ -238,7 +238,7 @@ tab-next = ["alt+right", "ctrl+tab"]
 
 | Section | Keys |
 |---|---|
-| `timeouts` | `pane-exec-ms`, `herdr-api-ms`, `agent-wait-ms`, `agent-prompt-ms`, `agent-start-ms`, `tui-request-ms` |
+| `timeouts` | `pane-exec-ms`, `herdr-api-ms`, `agent-wait-ms`, `agent-prompt-ms`, `agent-start-ms`, `tui-request-ms`, `http-request-ms`, `llm-call-ms` |
 | `limits` | `pane-exec-lines`, `reply-fallback-lines`, `watcher-give-up`, `reconnect-attempts` |
 | `intervals` | `watcher-poll-ms`, `reconnect-backoff-ms`, `tui-refresh-ms`, `tui-pane-ms` |
 | `keys` (TUI) | `tab-next`, `tab-prev`, `tab-1`…`tab-5`, `refresh`, `quit` |
@@ -362,7 +362,7 @@ All endpoints return JSON unless noted. Request/response types live in
 | `GET` / `PUT` | `/api/config`, `/api/config/clipboard` | Resolved config / set clipboard commands |
 | `GET` / `DELETE` | `/api/settings` | Every tunable (default, bounds, value) / reset all to defaults |
 | `PUT` / `DELETE` | `/api/settings/{key}` | Set one (400 with the reason if refused) / reset it to its default |
-| `GET` | `/api/tools` | All 43 tools with JSON schemas and categories |
+| `GET` | `/api/tools` | All 46 tools with JSON schemas and categories |
 | `POST` | `/api/tools/{name}` | Call a tool; body is its parameter object |
 | `GET` | `/api/agents?workspace_id=` | Live panes from the agent registry |
 | `GET` | `/api/workspaces` | Workspaces via herdr |
@@ -433,9 +433,9 @@ every `herdr` child process, so CLI calls and the event subscriber hit the same 
 
 ---
 
-## Tools (43)
+## Tools (46)
 
-Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-43-tools-total).
+Full parameter reference: [docs/ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-46-tools-total).
 Agents: [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md) shows how to combine them.
 
 ### Discovery (7)
@@ -483,6 +483,16 @@ Agents: [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md) shows how to combine them.
 | `agent_read` | Read an agent's output and store it as its work product |
 | `agent_wait` | Wait for an agent status (role, label or pane id) |
 | `agent_list` | List registry agents |
+
+### HTTP (1) / LLM (2)
+| Tool | Description |
+|------|-------------|
+| `http_request` | Any HTTP request (method, URL, query, headers, text or JSON body); returns status, headers and body |
+| `llm_call` | An OpenAI-compatible chat call: OpenRouter by default, or OpenAI, Ollama, LM Studio, any `base_url`; key from `api_key` or an env var |
+| `llm_models` | The models such an API offers |
+
+In the web playground, **+ HTTP** opens an endpoint builder and **+ LLM** a
+provider → model → prompt wizard; both edit the same request a plain form does.
 
 ### Recipes (6)
 | Tool | Description |

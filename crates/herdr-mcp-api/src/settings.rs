@@ -167,6 +167,8 @@ pub const AGENT_WAIT_MS: &str = "timeouts.agent-wait-ms";
 pub const AGENT_PROMPT_MS: &str = "timeouts.agent-prompt-ms";
 pub const AGENT_START_MS: &str = "timeouts.agent-start-ms";
 pub const TUI_REQUEST_MS: &str = "timeouts.tui-request-ms";
+pub const HTTP_REQUEST_MS: &str = "timeouts.http-request-ms";
+pub const LLM_CALL_MS: &str = "timeouts.llm-call-ms";
 pub const PANE_EXEC_LINES: &str = "limits.pane-exec-lines";
 pub const REPLY_FALLBACK_LINES: &str = "limits.reply-fallback-lines";
 pub const WATCHER_GIVE_UP: &str = "limits.watcher-give-up";
@@ -225,6 +227,22 @@ pub const SPECS: &[Spec] = &[
         30_000,
         1_000,
         600_000,
+    ),
+    ms(
+        HTTP_REQUEST_MS,
+        "http_request timeout",
+        "How long http_request waits for the response when the call passes no timeout_ms.",
+        30_000,
+        1_000,
+        600_000,
+    ),
+    ms(
+        LLM_CALL_MS,
+        "llm_call timeout",
+        "How long llm_call (and llm_models) wait for the model's answer when the call passes no timeout_ms.",
+        180_000,
+        1_000,
+        1_800_000,
     ),
     count(
         PANE_EXEC_LINES,
@@ -747,6 +765,8 @@ mod tests {
             AGENT_PROMPT_MS,
             AGENT_START_MS,
             TUI_REQUEST_MS,
+            HTTP_REQUEST_MS,
+            LLM_CALL_MS,
             PANE_EXEC_LINES,
             REPLY_FALLBACK_LINES,
             WATCHER_GIVE_UP,

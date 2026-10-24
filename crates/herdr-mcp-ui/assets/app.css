@@ -323,3 +323,10 @@ select.input { appearance: auto; }
 .tree > summary .tree-name { font-weight: 600; }
 .tree-tab { margin-left: 1.25rem; }
 .tree-tab .table { margin-bottom: 0.75rem; }
+.endpoint-row { display: grid; grid-template-columns: 7rem 1fr; gap: 0.5rem; margin-bottom: 0.5rem; }
+.body-modes, .wizard-steps { margin: 0 0 0.5rem; }
+.provider-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: 0.5rem; margin-bottom: 0.5rem; }
+.provider { text-align: left; background: rgba(23,23,23,0.4); border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem; color: var(--text); cursor: pointer; }
+.provider:hover { border-color: rgba(52, 211, 153, 0.4); }
+.provider-sel { border-color: var(--accent); background: rgba(52, 211, 153, 0.08); }
+.provider-name { font-weight: 600; font-size: 0.85rem; margin-bottom: 0.2rem; }

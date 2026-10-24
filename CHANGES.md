@@ -4,6 +4,14 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **HTTP and LLM requests.** `http_request` sends any HTTP request (text
+  or JSON body, headers, query; `check` fails on non-2xx). `llm_call` calls
+  an OpenAI-compatible chat API, OpenRouter by default (OpenAI, Ollama, LM
+  Studio or any `base_url`), with the key from `api_key` (a `{{variable}}`)
+  or an environment variable; `llm_models` lists the models. In the web
+  playground, **+ HTTP** opens an endpoint builder and **+ LLM** a provider
+  → model → prompt wizard. New settings `timeouts.http-request-ms` and
+  `timeouts.llm-call-ms`.
 - **Agents can launch and follow recipes.** New MCP tools `recipe_list`,
   `recipe_get`, `recipe_save`, `recipe_run` (optionally waiting for the
   finished run), `run_get` and `run_control` expose what `/api/recipes`
