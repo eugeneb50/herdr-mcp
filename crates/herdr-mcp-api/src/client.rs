@@ -50,6 +50,8 @@ impl From<reqwest::Error> for ApiError {
 pub struct ApiClient {
     base: Url,
     http: reqwest::Client,
+    /// Sent as `Authorization: Bearer` when the bridge wants its token.
+    token: Option<String>,
 }
 
 impl ApiClient {
@@ -75,7 +77,17 @@ impl ApiClient {
         if base.cannot_be_a_base() {
             return Err(ApiError::BadBase(base.to_string()));
         }
-        Ok(Self { base, http })
+        Ok(Self {
+            base,
+            http,
+            token: None,
+        })
+    }
+
+    /// This client, sending `token` (the bridge token) with every request.
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token.filter(|t| !t.trim().is_empty());
+        self
     }
 
     /// The bridge base URL.
@@ -93,7 +105,11 @@ impl ApiClient {
     }
 
     fn request(&self, method: Method, segments: &[&str]) -> RequestBuilder {
-        self.http.request(method, self.url(segments))
+        let req = self.http.request(method, self.url(segments));
+        match &self.token {
+            Some(token) => req.bearer_auth(token),
+            None => req,
+        }
     }
 
     /// Send, fail on non-2xx, return the body text.
