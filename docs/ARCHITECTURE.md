@@ -332,11 +332,35 @@ The bridge serves the Dioxus bundle built into the binary:
   `/api/*` keeps working
 - No CORS layer: the UI is same-origin with the API (and `dx serve` proxies
   `/api` server-side via `Dioxus.toml [web.proxy]`)
-- Binds `http.bind-addr` (default `127.0.0.1`). There is no auth: a
-  non-loopback bind lets anyone who reaches it run commands in panes, so
-  startup logs a warning for one
+- Binds `http.bind-addr` (default `127.0.0.1`). With `[security]
+  require-token`, or on any non-loopback bind, `/api/*` (not `/api/health`)
+  needs the bridge token (`<data-dir>/bridge.token`, 0600) as
+  `Authorization: Bearer`, or `?token=` for `EventSource`; startup prints a
+  `/#token=` link the web UI keeps the token from
 - Refuses a foreign `Host` (DNS rebinding) and a foreign browser `Origin`
   (cross-site simple requests); requests without `Origin` pass
+
+### 5.4.1 Security (`[security]`)
+
+Every tool call, whoever makes it, goes through `HerdrMcpServer::call_tool`
+(`server.rs`), which checks `security.rs`'s policy before routing and
+appends to the audit log after:
+
+- **Origin:** the in-process session (`dispatch_tool`) tags each call
+  `api` (`POST /api/tools/{name}`) or `run` (a recipe step) in the request
+  `_meta`; only that session's tag is read, so any other caller is `mcp`.
+- **Policy:** `disabled-tools` are refused (and hidden from both tool
+  lists). Unless `agent-triggers` is on, only `api` calls may add triggers,
+  change a recipe that has triggers or a schedule, or call
+  `schedule_recipe` / `enable_schedule`.
+- **Outbound** (`outbound.rs`, `http_request` and the LLM tools): a
+  `Guard` checks `allow-hosts`, then every address (a custom DNS resolver
+  drops refused ones, IP literals are checked directly) and every redirect
+  hop, which herdr-mcp follows itself, dropping credentials across origins.
+  Link-local/metadata addresses and the bridge's own loopback port are
+  always refused; `block-private` adds loopback and private ranges.
+  Provider keys go only to their exact hosts; `api_key_env` must be in
+  `key-env`.
 
 ### 5.5 Wire Contract
 

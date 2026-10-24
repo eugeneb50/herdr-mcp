@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use crate::herdr_client::{AgentRegistry, HerdrClient, SubscriberPhase};
 use crate::persistence::Persistence;
 use crate::scheduler::Scheduler;
+use crate::security::Origin;
 use crate::templates as tmpl;
 use crate::variables::{Recipe, ScheduledRecipe};
 
@@ -615,6 +616,12 @@ pub struct HerdrMcpServer {
     /// In-process MCP client session to this server, opened on first use by
     /// [`dispatch_tool`]: the bridge and run engine call tools through it.
     pub tool_session: ToolSession,
+    /// `[security]`: the tool policy, outbound guard, audit log and token.
+    pub security: std::sync::Arc<crate::security::Security>,
+    /// Whether this is the copy serving [`ToolSession`], whose calls say
+    /// where they came from ([`Origin::META_KEY`]); any other caller is an
+    /// MCP client.
+    in_process: bool,
 }
 
 /// See [`HerdrMcpServer::tool_session`].
@@ -787,7 +794,14 @@ impl HerdrMcpServer {
             herdr_client: std::sync::Arc::default(),
             runs: crate::runs::Runs::default(),
             tool_session: ToolSession::default(),
+            security: std::sync::Arc::new(crate::security::Security::new(config)),
+            in_process: false,
         };
+        for tool in &config.security.disabled_tools {
+            if !Self::tool_router().has_route(tool) {
+                tracing::warn!("[security] disabled-tools: no tool named {tool:?}");
+            }
+        }
         // Scheduled recipes run through the run engine like any other run.
         // The closure holds a server clone (and so the scheduler): a
         // reference cycle that lives as long as the process, like the server.
@@ -1720,18 +1734,22 @@ impl HerdrMcpServer {
     ) -> Result<CallToolResult, McpError> {
         let body = match (body, json) {
             (Some(_), Some(_)) => return Err(user_err("pass body or json, not both")),
-            (Some(text), None) => Some(serde_json::Value::String(text)),
-            (None, json) => json,
+            (Some(text), None) => crate::outbound::Body::Text(text),
+            (None, None | Some(serde_json::Value::Null)) => crate::outbound::Body::None,
+            (None, Some(json)) => crate::outbound::Body::Json(json),
         };
         let ms = timeout_ms.unwrap_or_else(|| self.timeout_ms(settings::HTTP_REQUEST_MS));
-        let out = crate::outbound::send(crate::outbound::Request {
-            method: method.as_deref().unwrap_or("GET"),
-            url: &url,
-            headers: &headers,
-            query: &query,
-            body: body.as_ref(),
-            timeout: std::time::Duration::from_millis(ms.into()),
-        })
+        let out = crate::outbound::send(
+            &self.security.guard,
+            crate::outbound::Request {
+                method: method.as_deref().unwrap_or("GET"),
+                url: &url,
+                headers: &headers,
+                query: &query,
+                body,
+                timeout: std::time::Duration::from_millis(ms.into()),
+            },
+        )
         .await
         .map_err(|e| user_err(format!("{e:#}")))?;
         if check && out["ok"] != true {
@@ -1767,7 +1785,13 @@ impl HerdrMcpServer {
     ) -> Result<CallToolResult, McpError> {
         use crate::outbound as out;
         let base = base_url.as_deref().unwrap_or(out::OPENROUTER);
-        let key = out::api_key(base, api_key.as_deref(), api_key_env.as_deref());
+        let key = out::api_key(
+            base,
+            api_key.as_deref(),
+            api_key_env.as_deref(),
+            &self.security.config.key_env,
+        )
+        .map_err(|e| user_err(e.to_string()))?;
         let body = out::chat_body(&out::Chat {
             model: &model,
             system: system.as_deref(),
@@ -1780,6 +1804,7 @@ impl HerdrMcpServer {
         .map_err(|e| user_err(e.to_string()))?;
         let ms = timeout_ms.unwrap_or_else(|| self.timeout_ms(settings::LLM_CALL_MS));
         let resp = out::api(
+            &self.security.guard,
             base,
             "chat/completions",
             key.as_deref(),
@@ -1809,9 +1834,16 @@ impl HerdrMcpServer {
     ) -> Result<CallToolResult, McpError> {
         use crate::outbound as out;
         let base = base_url.as_deref().unwrap_or(out::OPENROUTER);
-        let key = out::api_key(base, api_key.as_deref(), api_key_env.as_deref());
+        let key = out::api_key(
+            base,
+            api_key.as_deref(),
+            api_key_env.as_deref(),
+            &self.security.config.key_env,
+        )
+        .map_err(|e| user_err(e.to_string()))?;
         let ms = self.timeout_ms(settings::LLM_CALL_MS);
         let resp = out::api(
+            &self.security.guard,
             base,
             "models",
             key.as_deref(),
@@ -2163,7 +2195,146 @@ impl HerdrMcpServer {
                     re-read IDs from list commands after structural changes; \
                     prefer labels. Guide: docs/AGENT-GUIDE.md in the herdr-mcp repo."
 )]
-impl ServerHandler for HerdrMcpServer {}
+impl ServerHandler for HerdrMcpServer {
+    /// Every tool call, from any caller: refused if `[security]` says no,
+    /// else routed; audited either way.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let origin = self.origin(&context.meta);
+        let name = request.name.to_string();
+        let args = request.arguments.clone();
+        let result = match self.permit(origin, &name, args.as_ref()).await {
+            Ok(()) => {
+                let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+                Self::tool_router().call(tcc).await
+            }
+            Err(e) => Err(e),
+        };
+        self.security.audit(
+            origin,
+            &name,
+            args.as_ref(),
+            match &result {
+                Ok(r) => Ok(r.is_error == Some(true)),
+                Err(e) => Err(&e.message),
+            },
+        );
+        result
+    }
+
+    /// The tools `[security] disabled-tools` leaves.
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, McpError> {
+        Ok(rmcp::model::ListToolsResult {
+            tools: self.enabled_tools(),
+            meta: None,
+            next_cursor: None,
+        })
+    }
+}
+
+/// Error code of a call `[security]` refuses (the bridge answers 403).
+const FORBIDDEN: rmcp::model::ErrorCode = rmcp::model::ErrorCode(-32001);
+
+fn forbidden(msg: impl Into<std::borrow::Cow<'static, str>>) -> McpError {
+    McpError::new(FORBIDDEN, msg, None)
+}
+
+impl HerdrMcpServer {
+    /// Where a call came from: what the in-process session tagged its
+    /// request `_meta` with, else an MCP client.
+    fn origin(&self, meta: &rmcp::model::Meta) -> Origin {
+        if !self.in_process {
+            return Origin::Mcp;
+        }
+        meta.0
+            .get(Origin::META_KEY)
+            .and_then(serde_json::Value::as_str)
+            .and_then(Origin::parse)
+            .unwrap_or(Origin::Api)
+    }
+
+    /// Every tool not in `[security] disabled-tools`.
+    pub fn enabled_tools(&self) -> Vec<rmcp::model::Tool> {
+        Self::tool_router()
+            .list_all()
+            .into_iter()
+            .filter(|t| self.security.tool_enabled(&t.name))
+            .collect()
+    }
+
+    /// Whether `[security]` lets `origin` call `name` with `args`: the tool
+    /// must be enabled, and only the bridge API may add triggers or
+    /// schedules (or change a recipe that has them) unless
+    /// `agent-triggers` is on.
+    async fn permit(
+        &self,
+        origin: Origin,
+        name: &str,
+        args: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<(), McpError> {
+        if !self.security.tool_enabled(name) {
+            return Err(forbidden(format!(
+                "{name} is disabled by [security] disabled-tools"
+            )));
+        }
+        if origin == Origin::Api || self.security.config.agent_triggers {
+            return Ok(());
+        }
+        let refuse = |what: &str| {
+            Err(forbidden(format!(
+                "{what}: only the web UI or TUI may, unless [security] agent-triggers = true \
+                 (this call came from {})",
+                match origin {
+                    Origin::Run => "a recipe run",
+                    _ => "an MCP client",
+                }
+            )))
+        };
+        match name {
+            "schedule_recipe" | "enable_schedule" => refuse("scheduling a recipe"),
+            "recipe_save" => {
+                let arg = |k: &str| args.and_then(|a| a.get(k));
+                if arg("triggers")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|t| !t.is_empty())
+                {
+                    return refuse("adding triggers");
+                }
+                let Some(id) = arg("recipe_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|r| r.parse::<uuid::Uuid>().ok())
+                else {
+                    return Ok(());
+                };
+                let triggered = self
+                    .persistence
+                    .load_recipe(&id)
+                    .await
+                    .map_err(to_mcp_err)?
+                    .is_some_and(|r| !r.triggers.is_empty());
+                let scheduled = self
+                    .persistence
+                    .list_schedules()
+                    .await
+                    .map_err(to_mcp_err)?
+                    .iter()
+                    .any(|s| s.recipe_id == id);
+                if triggered || scheduled {
+                    return refuse("changing a recipe with triggers or a schedule");
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -2598,6 +2769,7 @@ fn http_router(server: HerdrMcpServer, web_dir: Option<&std::path::Path>, bind: 
             get(crate::web::serve)
         }
     };
+    let token = server.security.token.clone();
     let state = AppState { server };
 
     Router::new()
@@ -2673,25 +2845,60 @@ fn http_router(server: HerdrMcpServer, web_dir: Option<&std::path::Path>, bind: 
                     .unwrap_or("")
                     .to_string();
                 let refused = if !host_allowed(&host, &bind) {
-                    Some(format!("host {host:?} not allowed"))
+                    Some((StatusCode::FORBIDDEN, format!("host {host:?} not allowed")))
+                } else if let Some(o) = req
+                    .headers()
+                    .get(axum::http::header::ORIGIN)
+                    .map(|o| String::from_utf8_lossy(o.as_bytes()).into_owned())
+                    .filter(|o| !origin_allowed(o, &bind))
+                {
+                    Some((StatusCode::FORBIDDEN, format!("origin {o:?} not allowed")))
                 } else {
-                    req.headers()
-                        .get(axum::http::header::ORIGIN)
-                        .map(|o| String::from_utf8_lossy(o.as_bytes()).into_owned())
-                        .filter(|o| !origin_allowed(o, &bind))
-                        .map(|o| format!("origin {o:?} not allowed"))
+                    token.as_deref().and_then(|t| token_refusal(&req, t))
                 };
                 async move {
                     match refused {
                         None => next.run(req).await,
-                        Some(msg) => axum::response::IntoResponse::into_response((
-                            StatusCode::FORBIDDEN,
-                            msg,
-                        )),
+                        Some(refusal) => axum::response::IntoResponse::into_response(refusal),
                     }
                 }
             }
         }))
+}
+
+/// Why `req` may not reach `/api/*` without the bridge token, if it may
+/// not: `/api/health` (the liveness probe) and the web UI's own files are
+/// open; everything else needs `Authorization: Bearer <token>` or, for
+/// `EventSource` streams that can't set headers, `?token=`.
+fn token_refusal(req: &axum::extract::Request, token: &str) -> Option<(StatusCode, String)> {
+    let path = req.uri().path();
+    if !path.starts_with("/api/") || path == "/api/health" {
+        return None;
+    }
+    let bearer = req
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+    let query = req.uri().query().and_then(|q| {
+        reqwest::Url::parse(&format!("http://bridge/?{q}"))
+            .ok()?
+            .query_pairs()
+            .find(|(k, _)| k == "token")
+            .map(|(_, v)| v.into_owned())
+    });
+    let given = bearer.map(str::to_string).or(query);
+    if given.is_some_and(|g| crate::security::token_matches(&g, token)) {
+        return None;
+    }
+    Some((
+        StatusCode::UNAUTHORIZED,
+        format!(
+            "this bridge needs its token ([security]): send Authorization: Bearer <token>; \
+             it is in the data dir's {}",
+            herdr_mcp_api::TOKEN_FILE
+        ),
+    ))
 }
 
 /// Start the Axum HTTP server for the web playground. Bind lives until the
@@ -2816,9 +3023,11 @@ async fn set_clipboard_config_handler(
     Ok(Json(config_response(&server)))
 }
 
-async fn list_tools_handler() -> Json<ToolsResponse> {
-    let tools = HerdrMcpServer::tool_router()
-        .list_all()
+async fn list_tools_handler(
+    State(AppState { server, .. }): State<AppState>,
+) -> Json<ToolsResponse> {
+    let tools = server
+        .enabled_tools()
         .iter()
         .filter_map(|t| serde_json::to_value(t).ok())
         .collect();
@@ -2831,7 +3040,9 @@ async fn call_tool_handler(
     body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<CallToolResult>, (StatusCode, String)> {
     let body = body.map(|j| j.0).unwrap_or(serde_json::json!({}));
-    dispatch_tool(&server, &name, body).await.map(Json)
+    dispatch_tool(&server, &name, body, Origin::Api)
+        .await
+        .map(Json)
 }
 
 /// `GET /api/agents?workspace_id=w1` — canonical pane list from the live
@@ -2875,6 +3086,7 @@ pub(crate) async fn dispatch_tool(
     server: &HerdrMcpServer,
     name: &str,
     body: serde_json::Value,
+    origin: Origin,
 ) -> Result<CallToolResult, (StatusCode, String)> {
     use rmcp::{ServiceExt, model::ErrorCode, service::ServiceError};
     if !HerdrMcpServer::tool_router().has_route(name) {
@@ -2893,7 +3105,8 @@ pub(crate) async fn dispatch_tool(
         .tool_session
         .get_or_try_init(|| async {
             let (ours, theirs) = tokio::io::duplex(1 << 20);
-            let this = server.clone();
+            let mut this = server.clone();
+            this.in_process = true;
             tokio::spawn(async move {
                 match this.serve(theirs).await {
                     Ok(running) => {
@@ -2913,8 +3126,15 @@ pub(crate) async fn dispatch_tool(
         })?;
     let mut params = rmcp::model::CallToolRequestParams::new(name.to_string());
     params.arguments = arguments;
+    let mut meta = rmcp::model::Meta::new();
+    meta.0
+        .insert(Origin::META_KEY.into(), origin.as_str().into());
+    params.meta = Some(meta);
     session.call_tool(params).await.map_err(|e| match e {
         ServiceError::McpError(e) if e.code == ErrorCode::INVALID_PARAMS => bad_request(e.message),
+        ServiceError::McpError(e) if e.code == FORBIDDEN => {
+            (StatusCode::FORBIDDEN, e.message.into())
+        }
         ServiceError::McpError(e) => mcp_err_to_http(e),
         e => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     })
@@ -4162,6 +4382,102 @@ mod tests {
         // Lines are matched one at a time, so `^`/`$` anchor each line.
         let re = Regex::new(r"^DONE$").unwrap();
         assert_eq!(watch_matches(text, "", Some(&re)), (1, Some("DONE")));
+    }
+
+    #[tokio::test]
+    async fn security_policy_holds_for_the_bridge_runs_and_mcp_clients() {
+        use herdr_mcp_api::{ApiClient, ApiError};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let config = herdr_mcp_core::Config {
+            data_dir: data_dir.clone(),
+            security: herdr_mcp_core::SecurityConfig {
+                disabled_tools: vec!["run_command".into()],
+                require_token: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let registry = AgentRegistry::new(std::sync::Arc::new(Persistence::new(data_dir.clone())));
+        let server =
+            HerdrMcpServer::with_config(Persistence::new(data_dir.clone()), registry, &config);
+        let token = server
+            .security
+            .token
+            .clone()
+            .expect("require-token makes one");
+        assert_eq!(
+            std::fs::read_to_string(data_dir.join(herdr_mcp_api::TOKEN_FILE)).unwrap(),
+            token
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let app = http_router(server.clone(), None, "127.0.0.1");
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let status = |r: Result<Vec<serde_json::Value>, ApiError>| match r {
+            Err(ApiError::Status { status, .. }) => status,
+            other => panic!("{other:?}"),
+        };
+
+        // No token: only the health probe answers.
+        let anon = ApiClient::new(&base).unwrap();
+        anon.health().await.unwrap();
+        assert_eq!(status(anon.list_tools().await), 401);
+        let wrong = ApiClient::new(&base)
+            .unwrap()
+            .with_token(Some("nope".into()));
+        assert_eq!(status(wrong.list_tools().await), 401);
+
+        let api = ApiClient::new(&base).unwrap().with_token(Some(token));
+        let tools = api.list_tools().await.unwrap();
+        assert!(tools.iter().any(|t| t["name"] == "var_set"));
+        assert!(!tools.iter().any(|t| t["name"] == "run_command"));
+        match api
+            .call_tool("run_command", &serde_json::json!({ "command": "true" }))
+            .await
+        {
+            Err(ApiError::Status { status: 403, body }) => {
+                assert!(body.contains("disabled-tools"), "{body}");
+            }
+            other => panic!("{other:?}"),
+        }
+
+        // Triggers: the bridge API may add them; a recipe run and an MCP
+        // client may not.
+        let triggers = serde_json::json!([{ "on": "pane.agent_status_changed" }]);
+        let saved = api
+            .call_tool(
+                "recipe_save",
+                &serde_json::json!({ "name": "t", "steps": [], "triggers": triggers }),
+            )
+            .await
+            .unwrap();
+        let saved = herdr_mcp_api::tool_payload(&saved).unwrap();
+        let run = dispatch_tool(
+            &server,
+            "recipe_run",
+            serde_json::json!({
+                "steps": [{
+                    "id": "s",
+                    "tool": "recipe_save",
+                    "params": { "recipe_id": saved["id"], "steps": [] },
+                }],
+                "wait": true,
+            }),
+            Origin::Api,
+        )
+        .await
+        .unwrap();
+        let run = herdr_mcp_api::tool_payload(&serde_json::to_value(run).unwrap()).unwrap();
+        assert_eq!(run["status"], "failed", "{run}");
+        assert!(run.to_string().contains("agent-triggers"), "{run}");
+        let err = server
+            .permit(Origin::Mcp, "schedule_recipe", None)
+            .await
+            .unwrap_err();
+        assert!(err.message.contains("an MCP client"), "{}", err.message);
+        assert!(server.permit(Origin::Mcp, "var_set", None).await.is_ok());
     }
 
     #[tokio::test]

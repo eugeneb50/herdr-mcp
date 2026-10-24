@@ -468,7 +468,7 @@ impl Executor {
             let mut params = step.params.clone();
             resolve_variables(&mut params, &self.run.variables);
             let outcome = tokio::select! {
-                r = dispatch_tool(&self.server, &step.tool, params) => Some(r),
+                r = dispatch_tool(&self.server, &step.tool, params, crate::security::Origin::Run) => Some(r),
                 () = cancelled(&mut self.ctl) => None,
             };
             let def = step;
@@ -896,7 +896,7 @@ mod tests {
 
     /// Call a tool the way a recipe step or MCP client does; its JSON payload.
     async fn call(server: &HerdrMcpServer, tool: &str, args: Value) -> Result<Value, String> {
-        crate::server::dispatch_tool(server, tool, args)
+        crate::server::dispatch_tool(server, tool, args, crate::security::Origin::Api)
             .await
             .map(|r| tool_payload(&serde_json::to_value(r).unwrap()))
             .map_err(|(_, e)| e)

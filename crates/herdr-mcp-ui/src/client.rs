@@ -17,5 +17,31 @@ pub fn api() -> Result<ApiClient, ApiError> {
     let origin = web_sys::window()
         .and_then(|w| w.location().origin().ok())
         .ok_or_else(|| ApiError::BadBase("window.location.origin unavailable".into()))?;
-    ApiClient::new(&origin)
+    Ok(ApiClient::new(&origin)?.with_token(token()))
+}
+
+/// Where the page keeps the bridge token.
+const TOKEN_KEY: &str = "herdr-mcp-token";
+
+/// The bridge token: taken from a `#token=` link (the bridge prints one
+/// when it needs its token) and kept, else the one kept before.
+pub fn token() -> Option<String> {
+    let location = web_sys::window()?.location();
+    if let Some(t) = location
+        .hash()
+        .ok()
+        .and_then(|h| h.strip_prefix("#token=").map(str::to_string))
+    {
+        crate::local::remember(TOKEN_KEY, &t);
+        let _ = location.set_hash("");
+    }
+    Some(crate::local::remembered(TOKEN_KEY)).filter(|t| !t.is_empty())
+}
+
+/// Keep `token` for this page and reload with it.
+pub fn set_token(token: &str) {
+    crate::local::remember(TOKEN_KEY, token.trim());
+    if let Some(w) = web_sys::window() {
+        let _ = w.location().reload();
+    }
 }

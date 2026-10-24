@@ -7,6 +7,7 @@ pub mod persistence;
 pub mod profiles;
 pub mod runs;
 pub mod scheduler;
+pub mod security;
 pub mod server;
 pub mod templates;
 pub mod triggers;

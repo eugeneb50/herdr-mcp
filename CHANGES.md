@@ -4,6 +4,31 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Security hardening: `[security]` (breaking).** A new config section,
+  read at startup only:
+  - `disabled-tools` hides tools and refuses calls to them from every
+    caller (MCP, the bridge, recipe steps).
+  - `allow-hosts`, `block-private` and `max-response-bytes` limit
+    `http_request` and the LLM tools. Every resolved address and every
+    redirect is checked. Link-local and cloud-metadata addresses, and the
+    bridge's own loopback port, are always refused.
+  - `key-env` lists the environment variables `api_key_env` may name.
+  - `agent-triggers` (default **off**): MCP clients and recipe runs may no
+    longer add triggers or schedules, or change a recipe that has them. The
+    web UI and TUI still may.
+  - `require-token` puts a bearer token on `/api/*`. It's always required on
+    a non-loopback bind, replacing the old warning. The token lives in
+    `<data-dir>/bridge.token` and is printed as a `/#token=` link the web UI
+    keeps; the TUI and the plugin read the file.
+  - `audit-log` writes `audit.jsonl`, one line per tool call, with secrets
+    redacted.
+  - The data dir is now 0700.
+- **Fix: provider keys leaked to look-alike URLs.** `llm_call` and
+  `llm_models` sent `OPENROUTER_API_KEY` to any `base_url` that merely
+  contained `openrouter.ai`, and `OPENAI_API_KEY` likewise for
+  `api.openai.com`. They now send each key only to its exact host.
+  `http_request`'s `json` now sends a JSON string as JSON (it used to be
+  sent as text).
 - **HTTP and LLM requests.** `http_request` sends any HTTP request (text
   or JSON body, headers, query; `check` fails on non-2xx). `llm_call` calls
   an OpenAI-compatible chat API, OpenRouter by default (OpenAI, Ollama, LM

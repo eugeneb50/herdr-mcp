@@ -248,6 +248,65 @@ need Ctrl or Alt (or are F1–F12), may not take a chord a tab already uses
 (`ctrl+s`, `ctrl+k`, …) and may not be bound twice; the Settings page refuses
 them and says why. Reset (one setting or all) goes back to the defaults.
 
+### Security
+
+`[security]` limits what callers may do. It is read from the config file at
+startup only; nothing over the API changes it.
+
+```toml
+[security]
+# Tools no caller can list or call: MCP clients, the bridge, recipe steps.
+disabled-tools = ["run_command", "send_keys", "pane_exec"]
+# Hosts http_request and llm_call/llm_models may reach (exact or "*.example.com").
+# Empty (the default): any host.
+allow-hosts = ["openrouter.ai", "*.github.com"]
+# Also refuse loopback and private-network addresses (on by choice; local
+# LLM servers like Ollama need it off, or their host in allow-hosts).
+block-private = true
+max-response-bytes = 10485760
+# Environment variables api_key_env may name (default: these three).
+key-env = ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY"]
+# Let MCP clients and recipe runs add triggers or schedules (default false:
+# only the web UI and TUI may).
+agent-triggers = false
+# Require the bridge token on loopback too (always required on any other bind).
+require-token = true
+# One JSON line per tool call, secrets redacted: <data-dir>/audit.jsonl.
+audit-log = true
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `disabled-tools` | `[]` | Removed from `tools/list` and `/api/tools`; calling one fails (403 on the bridge) |
+| `allow-hosts` | `[]` (any) | Checked for the URL and every redirect hop |
+| `block-private` | `false` | Refuses `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7` unless the host is allowed |
+| `max-response-bytes` | 10 MiB | A larger response body is an error |
+| `key-env` | the three above | `api_key_env` outside it is an error |
+| `agent-triggers` | `false` | `recipe_save` with triggers, changing a recipe that has triggers or a schedule, `schedule_recipe` and `enable_schedule` are refused unless the call came from the bridge API |
+| `require-token` | `false` | `/api/*` (not `/api/health`) needs `Authorization: Bearer <token>` |
+| `audit-log` | `false` | Appends `{at, origin, tool, args, ok, error}`; rolls over at 10 MB |
+
+Always on:
+- **No link-local or metadata addresses.** Outbound requests never reach
+  link-local or cloud-metadata addresses (`169.254.0.0/16`, `fe80::/10`,
+  `fd00:ec2::254`) unless the host is in `allow-hosts`.
+- **No requests to the bridge itself.** Outbound requests never reach the
+  bridge's own port on loopback, so an agent can't drive the bridge API (and
+  its clipboard commands) around `disabled-tools`. Every resolved address
+  and every redirect is checked.
+- **Provider keys only go to their exact hosts.** `OPENROUTER_API_KEY` is
+  sent only to `openrouter.ai`, and `OPENAI_API_KEY` only to
+  `api.openai.com`. Any other `base_url` gets a key only if you pass one.
+- **Owner-only data.** The data dir is owner-only (0700), and the token file
+  `bridge.token` in it is 0600.
+
+**The bridge token.** The bridge makes the token when it needs one, and
+prints a `http://localhost:<port>/#token=…` link at startup. The web UI keeps
+the token from that link, or asks for it. The TUI and the herdr plugin read
+the token file themselves. A hardened setup for agents disables
+`run_command`, `send_keys` and `pane_exec`, turns on `block-private` and
+`require-token`, and leaves `agent-triggers` off.
+
 ---
 
 ## Usage

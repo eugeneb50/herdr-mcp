@@ -597,7 +597,12 @@ impl App {
 
     fn new(opts: DashboardOptions) -> Self {
         let knobs = herdr_mcp_api::Settings::default();
-        let http = http::client_for(opts.http_port, knobs.duration(settings::TUI_REQUEST_MS)).ok();
+        let http = http::client_for(
+            opts.http_port,
+            knobs.duration(settings::TUI_REQUEST_MS),
+            &opts.data_dir,
+        )
+        .ok();
         let http_port = opts.http_port;
         let data_dir = opts.data_dir.display().to_string();
         Self {
@@ -735,7 +740,9 @@ impl App {
         // If we're not connected, check for a live bridge first.
         if !self.bridge_connected {
             let timeout = self.knobs.duration(settings::TUI_REQUEST_MS);
-            if let Some(client) = http::live_bridge(self.opts.http_port, timeout).await {
+            if let Some(client) =
+                http::live_bridge(self.opts.http_port, timeout, &self.opts.data_dir).await
+            {
                 self.http = Some(client);
                 self.bridge_connected = true;
                 self.status_msg.clear();
@@ -799,7 +806,7 @@ impl App {
         let next = self.knobs.duration(settings::TUI_REQUEST_MS);
         if next != timeout
             && self.http.is_some()
-            && let Ok(client) = http::client_for(self.opts.http_port, next)
+            && let Ok(client) = http::client_for(self.opts.http_port, next, &self.opts.data_dir)
         {
             self.http = Some(client);
         }
