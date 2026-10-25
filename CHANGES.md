@@ -27,6 +27,14 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   something actually differs from the saved version. Leaving unsaved edits
   warns once first. Esc cancels a field edit, and removes a row that was just
   added for it. A failed send shows its error once, wrapped to the pane.
+- **Variables tab: globals, each collection's own, and auto.** Both UIs
+  list globals and every collection's variables (add, edit, rename, delete;
+  JSON values are stored typed), then the auto variables herdr's panes
+  resolve to (read-only). The TUI tab reloads when you switch to it and
+  scrolls. Picking a result path after a send now saves its value as a
+  collection variable right away, and adds the extract rule (scope
+  `collection`, also the default for new rules) so later sends and runs
+  update it. The TUI's leftover "auto-stored" marking is gone.
 - **`send_keys` lists the key names herdr accepts** (`Up`/`Down`, not
   `ArrowUp`/`ArrowDown`) and says which keys herdr lacks.
 - **`--mcp-only`.** MCP over stdio with no HTTP bridge, for an MCP client
