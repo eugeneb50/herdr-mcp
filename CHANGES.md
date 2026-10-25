@@ -4,6 +4,14 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Collection gates: loops and end conditions.** A collection can end with
+  a gate: rules checked in order after its last request, the first match
+  deciding whether the run ends, fails with a message, or restarts from the
+  first request (after an optional delay). Checks compare a result path or
+  variable (`eq`, `ne`, `lt`, `gt`, `contains`, `exists`, `missing`);
+  `{{ run.pass }}` counts passes and `max_steps` (default 1000) stops a
+  runaway loop. Set it with `recipe_save`'s `gate` or the recipe API; the
+  playground editors come next. Sending single requests ignores the gate.
 - **TUI playground = web playground (breaking).** The TUI's tool runner and
   recipe builder are gone. Its Playground tab now shows the web's
   collections: the tree, the collection and request editors, Send and Run,

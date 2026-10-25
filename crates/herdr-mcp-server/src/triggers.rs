@@ -106,6 +106,7 @@ mod tests {
             is_template: false,
             category: None,
             triggers,
+            gate: None,
         }
     }
 

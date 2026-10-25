@@ -27,7 +27,7 @@ use clap::Subcommand;
 use serde::Serialize;
 use serde_json::Value;
 
-use herdr_mcp_api::{ApiClient, RunEventKind, StartRunRequest, tool_text};
+use herdr_mcp_api::{ApiClient, GateAction, RunEventKind, StartRunRequest, tool_text};
 use herdr_mcp_core::PLUGIN_ID;
 
 /// Env var carrying the invoking action's context into a plugin pane.
@@ -402,6 +402,11 @@ async fn follow(api: &ApiClient, id: herdr_mcp_api::Uuid) -> Result<()> {
                     }
                 }
                 RunEventKind::StepFailed { step, error, .. } => println!("✘ {step}: {error}"),
+                RunEventKind::GateMatched {
+                    action: GateAction::Restart { .. },
+                    ..
+                } => println!("↻ restart"),
+                RunEventKind::Error { error } => println!("✘ {error}"),
                 RunEventKind::Status { status } if status.is_finished() => {
                     println!("\n{status:?}");
                     return Ok(());

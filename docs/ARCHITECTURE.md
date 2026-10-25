@@ -428,8 +428,23 @@ fails the step.
    c. record the result (step_finished) under the step id, flattened, and
       under pane_id/role for agent handles
    d. apply its extract rules (variable_set), or fail the step
-4. The event log is the run; RunRecord is its fold
+4. After the last step, the recipe's gate (if any; skipped when only
+   `step_ids` run) picks its first matching rule (gate_matched):
+   end → completed, fail → `error` + failed, restart → `pass` + 1 and
+   back to 3 after `delay_ms`. No match completes the run.
+5. The event log is the run; RunRecord is its fold
 ```
+
+**Gate** (`herdr_mcp_api::gate`, shared so the UIs can preview it): an
+ordered list of rules; each has `checks` (all must hold, or any with
+`any: true`; none = always) and a `then` action. A check resolves `path`
+like a `{{ path }}` placeholder in the run's scope and compares it with
+`value`: `eq` / `ne` (a string and a number compare by text), `lt` / `gt`
+(numbers), `contains` (substring, array element, object key), `exists` /
+`missing` (null and `""` count as missing). `{{ run.pass }}` is the pass
+number from 1. A gated run executes at most `max_steps` requests (default
+1000, every pass counted), then fails. Restart loops run in the one
+executor task: no recursion, and cancel interrupts a restart delay.
 
 ### 6.3 Bundled Templates
 

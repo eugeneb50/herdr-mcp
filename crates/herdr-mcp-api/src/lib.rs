@@ -9,6 +9,7 @@
 pub mod agents;
 pub mod client;
 pub mod config;
+pub mod gate;
 pub mod herdr;
 pub mod playground;
 pub mod profile;
@@ -20,6 +21,7 @@ pub mod variables;
 pub use agents::{AgentHandle, AgentsResponse};
 pub use client::{ApiClient, ApiError, schema_type, tool_is_error, tool_payload, tool_text};
 pub use config::{ClipboardConfig, ConfigResponse};
+pub use gate::{Check, Gate, GateAction, GateRule, Op};
 pub use herdr::{
     HerdrEvent, HerdrPane, HerdrSession, PaneFilter, PanesResponse, RecipeTrigger, SessionsResponse,
 };

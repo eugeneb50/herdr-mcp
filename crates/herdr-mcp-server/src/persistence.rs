@@ -453,6 +453,7 @@ mod tests {
             is_template: false,
             category: None,
             triggers: Vec::new(),
+            gate: None,
         }
     }
 

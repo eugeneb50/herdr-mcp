@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::{RecipeStep, VarScope};
+use crate::{Gate, GateAction, RecipeStep, VarScope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,6 +39,12 @@ pub struct RunRecord {
     pub session_id: String,
     /// Snapshot of the steps as they were when the run started.
     pub steps: Vec<RecipeStep>,
+    /// Snapshot of the recipe's gate; `None` when it has none or the run
+    /// sent only some of its steps.
+    pub gate: Option<Gate>,
+    /// Which pass through the steps this is, from 1; a gate restart adds one.
+    /// Also in `variables` as `run.pass`.
+    pub pass: u32,
     pub status: RunStatus,
     /// Step being executed (or paused before) right now.
     pub current_step: Option<String>,
@@ -136,6 +142,16 @@ pub enum RunEventKind {
     },
     StepCancelled {
         step: String,
+    },
+    /// Rule `rule` of the gate matched after the last step.
+    GateMatched {
+        rule: usize,
+        action: GateAction,
+    },
+    /// The run stops with `error` and no failed step: a gate `fail` rule, or
+    /// the gate's `max_steps` ran out.
+    Error {
+        error: String,
     },
     /// An [`Extract`](crate::Extract) of `step` saved `var`.
     VariableSet {
