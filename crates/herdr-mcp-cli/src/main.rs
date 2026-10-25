@@ -77,7 +77,8 @@ fn main() -> Result<()> {
     }
     // SAFETY: single-threaded here; the runtime starts below.
     unsafe { config.export_herdr_socket() };
-    let tui = !config.http.http_only && !args.no_tui && !args.mcp_only && std::io::stdin().is_terminal();
+    let tui =
+        !config.http.http_only && !args.no_tui && !args.mcp_only && std::io::stdin().is_terminal();
     let log_file = tui.then(|| config.data_dir.join(LOG_FILE));
     common::init_tracing(log_file.as_deref())?;
     let rt = tokio::runtime::Runtime::new()?;

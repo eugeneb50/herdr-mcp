@@ -1799,7 +1799,8 @@ fn result_lines(result: &Value) -> Vec<String> {
 /// A send's outcome: status, error, the variables its extract rules set,
 /// then the tool's response.
 fn send_text(run: &RunRecord, step_id: &str, rules: &[Extract]) -> Vec<String> {
-    let mut out = vec![format!("Sent · {:?}", run.status).to_lowercase()];
+    let status = format!("{:?}", run.status).to_lowercase();
+    let mut out = vec![format!("Sent · {status}")];
     if let Some(e) = &run.error {
         out.push(format!("error: {e}"));
     }
@@ -1829,7 +1830,8 @@ fn send_text(run: &RunRecord, step_id: &str, rules: &[Extract]) -> Vec<String> {
 
 /// A collection run: status, then each step's result in step order.
 fn run_text(run: &RunRecord, order: &[String]) -> Vec<String> {
-    let mut out = vec![format!("Run · {:?}", run.status).to_lowercase()];
+    let status = format!("{:?}", run.status).to_lowercase();
+    let mut out = vec![format!("Run · {status}")];
     if let Some(e) = &run.error {
         out.push(format!("error: {e}"));
     }
