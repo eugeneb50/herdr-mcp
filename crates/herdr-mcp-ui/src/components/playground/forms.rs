@@ -9,56 +9,8 @@ use std::collections::{HashMap, HashSet};
 use crate::components::pane_options::pane_list;
 use herdr_mcp_api::schema_type;
 
-/// Tool arguments from raw form values, each converted per its schema type
-/// (`{{ }}` placeholders stay strings for the server to resolve). Blank
-/// fields are left out, so optional params fall back to their defaults.
-pub fn build_params(
-    properties: &HashMap<String, Value>,
-    values: &HashMap<String, String>,
-) -> Value {
-    let mut map = serde_json::Map::new();
-    for (k, raw) in values {
-        if raw.trim().is_empty() {
-            continue;
-        }
-        let stype = properties.get(k).map(schema_type).unwrap_or("string");
-        map.insert(k.clone(), convert_param(stype, raw));
-    }
-    Value::Object(map)
-}
-
-/// Convert a raw string field to a JSON value per schema type. Arrays take
-/// JSON (`["Enter"]`) or a comma list (`Enter, ctrl+c`).
-pub fn convert_param(schema_type: &str, raw: &str) -> Value {
-    match schema_type {
-        "array" => serde_json::from_str::<Value>(raw)
-            .ok()
-            .filter(Value::is_array)
-            .unwrap_or_else(|| {
-                raw.split(',')
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(|s| Value::String(s.to_string()))
-                    .collect()
-            }),
-        "object" => serde_json::from_str(raw).unwrap_or(Value::String(raw.to_string())),
-        "boolean" => Value::Bool(matches!(raw, "true" | "1" | "yes")),
-        "integer" | "number" => raw
-            .trim()
-            .parse::<i64>()
-            .map(Value::from)
-            .unwrap_or_else(|_| {
-                raw.trim()
-                    .parse::<f64>()
-                    .map(|f| serde_json::json!(f))
-                    .unwrap_or(Value::String(raw.to_string()))
-            }),
-        _ => Value::String(raw.to_string()),
-    }
-}
-
 /// Schema-driven form. `values` holds raw strings keyed by property name;
-/// the caller converts with [`convert_param`] on run.
+/// the caller converts with `herdr_mcp_api::playground::build_params` on run.
 #[component]
 pub fn DynamicForm(
     properties: HashMap<String, Value>,
@@ -262,58 +214,4 @@ fn pretty_or_raw(text: &str) -> String {
     serde_json::from_str::<Value>(text)
         .map(|v| serde_json::to_string_pretty(&v).unwrap_or_else(|_| text.to_string()))
         .unwrap_or_else(|_| text.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn convert_param_types() {
-        assert_eq!(convert_param("boolean", "true"), Value::Bool(true));
-        assert_eq!(convert_param("integer", "42"), serde_json::json!(42));
-        assert_eq!(
-            convert_param("string", "{{pane.x}}"),
-            Value::String("{{pane.x}}".into())
-        );
-        assert_eq!(
-            convert_param("array", "Enter, ctrl+c"),
-            serde_json::json!(["Enter", "ctrl+c"])
-        );
-        assert_eq!(
-            convert_param("array", r#"["a,b"]"#),
-            serde_json::json!(["a,b"])
-        );
-    }
-
-    /// Optional params (`Option<u32>`, `Option<bool>`) arrive as
-    /// `["integer","null"]`; they must still be sent typed, and blanks dropped.
-    #[test]
-    fn build_params_types_optional_fields_and_skips_blanks() {
-        let schema = serde_json::json!({
-            "lines": { "type": ["integer", "null"] },
-            "check": { "type": ["boolean", "null"] },
-            "keys": { "type": "array", "items": { "type": "string" } },
-            "pane_id": { "type": ["string", "null"] },
-            "command": { "type": "string" }
-        });
-        let props: HashMap<String, Value> = serde_json::from_value(schema).unwrap();
-        let values: HashMap<String, String> = [
-            ("lines", "5"),
-            ("check", "true"),
-            ("keys", "Enter"),
-            ("pane_id", "  "),
-            ("command", "echo {{x}}"),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-        // Placeholders stay as written: the server resolves them.
-        assert_eq!(
-            build_params(&props, &values),
-            serde_json::json!({
-                "lines": 5, "check": true, "keys": ["Enter"], "command": "echo {{x}}"
-            })
-        );
-    }
 }

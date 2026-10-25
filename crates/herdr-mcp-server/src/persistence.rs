@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::variables::{Recipe, ScheduledRecipe};
 
 pub use crate::runs::RunHeader;
-pub use herdr_mcp_api::{PlaygroundSnapshot, RunEvent, VariableStore};
+pub use herdr_mcp_api::{RunEvent, VariableStore};
 
 /// A persistent bag of variables shared across recipe runs within a session.
 /// This is what enables chaining: the output variables of one recipe run are
@@ -273,63 +273,6 @@ impl Persistence {
         ));
         write_atomic(path, serde_json::to_string_pretty(value)?).await?;
         Ok(())
-    }
-
-    fn playground_path(&self, workspace_id: &str) -> PathBuf {
-        let safe: String = workspace_id
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        let safe = if safe.is_empty() {
-            "default".into()
-        } else {
-            safe
-        };
-        self.data_dir
-            .join("sessions")
-            .join(format!("{safe}.playground.json"))
-    }
-
-    pub async fn save_playground(&self, snapshot: &PlaygroundSnapshot) -> anyhow::Result<()> {
-        fs::create_dir_all(self.data_dir.join("sessions")).await?;
-        let mut snapshot = snapshot.clone();
-        snapshot.updated_at = chrono::Utc::now();
-        let path = self.playground_path(&snapshot.workspace_id);
-        write_atomic(path, serde_json::to_string_pretty(&snapshot)?).await?;
-        Ok(())
-    }
-
-    pub async fn load_playground(&self, workspace_id: &str) -> anyhow::Result<PlaygroundSnapshot> {
-        let ws = if workspace_id.trim().is_empty() || workspace_id.contains("{{") {
-            "default".to_string()
-        } else {
-            workspace_id.to_string()
-        };
-        let path = self.playground_path(&ws);
-        if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Ok(PlaygroundSnapshot {
-                workspace_id: ws,
-                updated_at: chrono::Utc::now(),
-                ..Default::default()
-            });
-        }
-        let content = fs::read_to_string(path).await?;
-        if content.trim().is_empty() {
-            return Ok(PlaygroundSnapshot {
-                workspace_id: ws,
-                updated_at: chrono::Utc::now(),
-                ..Default::default()
-            });
-        }
-        let mut snapshot: PlaygroundSnapshot = serde_json::from_str(&content)?;
-        snapshot.workspace_id = ws;
-        Ok(snapshot)
     }
 
     fn run_dir(&self, id: &Uuid) -> PathBuf {
@@ -758,63 +701,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = Persistence::new(tmp.path().join("nonexistent"));
         assert!(p.list_recipes(None).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_save_load_playground_state_roundtrip() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = Persistence::new(tmp.path().to_path_buf());
-        let mut field_values = HashMap::new();
-        field_values.insert("workspace_id".into(), "w1".into());
-        let snapshot = PlaygroundSnapshot {
-            workspace_id: "w1".into(),
-            tool_name: Some("list_panes".into()),
-            field_values,
-            builder_recipe_name: "my recipe".into(),
-            builder_steps: vec![RecipeStep {
-                id: "s1".into(),
-                tool: "list_panes".into(),
-                params: serde_json::json!({}),
-                description: None,
-                extract: Vec::new(),
-            }],
-            updated_at: chrono::Utc::now(),
-        };
-        p.save_playground(&snapshot).await.unwrap();
-        let loaded = p.load_playground("w1").await.unwrap();
-        assert_eq!(loaded.workspace_id, "w1");
-        assert_eq!(loaded.tool_name.as_deref(), Some("list_panes"));
-        assert_eq!(
-            loaded.field_values.get("workspace_id"),
-            Some(&"w1".to_string())
-        );
-        assert_eq!(loaded.builder_recipe_name, "my recipe");
-        assert_eq!(loaded.builder_steps.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn test_load_playground_state_default_empty() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = Persistence::new(tmp.path().to_path_buf());
-        let loaded = p.load_playground("missing").await.unwrap();
-        assert_eq!(loaded.workspace_id, "missing");
-        assert!(loaded.tool_name.is_none());
-        assert!(loaded.field_values.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_playground_state_isolated_per_workspace() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = Persistence::new(tmp.path().to_path_buf());
-        let mut a = PlaygroundSnapshot {
-            workspace_id: "w1".into(),
-            updated_at: chrono::Utc::now(),
-            ..Default::default()
-        };
-        a.tool_name = Some("list_panes".into());
-        p.save_playground(&a).await.unwrap();
-        let b = p.load_playground("w2").await.unwrap();
-        assert!(b.tool_name.is_none());
     }
 
     #[tokio::test]

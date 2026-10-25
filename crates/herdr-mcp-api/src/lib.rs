@@ -10,6 +10,7 @@ pub mod agents;
 pub mod client;
 pub mod config;
 pub mod herdr;
+pub mod playground;
 pub mod profile;
 pub mod recipe;
 pub mod run;
@@ -37,6 +38,6 @@ pub use uuid::Uuid;
 /// `Authorization: Bearer <token>`, or `?token=` where headers can't go.
 pub const TOKEN_FILE: &str = "bridge.token";
 pub use variables::{
-    AutoVariablesResponse, PlaygroundSnapshot, ResolveRequest, ResolveResponse,
-    SaveVariableRequest, ToolsResponse, VariableStore,
+    AutoVariablesResponse, ResolveRequest, ResolveResponse, SaveVariableRequest, ToolsResponse,
+    VariableStore,
 };

@@ -81,6 +81,7 @@ cd crates/herdr-mcp-ui && dx bundle --platform web --release  # build served by 
 herdr-mcp                                   # terminal: TUI + HTTP on 127.0.0.1:7676; piped stdin: MCP stdio + HTTP
 herdr-mcp --no-tui                          # MCP stdio + HTTP (flags: --http, --data-dir, --herdr-socket, …)
 herdr-mcp --http 7676 --http-only           # HTTP bridge only
+herdr-mcp --mcp-only                        # MCP stdio only, no bridge
 herdr-mcp plugin manifest                   # print herdr-plugin.toml (regenerate after changing plugin.rs)
 sh scripts/plugin-build.sh && herdr plugin link .   # the herdr plugin from this checkout
 ```
@@ -150,7 +151,7 @@ through deliberate team decision.
 - `crates/herdr-mcp-tui/` — TUI dashboard (`lib.rs` app loop, `tabs/`, `theme.rs`, `http.rs` bridge discovery); talks to the bridge through `herdr-mcp-api::ApiClient`
 - `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers), `runs.rs` (run engine), `triggers.rs`, `scheduler.rs`, `herdr_client.rs` (socket client, event subscriber, agent registry), `panes.rs` (herdr panes + sessions, the one pane fetch), `agents.rs` / `profiles.rs` (agent profiles), `persistence.rs`, `templates.rs`, `variables.rs`
 - `crates/herdr-mcp-cli/` — `src/main.rs` (mode choice: TUI / MCP stdio / HTTP only; `plugin`), `src/common.rs` (`serve_core`: the one server instance + background tasks), `src/plugin.rs` (herdr plugin), `tests/cli.rs`
-- `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the tool runner, herdr API, recipe builder and herdr events tabs; built into `herdr-mcp` and served by the HTTP bridge
+- `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the collections view (requests, HTTP/LLM builders) and herdr events; the collections model both UIs share is `herdr-mcp-api::playground`; built into `herdr-mcp` and served by the HTTP bridge
 - `data/` — runtime persistence (recipes, runs, variables, schedules, sessions, profiles)
 - `docs/` — `ARCHITECTURE.md` (reference), `SWARMS.md` (flow-engine proposal)
 
@@ -206,7 +207,7 @@ When uncertain, classify as higher risk.
 - **One tool dispatch** — the bridge and run engine call tools through rmcp's router over an in-process MCP session, never a hand-written match. Tool groups come from each tool's `#[tool(meta = category("…"))]`.
 - **Auto variables are a view** — `GET /api/variables/auto` resolves live herdr panes with their registry handles laid over them (by pane id and role, `AgentRegistry::seed`) (+ a workspace's `var_set` vars) on request — the pane dropdowns and the Home pane table read it; tool calls never write variables behind the user's back.
 - **Host allowlist** — the bridge answers only `localhost`, `*.localhost`, IP literals and its bind name (DNS-rebinding guard; it can type into panes).
-- **One binary, mode by terminal** — `herdr-mcp` with no subcommand runs the TUI over its own HTTP bridge (port 7676, bound to `127.0.0.1`) when stdin is a terminal, else MCP stdio + HTTP (what an MCP client launching it gets); `--no-tui` forces the latter, `--http-only` serves the bridge alone. In TUI mode tracing goes to `<data_dir>/herdr-mcp.log`.
+- **One binary, mode by terminal** — `herdr-mcp` with no subcommand runs the TUI over its own HTTP bridge (port 7676, bound to `127.0.0.1`) when stdin is a terminal, else MCP stdio + HTTP (what an MCP client launching it gets); `--no-tui` forces the latter, `--http-only` serves the bridge alone, `--mcp-only` MCP stdio alone (no port). In TUI mode tracing goes to `<data_dir>/herdr-mcp.log`.
 
 ## Skills
 

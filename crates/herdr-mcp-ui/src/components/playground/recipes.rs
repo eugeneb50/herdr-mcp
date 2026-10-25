@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use super::forms::ResponseViewer;
 use crate::client::use_api;
 use crate::components::pane_options::pane_list;
+use herdr_mcp_api::playground::{display_value, event_names, parse_when, when_text};
 use herdr_mcp_api::{InstantiateTemplateRequest, RecipeStep, RecipeTemplate, RecipeTrigger};
 
 /// A finished run (`RunRecord`): its status, then each step's result in
@@ -67,7 +68,7 @@ pub fn TemplateForm(
             .variables
             .iter()
             .map(|v| {
-                let default = v.default_value.as_ref().map(crate::vars::display_value);
+                let default = v.default_value.as_ref().map(display_value);
                 (v.name.clone(), default.unwrap_or_default())
             })
             .collect()
@@ -140,41 +141,6 @@ pub fn TemplateForm(
             }
         }
     }
-}
-
-/// `when` as the editor shows it: `agent_status=done, pane.tab_id=w1:t1`.
-fn when_text(when: &serde_json::Map<String, Value>) -> String {
-    when.iter()
-        .map(|(k, v)| format!("{k}={}", crate::vars::display_value(v)))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Inverse of [`when_text`]: values that parse as JSON (`true`, `3`) stay
-/// typed, anything else is a string.
-fn parse_when(text: &str) -> serde_json::Map<String, Value> {
-    text.split(',')
-        .filter_map(|pair| {
-            let (k, v) = pair.split_once('=')?;
-            let v = v.trim();
-            let value = serde_json::from_str(v).unwrap_or_else(|_| Value::String(v.to_string()));
-            Some((k.trim().to_string(), value))
-        })
-        .filter(|(k, _)| !k.is_empty())
-        .collect()
-}
-
-/// herdr events a trigger can name: every subscription type in the
-/// installed herdr's schema.
-fn event_names(schema: &Value) -> Vec<String> {
-    schema
-        .pointer("/schemas/request/$defs/Subscription/oneOf")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|s| s.pointer("/properties/type/const")?.as_str())
-        .map(str::to_string)
-        .collect()
 }
 
 /// The recipe's triggers: herdr events that start a run of it (once saved).
@@ -270,20 +236,5 @@ pub fn TriggerEditor(
                 "+ Add Trigger"
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn when_round_trips_through_text() {
-        let when = parse_when("agent_status=done, pane.tab_id = w1:t1, focused=true");
-        assert_eq!(when["agent_status"], "done");
-        assert_eq!(when["pane.tab_id"], "w1:t1");
-        assert_eq!(when["focused"], true);
-        assert_eq!(parse_when(&when_text(&when)), when);
-        assert!(parse_when("").is_empty());
     }
 }

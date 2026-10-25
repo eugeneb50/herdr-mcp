@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.2.0-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-261%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-264%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-6%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
@@ -60,6 +60,7 @@ deployment (see [Install & build](#install--build)).
 ```bash
 herdr-mcp --no-tui       # MCP stdio + HTTP, no TUI
 herdr-mcp --http-only    # the HTTP bridge alone
+herdr-mcp --mcp-only     # MCP stdio alone, no bridge (beside a running TUI)
 herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 ```
 
@@ -74,8 +75,8 @@ herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
 - **Live herdr events** — the bridge relays herdr's event stream as SSE (`/api/herdr/events`); the playground shows it live
 - **Cron scheduler** — schedule recipe runs on cron expressions
-- **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: tools, herdr API, recipe builder with triggers, runs, variables, herdr events
-- **TUI dashboard** — what `herdr-mcp` opens in a terminal: VS Code-style tabs (mouse + keyboard) for send, overview, playground, variables, settings
+- **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: collections of saved requests (tools, herdr API, HTTP, LLM) with extract rules and triggers, runs, variables, herdr events
+- **TUI dashboard** — what `herdr-mcp` opens in a terminal: VS Code-style tabs (mouse + keyboard) for send, overview, playground (the same collections as the web, plus herdr events), variables, settings
 - **Live agent registry** — Unix socket event subscriber tracks panes and agent status in real time; role/label resolution for a2a primitives
 - **Shell-out core** — talks to herdr through its CLI (`tokio::process::Command`, real argv) and socket; no other runtime dependencies
 
@@ -197,6 +198,7 @@ a bundle, the bridge serves only `/api/*`.
 | `herdr-mcp` | TUI dashboard + HTTP bridge in a terminal; MCP stdio + HTTP when stdin is not a terminal |
 | `herdr-mcp --no-tui` | MCP stdio + HTTP bridge, no TUI |
 | `herdr-mcp --http-only` | HTTP bridge only (no TUI, no MCP stdio) |
+| `herdr-mcp --mcp-only` | MCP stdio only (no TUI, no HTTP bridge) |
 | `herdr-mcp plugin manifest` | Print the herdr plugin manifest (the repo's `herdr-plugin.toml`) |
 
 | Flag | Description |
@@ -204,6 +206,7 @@ a bundle, the bridge serves only `/api/*`.
 | `--no-tui` | Serve MCP over stdio + HTTP instead of opening the TUI |
 | `--http <port>` | HTTP bridge port (default: 7676) |
 | `--http-only` | HTTP bridge only |
+| `--mcp-only` | MCP stdio only, no HTTP bridge: for an MCP client beside a TUI already serving the port |
 | `--data-dir <path>` | Data directory (default: `./data`) |
 | `--herdr-socket <path>` | herdr daemon socket path |
 
@@ -438,7 +441,6 @@ All endpoints return JSON unless noted. Request/response types live in
 | `GET` / `POST` | `/api/variables` | List / save variables |
 | `GET` | `/api/variables/auto` | Live view of herdr panes, agents and workspace variables |
 | `GET` / `DELETE` | `/api/variables/{key}` | Get / delete a variable |
-| `GET` / `POST` | `/api/playground` | Saved playground state |
 
 ### Recipe format
 
@@ -550,8 +552,9 @@ Agents: [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md) shows how to combine them.
 | `llm_call` | An OpenAI-compatible chat call: OpenRouter by default, or OpenAI, Ollama, LM Studio, any `base_url`; key from `api_key` or an env var |
 | `llm_models` | The models such an API offers |
 
-In the web playground, **+ HTTP** opens an endpoint builder and **+ LLM** a
-provider → model → prompt wizard; both edit the same request a plain form does.
+In the playground (web and TUI), **+ HTTP** opens an endpoint builder and
+**+ LLM** a provider → model → prompt wizard (with a model picker filled from
+the provider); both edit the same request a plain form does.
 
 ### Recipes (6)
 | Tool | Description |

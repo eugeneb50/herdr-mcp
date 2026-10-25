@@ -194,7 +194,7 @@ fn render_intro(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Line::from(format!(
             "Local control surface for herdr. MCP server + HTTP bridge on port {} · {} tools · session {} · {} panes",
             app.settings.http_port,
-            app.playground.tools_list.len(),
+            app.playground.tools.len(),
             app.herdr.session_name(),
             app.herdr.panes.len(),
         )),

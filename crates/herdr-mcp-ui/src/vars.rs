@@ -6,15 +6,6 @@ use herdr_mcp_api::HerdrPane;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
-/// Render any JSON value as a plain string (never `[object Object]`).
-pub fn display_value(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
-    }
-}
-
 /// A dotted-prefix group: (prefix, [(short_key, value)]).
 pub type VarGroup = (String, Vec<(String, String)>);
 
@@ -79,12 +70,6 @@ pub fn pane_text<'a>(parts: impl IntoIterator<Item = &'a Option<String>>) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn display_value_never_object_object() {
-        assert_eq!(display_value(&Value::Null), "");
-        assert_eq!(display_value(&serde_json::json!({"x": 1})), r#"{"x":1}"#);
-    }
 
     #[test]
     fn panes_and_names_from_auto_vars() {

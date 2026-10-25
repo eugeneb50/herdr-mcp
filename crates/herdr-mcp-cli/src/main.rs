@@ -1,7 +1,7 @@
 //! `herdr-mcp` — the one binary. With no subcommand it serves: the TUI
 //! dashboard over this process's HTTP bridge when run in a terminal, else
 //! (an MCP client launching it over pipes, or `--no-tui`) MCP stdio + HTTP.
-//! `--http-only` serves the bridge alone. `plugin` is herdr-mcp as a herdr
+//! `--http-only` serves the bridge alone, `--mcp-only` MCP stdio alone. `plugin` is herdr-mcp as a herdr
 //! plugin (see `plugin.rs`).
 
 #![deny(clippy::correctness)]
@@ -35,6 +35,10 @@ struct Args {
     /// Serve the HTTP bridge only: no TUI, no MCP stdio.
     #[arg(long)]
     http_only: bool,
+    /// Serve MCP over stdio only: no TUI, no HTTP bridge (so it never takes
+    /// a port another herdr-mcp, e.g. the TUI, is serving on).
+    #[arg(long, conflicts_with_all = ["http", "http_only"])]
+    mcp_only: bool,
     /// Data directory (default `./data`; also `HERDR_MCP_DATA_DIR` or
     /// `data-dir` in the config file — this flag wins over both).
     #[arg(long)]
@@ -61,16 +65,22 @@ fn main() -> Result<()> {
         return tokio::runtime::Runtime::new()?.block_on(plugin::run(command, &config));
     }
 
-    let config = Config::load(Some(CliOverrides {
+    let mut config = Config::load(Some(CliOverrides {
         data_dir: args.data_dir,
         http_port: args.http,
         // Only a passed flag overrides config / env.
         http_only: args.http_only.then_some(true),
         herdr_socket: args.herdr_socket,
     }))?;
+    // Also over an http-only config file or env, which clap can't see.
+    if args.mcp_only {
+        config.http.port = None;
+        config.http.http_only = false;
+    }
     // SAFETY: single-threaded here; the runtime starts below.
     unsafe { config.export_herdr_socket() };
-    let tui = !config.http.http_only && !args.no_tui && std::io::stdin().is_terminal();
+    let tui =
+        !config.http.http_only && !args.no_tui && !args.mcp_only && std::io::stdin().is_terminal();
     let log_file = tui.then(|| config.data_dir.join(LOG_FILE));
     common::init_tracing(log_file.as_deref())?;
     let rt = tokio::runtime::Runtime::new()?;

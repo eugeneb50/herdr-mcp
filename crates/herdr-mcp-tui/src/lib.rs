@@ -2,7 +2,8 @@
 //!
 //! VS Code-style tabbed interface running directly in a terminal (and a herdr
 //! pane). Supports mouse + keyboard navigation. Tabs: Overview, Playground
-//! (tool runner + recipe builder), Variables, Settings.
+//! (collections of saved requests, and herdr's event stream), Variables,
+//! Settings.
 //!
 //! Rendered with `ratatui` (Frame/Block/Layout widgets) over a crossterm
 //! backend, following the patterns used by the sibling `herdr` and `zerocode`
@@ -38,7 +39,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Terminal, backend::CrosstermBackend};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use tui_textarea::{Input as TaInput, Key as TaKey, TextArea};
 
 use std::io::Write;
@@ -62,9 +63,7 @@ fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
     }
 }
 
-use herdr_mcp_api::{
-    ApiClient, ConfigResponse, HerdrPane, PlaygroundSnapshot, Recipe, RecipeTemplate, VariableStore,
-};
+use herdr_mcp_api::{ApiClient, ConfigResponse, HerdrPane, Recipe, RecipeTemplate, VariableStore};
 use theme::{accent_style, dim_style, muted_style, title_style};
 
 /// Available tabs.
@@ -104,36 +103,6 @@ impl Tab {
             Tab::Variables => "4",
             Tab::Settings => "5",
         }
-    }
-}
-
-/// A single editable field parsed from a tool's JSON `inputSchema`.
-#[derive(Clone, Debug)]
-pub enum FieldKind {
-    Text,
-    Number,
-    Boolean,
-    Enum,
-}
-
-#[derive(Clone, Debug)]
-pub struct ToolField {
-    pub name: String,
-    pub label: String,
-    pub kind: FieldKind,
-    pub required: bool,
-    pub default: Option<String>,
-    pub enum_variants: Option<Vec<String>>,
-    pub description: Option<String>,
-}
-
-impl ToolField {
-    /// Render the current value for display in the form.
-    pub fn display_value(&self, value: &str) -> String {
-        if value.is_empty() && self.default.is_none() {
-            return String::new();
-        }
-        value.to_string()
     }
 }
 
@@ -278,14 +247,13 @@ pub struct App {
     pub status_msg: String,
     pub last_refresh: Instant,
     /// last-fetched bridge snapshots (refreshed on every tick)
-    pub tools: Option<Vec<Value>>,
     pub recipes: Option<Vec<Recipe>>,
     pub templates: Option<Vec<RecipeTemplate>>,
     /// Bridge runtime config (`GET /api/config`); fetched once per connection
     /// and replaced by the response of a clipboard Save.
     pub config: Option<ConfigResponse>,
     /// playground sub-state
-    pub playground: PlaygroundState,
+    pub playground: tabs::playground::PlaygroundState,
     /// overview sub-state
     pub send: SendState,
     pub overview: OverviewState,
@@ -297,9 +265,7 @@ pub struct App {
     pub bridge_connected: bool,
     /// layout hit-areas captured during draw for mouse handling
     pub tab_rects: Vec<Rect>,
-    pub tool_list_inner: Rect,
     pub var_list_inner: Rect,
-    pub result_inner: Rect,
     /// Hit-area for the Overview pane table (mouse click → select pane).
     pub pane_table_inner: Rect,
     /// Hit-area for the Overview pane text (drag to select).
@@ -314,123 +280,6 @@ pub struct App {
     pub context_menu: ContextMenu,
     /// True when state has changed and a redraw is needed. Reset after draw.
     pub dirty: bool,
-    /// Whether playground last-used values were restored from the server this
-    /// session. In-memory marker created here — never persisted.
-    pub playground_restored: bool,
-}
-
-/// Playground tab state (tool runner + recipe builder).
-#[derive(Clone, Debug)]
-pub struct RecipeStep {
-    pub id: String,
-    pub tool: String,
-    pub params: Map<String, Value>,
-    pub description: Option<String>,
-    /// Kept as loaded so a save from the TUI doesn't drop them.
-    pub extract: Vec<herdr_mcp_api::Extract>,
-}
-
-impl Default for RecipeStep {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            tool: String::new(),
-            params: Map::new(),
-            description: None,
-            extract: Vec::new(),
-        }
-    }
-}
-
-/// Wire step → editable builder step (non-object params become empty).
-impl From<&herdr_mcp_api::RecipeStep> for RecipeStep {
-    fn from(s: &herdr_mcp_api::RecipeStep) -> Self {
-        Self {
-            id: s.id.clone(),
-            tool: s.tool.clone(),
-            params: s.params.as_object().cloned().unwrap_or_default(),
-            description: s.description.clone(),
-            extract: s.extract.clone(),
-        }
-    }
-}
-
-impl RecipeStep {
-    /// Builder step → wire step.
-    pub fn to_api(&self) -> herdr_mcp_api::RecipeStep {
-        herdr_mcp_api::RecipeStep {
-            id: self.id.clone(),
-            tool: self.tool.clone(),
-            params: Value::Object(self.params.clone()),
-            description: self.description.clone(),
-            extract: self.extract.clone(),
-        }
-    }
-}
-
-/// A tool category for the builder picker.
-#[derive(Clone, Debug)]
-pub struct ToolCategory {
-    pub label: String,
-    pub tools: Vec<(String, String)>, // (name, description)
-}
-
-/// Playground tab state (tool runner + recipe builder).
-pub struct PlaygroundState {
-    pub sub_tab: PlaygroundSub,
-    pub tool_index: usize,
-    pub tools_list: Vec<(String, String)>, // (name, short desc)
-    pub editing_field: bool,               // editing focused text/number field
-    pub fields: Vec<ToolField>,            // parsed schema for current tool
-    pub field_values: Vec<String>,         // current values aligned to `fields`
-    pub field_focus: usize,                // focused field index
-    /// Tool name the fields were parsed for. Keyed by name (not index) so a
-    /// tools-list reorder on refresh never attaches the wrong schema.
-    /// Derived materialization from the canonical tools payload — not stored.
-    pub fields_for_tool: Option<String>,
-    pub edit_area: TextArea<'static>, // live editor for the focused field
-    pub result_area: TextArea<'static>, // selectable view of the last result
-    /// Which frame has keyboard focus (0=tool list, 1=fields, 2=result).
-    pub focused_frame: usize,
-    pub result: Option<Value>,
-    pub error: Option<String>,
-
-    // --- Builder sub-tab state ---
-    pub builder_recipe_name: String,
-    pub builder_steps: Vec<RecipeStep>,
-    pub builder_step_focus: usize,  // focused step index
-    pub builder_param_focus: usize, // focused param index within step
-    pub builder_tool_categories: Vec<ToolCategory>,
-    pub builder_picker_open: bool,
-    pub builder_picker_category: usize,
-    pub builder_picker_tool: usize,
-    pub builder_picker_search: String,
-    pub builder_show_library: bool,
-    pub builder_library_focus: usize,
-    pub builder_library_tab: BuilderLibraryTab,
-    pub builder_result: Option<Value>,
-    pub builder_error: Option<String>,
-    pub builder_loading: bool,
-    /// Track the id of the recipe loaded into the builder (None = new recipe).
-    pub builder_editing_recipe_id: Option<herdr_mcp_api::Uuid>,
-    /// Whether a param value is actively being edited (TextArea open).
-    pub builder_editing_param: bool,
-    /// Live TextArea for editing a param value.
-    pub builder_param_edit_area: TextArea<'static>,
-    /// Which step's params are shown in the detail panel (None = none).
-    pub builder_open_step: Option<usize>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BuilderLibraryTab {
-    Templates,
-    Saved,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum PlaygroundSub {
-    Runner,
-    Builder,
 }
 
 /// Send tab state: what the user is typing and where it goes.
@@ -615,45 +464,10 @@ impl App {
             quitting: false,
             status_msg: String::new(),
             last_refresh: Instant::now(),
-            tools: None,
             recipes: None,
             templates: None,
             config: None,
-            playground: PlaygroundState {
-                sub_tab: PlaygroundSub::Runner,
-                tool_index: 0,
-                tools_list: Vec::new(),
-                editing_field: false,
-                fields: Vec::new(),
-                field_values: Vec::new(),
-                field_focus: 0,
-                fields_for_tool: None,
-                edit_area: TextArea::default(),
-                result_area: TextArea::default(),
-                focused_frame: 0,
-                result: None,
-                error: None,
-                // Builder state
-                builder_recipe_name: String::new(),
-                builder_steps: Vec::new(),
-                builder_step_focus: 0,
-                builder_param_focus: 0,
-                builder_tool_categories: Vec::new(),
-                builder_picker_open: false,
-                builder_picker_category: 0,
-                builder_picker_tool: 0,
-                builder_picker_search: String::new(),
-                builder_show_library: true,
-                builder_library_focus: 0,
-                builder_library_tab: BuilderLibraryTab::Templates,
-                builder_result: None,
-                builder_error: None,
-                builder_loading: false,
-                builder_editing_recipe_id: None,
-                builder_editing_param: false,
-                builder_param_edit_area: TextArea::default(),
-                builder_open_step: None,
-            },
+            playground: Default::default(),
             send: SendState {
                 pane: None,
                 text: TextArea::default(),
@@ -695,9 +509,7 @@ impl App {
             },
             bridge_connected: false,
             tab_rects: Vec::new(),
-            tool_list_inner: Rect::default(),
             var_list_inner: Rect::default(),
-            result_inner: Rect::default(),
             pane_table_inner: Rect::default(),
             pane_text_inner: Rect::default(),
             clipboard_preset_rects: Vec::new(),
@@ -710,7 +522,6 @@ impl App {
                 index: 0,
             },
             dirty: true,
-            playground_restored: false,
         }
         .tap_debug()
     }
@@ -761,8 +572,7 @@ impl App {
             let mut ok = true;
             // Always re-fetch tools on refresh so Ctrl+R picks up new tools.
             if let Ok(v) = http.list_tools().await {
-                self.tools = Some(v.clone());
-                self.playground.tools_list = parse_tool_list(&v);
+                tabs::playground::set_tools(self, &v);
             } else {
                 ok = false;
             }
@@ -770,6 +580,8 @@ impl App {
                 self.variables_state.entries = parse_variables(&v);
             }
             if let Ok(v) = http.list_recipes().await {
+                let before = self.recipes.take().unwrap_or_default();
+                self.playground.follow_tree(&before, &v);
                 self.recipes = Some(v);
             }
             if let Ok(v) = http.list_templates().await {
@@ -783,21 +595,12 @@ impl App {
             if let Ok(s) = http.settings().await {
                 self.apply_settings(s);
             }
-            // Restore last-used playground values once per session so tab
-            // navigation and restarts keep the user's context.
-            if !self.playground_restored {
-                self.restore_playground().await;
-            }
             if !ok {
                 self.bridge_connected = false;
             }
         }
     }
 
-    /// Re-parse the schema of the currently selected tool if needed.
-    /// Keyed by tool name (not positional index) so list reorders never
-    /// attach the wrong schema (B4). Preserves `field_values` when the same
-    /// tool stays selected; resets to defaults on tool switch.
     /// Take the bridge's settings: keys and intervals apply now; a new
     /// request timeout rebuilds the client.
     pub fn apply_settings(&mut self, response: herdr_mcp_api::SettingsResponse) {
@@ -809,122 +612,6 @@ impl App {
             && let Ok(client) = http::client_for(self.opts.http_port, next, &self.opts.data_dir)
         {
             self.http = Some(client);
-        }
-    }
-
-    pub fn sync_tool_fields(&mut self) {
-        let current_name = self
-            .playground
-            .tools_list
-            .get(self.playground.tool_index)
-            .map(|(n, _)| n.clone());
-        if self.playground.fields_for_tool == current_name {
-            return;
-        }
-        let tool = self.tools.as_ref().and_then(|t| {
-            // Prefer name match; fall back to positional index.
-            current_name
-                .as_ref()
-                .and_then(|name| {
-                    t.iter()
-                        .find(|item| item.get("name").and_then(|n| n.as_str()) == Some(name))
-                })
-                .or_else(|| t.get(self.playground.tool_index))
-                .cloned()
-        });
-        if let Some(tool) = tool {
-            let fields = parse_tool_schema(&tool);
-            let values = fields
-                .iter()
-                .map(|f| f.default.clone().unwrap_or_default())
-                .collect();
-            self.playground.fields = fields;
-            self.playground.field_values = values;
-            self.playground.field_focus = 0;
-            self.playground.editing_field = false;
-            self.playground.fields_for_tool = current_name;
-        }
-    }
-
-    /// Key for playground persistence: `default`, shared with the web
-    /// playground (one set of last-used values, whichever pane has focus).
-    pub fn playground_workspace(&self) -> String {
-        "default".to_string()
-    }
-
-    /// Restore last-used playground values from `GET /api/playground`.
-    /// Canonical store is the server `data/sessions/{ws}.playground.json`.
-    async fn restore_playground(&mut self) {
-        let Some(http) = self.http.clone() else {
-            return;
-        };
-        let ws = self.playground_workspace();
-        let Ok(snap) = http.get_playground(&ws).await else {
-            self.playground_restored = true;
-            return;
-        };
-        // Tool selection by name so index drift can't mis-select.
-        if let Some(name) = snap.tool_name.as_deref()
-            && let Some(idx) = self
-                .playground
-                .tools_list
-                .iter()
-                .position(|(n, _)| n == name)
-        {
-            self.playground.tool_index = idx;
-        }
-        // Field values are keyed by field name on the server; map back onto
-        // the current schema order.
-        if !snap.field_values.is_empty() {
-            self.sync_tool_fields();
-            for (i, f) in self.playground.fields.iter().enumerate() {
-                if let Some(val) = snap.field_values.get(&f.name)
-                    && let Some(slot) = self.playground.field_values.get_mut(i)
-                {
-                    *slot = val.clone();
-                }
-            }
-            self.playground.fields_for_tool = self
-                .playground
-                .tools_list
-                .get(self.playground.tool_index)
-                .map(|(n, _)| n.clone());
-        }
-        if !snap.builder_recipe_name.is_empty() {
-            self.playground.builder_recipe_name = snap.builder_recipe_name;
-        }
-        self.playground_restored = true;
-        self.dirty = true;
-    }
-
-    /// Persist current playground values to `POST /api/playground`.
-    /// Best-effort — never blocks the UI on failure.
-    pub async fn persist_playground(&self) {
-        let Some(http) = self.http.clone() else {
-            return;
-        };
-        let tool_name = self
-            .playground
-            .tools_list
-            .get(self.playground.tool_index)
-            .map(|(n, _)| n.clone());
-        let field_values = self
-            .playground
-            .fields
-            .iter()
-            .zip(self.playground.field_values.iter())
-            .map(|(f, val)| (f.name.clone(), val.clone()))
-            .collect();
-        // The server stamps `updated_at`.
-        let snapshot = PlaygroundSnapshot {
-            workspace_id: self.playground_workspace(),
-            tool_name,
-            field_values,
-            builder_recipe_name: self.playground.builder_recipe_name.clone(),
-            ..Default::default()
-        };
-        if let Err(e) = http.save_playground(&snapshot).await {
-            self.log_debug(format!("persist_playground failed: {e}"));
         }
     }
 
@@ -1023,15 +710,7 @@ impl App {
     fn active_textarea_mut(&mut self) -> Option<&mut TextArea<'static>> {
         match self.tab {
             Tab::Send => Some(&mut self.send.text),
-            Tab::Playground if self.playground.editing_field => {
-                Some(&mut self.playground.edit_area)
-            }
-            Tab::Playground
-                if self.playground.builder_editing_param
-                    && self.playground.sub_tab == PlaygroundSub::Builder =>
-            {
-                Some(&mut self.playground.builder_param_edit_area)
-            }
+            Tab::Playground => self.playground.edit_area_mut(),
             Tab::Variables if self.variables_state.editing => {
                 if self.variables_state.edit_field == EditField::Key {
                     Some(&mut self.variables_state.edit_key_area)
@@ -1047,13 +726,7 @@ impl App {
     fn active_textarea_ref(&self) -> Option<&TextArea<'static>> {
         match self.tab {
             Tab::Send => Some(&self.send.text),
-            Tab::Playground if self.playground.editing_field => Some(&self.playground.edit_area),
-            Tab::Playground
-                if self.playground.builder_editing_param
-                    && self.playground.sub_tab == PlaygroundSub::Builder =>
-            {
-                Some(&self.playground.builder_param_edit_area)
-            }
+            Tab::Playground => self.playground.edit_area(),
             Tab::Variables if self.variables_state.editing => {
                 if self.variables_state.edit_field == EditField::Key {
                     Some(&self.variables_state.edit_key_area)
@@ -1066,21 +739,10 @@ impl App {
     }
 
     /// The full text of the focused editable field (used when there's no active
-    /// selection). Falls back to the non-editing focused playground field.
+    /// selection). Falls back to the focused playground field.
     fn focused_field_text(&self) -> Option<String> {
         match self.tab {
-            Tab::Playground => {
-                if self.playground.editing_field {
-                    Some(self.playground.edit_area.lines().join("\n"))
-                } else if !self.playground.fields.is_empty() {
-                    self.playground
-                        .field_values
-                        .get(self.playground.field_focus)
-                        .cloned()
-                } else {
-                    None
-                }
-            }
+            Tab::Playground => tabs::playground::focused_text(self),
             Tab::Variables if self.variables_state.editing => {
                 if self.variables_state.edit_field == EditField::Key {
                     Some(self.variables_state.edit_key_area.lines().join("\n"))
@@ -1105,7 +767,8 @@ impl App {
         if self.tab == Tab::Overview && self.overview.focused_frame == 1 {
             return Some(self.overview.view.copy_text());
         }
-        if self.tab == Tab::Playground && self.playground.focused_frame == 2 {
+        if self.tab == Tab::Playground && self.playground.focus == tabs::playground::Focus::Response
+        {
             let ta = &self.playground.result_area;
             let full = ta.lines().join("\n");
             return Some(textarea_selection_or_full(ta, full));
@@ -1158,7 +821,7 @@ impl App {
     /// True when the current copy target is the read-only Result pane (so
     /// Cut/Paste must be suppressed).
     fn copy_target_is_readonly(&self) -> bool {
-        (self.tab == Tab::Playground && self.playground.focused_frame == 2)
+        (self.tab == Tab::Playground && self.playground.focus == tabs::playground::Focus::Response)
             || (self.tab == Tab::Overview && self.overview.focused_frame == 1)
     }
 
@@ -1168,17 +831,6 @@ impl App {
             && let Some(input) = to_textarea_input(code, mods)
         {
             ta.input(input);
-        }
-    }
-
-    /// Feed a key event into the focused Result `TextArea` (for scrolling /
-    /// Shift+arrow selection). No-op unless the Result pane is focused.
-    pub(crate) fn feed_result_textarea(&mut self, code: KeyCode, mods: KeyModifiers) {
-        if self.tab == Tab::Playground
-            && self.playground.focused_frame == 2
-            && let Some(input) = to_textarea_input(code, mods)
-        {
-            self.playground.result_area.input(input);
         }
     }
 
@@ -1215,11 +867,7 @@ impl App {
                 return;
             }
         };
-        self.log_debug(format!(
-            "clipboard_copy: focused_frame={} text_len={}",
-            self.playground.focused_frame == 2,
-            text.len()
-        ));
+        self.log_debug(format!("clipboard_copy: text_len={}", text.len()));
         self.set_clipboard(&text).await;
     }
 
@@ -1236,17 +884,10 @@ impl App {
             let yank = ta.yank_text();
             ta.cut();
             yank
-        } else if let Some(t) = self.focused_field_text() {
-            // No live editor: clear the focused (non-editing) field.
-            if self.tab == Tab::Playground
-                && !self.playground.editing_field
-                && let Some(v) = self
-                    .playground
-                    .field_values
-                    .get_mut(self.playground.field_focus)
-            {
-                *v = String::new();
-            }
+        } else if self.tab == Tab::Playground
+            && let Some(t) = tabs::playground::cut(self)
+        {
+            // No live editor: the focused field, opened empty.
             t
         } else {
             self.status_msg = "nothing to cut".into();
@@ -1279,28 +920,7 @@ impl App {
             }
         };
         match self.tab {
-            Tab::Playground => {
-                if !self.playground.editing_field {
-                    self.playground.editing_field = true;
-                    let cur = self
-                        .playground
-                        .field_values
-                        .get(self.playground.field_focus)
-                        .cloned()
-                        .unwrap_or_default();
-                    self.playground.edit_area = TextArea::new(vec![cur]);
-                }
-                let ta = &mut self.playground.edit_area;
-                ta.set_yank_text(text);
-                ta.paste();
-                if let Some(v) = self
-                    .playground
-                    .field_values
-                    .get_mut(self.playground.field_focus)
-                {
-                    *v = ta.lines().join("\n");
-                }
-            }
+            Tab::Playground => tabs::playground::paste(self, text),
             Tab::Variables if self.variables_state.editing => {
                 let ta = if self.variables_state.edit_field == EditField::Key {
                     &mut self.variables_state.edit_key_area
@@ -1479,6 +1099,9 @@ async fn main_loop(
             }
         }
 
+        if app.playground.events.drain() {
+            app.dirty = true;
+        }
         if app.job.as_ref().is_some_and(|j| j.is_finished())
             && let Some(job) = app.job.take()
         {
@@ -1851,7 +1474,7 @@ async fn handle_context_menu_key(app: &mut App, code: KeyCode, mods: KeyModifier
 }
 
 /// Whether mouse event `m` is inside `area`.
-fn inside(area: Rect, m: &MouseEvent) -> bool {
+pub(crate) fn inside(area: Rect, m: &MouseEvent) -> bool {
     m.column >= area.x && m.column < area.right() && m.row >= area.y && m.row < area.bottom()
 }
 
@@ -1861,22 +1484,16 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
         // Ignore mouse move events — they fire on every pixel of movement
         // and cause CPU thrashing without any useful state change.
         MouseEventKind::Moved => return Ok(()),
+        _ if app.tab == Tab::Playground
+            && !app.context_menu.open
+            && tabs::playground::handle_mouse(app, m).await =>
+        {
+            return Ok(());
+        }
         MouseEventKind::Down(MouseButton::Right) => {
-            // Region-aware: focusing the Result pane makes Copy target it.
-            let over_result = app.tab == Tab::Playground
-                && m.column >= app.result_inner.x
-                && m.column < app.result_inner.right()
-                && m.row >= app.result_inner.y
-                && m.row < app.result_inner.bottom();
-            app.log_debug(format!(
-                "mouse right-down at ({},{}) result_inner={:?} over_result={}",
-                m.column, m.row, app.result_inner, over_result
-            ));
-            if over_result {
-                app.playground.focused_frame = 2;
-                app.playground.editing_field = false;
-            } else if app.tab == Tab::Playground {
-                app.playground.focused_frame = 0;
+            // Region-aware: over the response, Copy takes its selection.
+            if app.tab == Tab::Playground && inside(app.playground.result_inner, &m) {
+                app.playground.focus = tabs::playground::Focus::Response;
             }
             // Over the Overview's pane text, Copy takes its selection.
             if app.tab == Tab::Overview {
@@ -1916,36 +1533,6 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                     app.status_msg.clear();
                     return Ok(());
                 }
-            }
-            // Tool list (playground).
-            if app.tab == Tab::Playground
-                && m.column >= app.tool_list_inner.x
-                && m.column < app.tool_list_inner.right()
-                && m.row >= app.tool_list_inner.y
-                && m.row < app.tool_list_inner.bottom()
-            {
-                let idx = (m.row - app.tool_list_inner.y) as usize;
-                if idx < app.playground.tools_list.len() {
-                    app.playground.tool_index = idx;
-                    app.playground.editing_field = false;
-                    app.playground.focused_frame = 0;
-                }
-                return Ok(());
-            }
-            // Result pane (playground): focus it for selection.
-            if app.tab == Tab::Playground
-                && m.column >= app.result_inner.x
-                && m.column < app.result_inner.right()
-                && m.row >= app.result_inner.y
-                && m.row < app.result_inner.bottom()
-            {
-                app.playground.focused_frame = 2;
-                app.playground.editing_field = false;
-                app.log_debug(format!(
-                    "mouse left-down focused Result pane; result_inner={:?}",
-                    app.result_inner
-                ));
-                return Ok(());
             }
             // Variable list.
             if app.tab == Tab::Variables
@@ -2062,16 +1649,6 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
             {
                 app.variables_state.selected += 1;
             }
-            Tab::Playground
-                if !app.playground.editing_field
-                    && app.playground.tool_index + 1 < app.playground.tools_list.len() =>
-            {
-                app.playground.tool_index += 1;
-            }
-            Tab::Playground if app.playground.focused_frame == 2 => {
-                // Scroll the result TextArea
-                app.feed_result_textarea(KeyCode::Down, KeyModifiers::NONE);
-            }
             Tab::Settings if !app.settings.clipboard.editing => {
                 app.settings.selected = (app.settings.selected + 1).min(9);
             }
@@ -2083,12 +1660,6 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
         MouseEventKind::ScrollUp => match app.tab {
             Tab::Variables if !app.variables_state.editing && app.variables_state.selected > 0 => {
                 app.variables_state.selected -= 1;
-            }
-            Tab::Playground if app.playground.focused_frame == 2 => {
-                app.feed_result_textarea(KeyCode::Up, KeyModifiers::NONE);
-            }
-            Tab::Playground if !app.playground.editing_field && app.playground.tool_index > 0 => {
-                app.playground.tool_index -= 1;
             }
             Tab::Settings if !app.settings.clipboard.editing && app.settings.selected > 0 => {
                 app.settings.selected -= 1;
@@ -2103,86 +1674,6 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
     Ok(())
 }
 
-/// Parse `/api/tools` into `(name, short_desc)` pairs.
-fn parse_tool_list(tools: &[Value]) -> Vec<(String, String)> {
-    tools
-        .iter()
-        .filter_map(|t| {
-            let name = t.get("name").and_then(|n| n.as_str())?.to_string();
-            let desc = t
-                .get("description")
-                .and_then(|d| d.as_str())
-                .unwrap_or("")
-                .to_string();
-            Some((name, truncate(&desc, 60)))
-        })
-        .collect()
-}
-
-/// Parse a tool's JSON `inputSchema` into editable `ToolField`s.
-pub fn parse_tool_schema(tool: &Value) -> Vec<ToolField> {
-    let schema = match tool.get("inputSchema").and_then(|s| s.as_object()) {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-    let props = match schema.get("properties").and_then(|p| p.as_object()) {
-        Some(p) => p,
-        None => return Vec::new(),
-    };
-    let required = schema
-        .get("required")
-        .and_then(|r| r.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    let mut fields = Vec::new();
-    for (name, spec) in props {
-        let typ = herdr_mcp_api::schema_type(spec);
-        let enum_variants = spec.get("enum").and_then(|e| e.as_array()).map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect::<Vec<_>>()
-        });
-        let kind = if typ == "boolean" {
-            FieldKind::Boolean
-        } else if enum_variants.is_some() {
-            FieldKind::Enum
-        } else if typ == "number" || typ == "integer" {
-            FieldKind::Number
-        } else {
-            FieldKind::Text
-        };
-        let default = spec.get("default").map(|d| match d {
-            Value::String(s) => s.clone(),
-            o => o.to_string(),
-        });
-        let description = spec
-            .get("description")
-            .and_then(|d| d.as_str())
-            .map(str::to_string);
-        let label = spec
-            .get("title")
-            .and_then(|t| t.as_str())
-            .unwrap_or(name)
-            .to_string();
-        fields.push(ToolField {
-            name: name.clone(),
-            label,
-            kind,
-            required: required.contains(name),
-            default,
-            enum_variants,
-            description,
-        });
-    }
-    fields
-}
-
-/// Parse `/api/variables` into `(key, value)` pairs.
 fn parse_variables(vars: &[VariableStore]) -> Vec<(String, String)> {
     vars.iter()
         .map(|v| {
@@ -2215,69 +1706,7 @@ pub fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
-    fn tool_with_schema() -> Value {
-        serde_json::json!({
-            "name": "start_agent",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "workspace_id": { "type": "string", "title": "Workspace", "description": "ws id" },
-                    "limit": { "type": ["integer", "null"], "default": 20 },
-                    "enabled": { "type": "boolean", "default": true },
-                    "mode": { "type": "string", "enum": ["fast", "slow"] }
-                },
-                "required": ["workspace_id"]
-            }
-        })
-    }
-
-    #[test]
-    fn parse_tool_schema_kinds_and_required() {
-        let fields = parse_tool_schema(&tool_with_schema());
-        assert_eq!(fields.len(), 4);
-
-        let ws = fields.iter().find(|f| f.name == "workspace_id").unwrap();
-        assert!(matches!(ws.kind, FieldKind::Text));
-        assert!(ws.required);
-        assert_eq!(ws.label, "Workspace");
-        assert_eq!(ws.description.as_deref(), Some("ws id"));
-
-        let limit = fields.iter().find(|f| f.name == "limit").unwrap();
-        assert!(matches!(limit.kind, FieldKind::Number));
-        assert_eq!(limit.default.as_deref(), Some("20"));
-        assert!(!limit.required);
-
-        let enabled = fields.iter().find(|f| f.name == "enabled").unwrap();
-        assert!(matches!(enabled.kind, FieldKind::Boolean));
-        assert_eq!(enabled.default.as_deref(), Some("true"));
-
-        let mode = fields.iter().find(|f| f.name == "mode").unwrap();
-        assert!(matches!(mode.kind, FieldKind::Enum));
-        assert_eq!(
-            mode.enum_variants.as_ref().unwrap(),
-            &vec!["fast".to_string(), "slow".to_string()]
-        );
-    }
-
-    #[test]
-    fn parse_tool_schema_empty_when_missing() {
-        let none = parse_tool_schema(&serde_json::json!({ "name": "x" }));
-        assert!(none.is_empty());
-    }
-
     // ── Clipboard / result selection ─────────────────────────────────────
-
-    fn sample_field() -> ToolField {
-        ToolField {
-            name: "field".into(),
-            label: "field".into(),
-            kind: FieldKind::Text,
-            required: false,
-            default: None,
-            enum_variants: None,
-            description: None,
-        }
-    }
 
     #[test]
     fn set_config_loads_clipboard_commands_into_editor() {
@@ -2328,10 +1757,16 @@ mod tests {
     fn selection_or_full_text_uses_focused_field() {
         let mut app = test_app();
         app.tab = Tab::Playground;
-        app.playground.fields = vec![sample_field()];
-        app.playground.field_values = vec!["hello".into()];
-        app.playground.field_focus = 0;
-        app.playground.focused_frame = 1;
+        let step = herdr_mcp_api::RecipeStep {
+            id: "hello".into(),
+            tool: "status".into(),
+            ..Default::default()
+        };
+        let rid = herdr_mcp_api::Uuid::nil();
+        app.playground.request = Some(tabs::playground::RequestForm::new(rid, &step));
+        app.playground.pick = tabs::playground::Pick::Request(rid, "hello".into());
+        app.playground.focus = tabs::playground::Focus::Main;
+        // Row 0 is the request's name.
         assert_eq!(app.selection_or_full_text(), Some("hello".to_string()));
     }
 
@@ -2339,7 +1774,7 @@ mod tests {
     fn selection_or_full_text_uses_full_result_when_focused() {
         let mut app = test_app();
         app.tab = Tab::Playground;
-        app.playground.focused_frame = 2;
+        app.playground.focus = tabs::playground::Focus::Response;
         app.playground.result_area = TextArea::new(vec!["line1".to_string(), "line2".to_string()]);
         assert_eq!(
             app.selection_or_full_text(),
@@ -2351,7 +1786,7 @@ mod tests {
     fn selection_or_full_text_uses_result_selection() {
         let mut app = test_app();
         app.tab = Tab::Playground;
-        app.playground.focused_frame = 2;
+        app.playground.focus = tabs::playground::Focus::Response;
         let mut ta = TextArea::new(vec!["hello world".to_string()]);
         ta.start_selection();
         for _ in 0..5 {
@@ -2374,9 +1809,9 @@ mod tests {
     fn copy_target_is_readonly_only_for_result() {
         let mut app = test_app();
         app.tab = Tab::Playground;
-        app.playground.focused_frame = 2;
+        app.playground.focus = tabs::playground::Focus::Response;
         assert!(app.copy_target_is_readonly());
-        app.playground.focused_frame = 0;
+        app.playground.focus = tabs::playground::Focus::Tree;
         assert!(!app.copy_target_is_readonly());
     }
 
@@ -2670,11 +2105,7 @@ mod tests {
     #[tokio::test]
     async fn handle_mouse_moved_does_not_modify_state() {
         let mut app = test_app();
-        let snapshot = (
-            app.tab,
-            app.playground.tool_index,
-            app.playground.focused_frame == 2,
-        );
+        let snapshot = (app.tab, app.playground.tree, app.playground.focus);
         let evt = crossterm::event::MouseEvent {
             kind: crossterm::event::MouseEventKind::Moved,
             column: 10,
@@ -2683,11 +2114,7 @@ mod tests {
         };
         handle_mouse(&mut app, evt).await.unwrap();
         assert_eq!(
-            (
-                app.tab,
-                app.playground.tool_index,
-                app.playground.focused_frame == 2
-            ),
+            (app.tab, app.playground.tree, app.playground.focus),
             snapshot
         );
     }

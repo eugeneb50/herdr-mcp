@@ -1071,7 +1071,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Write"),
-        description = "Send key presses to a pane. Common keys: Enter, Escape, Tab, Backspace, Ctrl+c, Ctrl+d, ArrowUp, ArrowDown"
+        description = "Send key presses to a pane. Keys: Enter, Esc, Tab, Backspace, Space, Up, Down, Left, Right, F1-F12, Ctrl+<key> (e.g. Ctrl+c). herdr has no Home, End, PageUp, PageDown or Delete."
     )]
     async fn send_keys(
         &self,
@@ -2826,10 +2826,6 @@ fn http_router(server: HerdrMcpServer, web_dir: Option<&std::path::Path>, bind: 
         .route("/api/variables/auto", get(auto_variables_handler))
         .route("/api/variables/resolve", post(resolve_handler))
         .route(
-            "/api/playground",
-            get(get_playground_handler).post(save_playground_handler),
-        )
-        .route(
             "/api/variables/{key}",
             get(get_variable_handler).delete(delete_variable_handler),
         )
@@ -3711,37 +3707,6 @@ fn pane_vars(
     merged
 }
 
-/// `GET /api/playground?workspace_id=w1` — load last-used playground values.
-/// Canonical store is `data/sessions/{ws}.playground.json` via `Persistence`.
-async fn get_playground_handler(
-    State(AppState { server, .. }): State<AppState>,
-    Query(params): Query<WorkspaceQuery>,
-) -> Result<Json<crate::persistence::PlaygroundSnapshot>, (StatusCode, String)> {
-    let ws = params
-        .workspace_id
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "default".to_string());
-    server
-        .persistence
-        .load_playground(&ws)
-        .await
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-}
-
-/// `POST /api/playground` — save last-used playground values.
-async fn save_playground_handler(
-    State(AppState { server, .. }): State<AppState>,
-    Json(snapshot): Json<crate::persistence::PlaygroundSnapshot>,
-) -> Result<StatusCode, (StatusCode, String)> {
-    server
-        .persistence
-        .save_playground(&snapshot)
-        .await
-        .map(|()| StatusCode::CREATED)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-}
-
 async fn save_variable_handler(
     State(AppState { server, .. }): State<AppState>,
     Json(req): Json<SaveVariableRequest>,
@@ -4553,7 +4518,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_contract_roundtrip_with_api_client() {
-        use herdr_mcp_api::{ApiClient, ApiError, CreateRecipeRequest, PlaygroundSnapshot};
+        use herdr_mcp_api::{ApiClient, ApiError, CreateRecipeRequest};
 
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("data");
@@ -4881,17 +4846,6 @@ esac
         assert_eq!(api.list_recipes().await.unwrap().len(), 1);
         api.delete_recipe(created.id).await.unwrap();
         assert!(api.list_recipes().await.unwrap().is_empty());
-
-        // Playground: client sends a default updated_at; the server stamps it.
-        let snap = PlaygroundSnapshot {
-            workspace_id: "w1".into(),
-            tool_name: Some("status".into()),
-            ..Default::default()
-        };
-        api.save_playground(&snap).await.unwrap();
-        let back = api.get_playground("w1").await.unwrap();
-        assert_eq!(back.tool_name.as_deref(), Some("status"));
-        assert!(back.updated_at > chrono::DateTime::<chrono::Utc>::default());
 
         // Unknown tool → typed 404, and the SPA fallback still serves the UI.
         assert!(matches!(

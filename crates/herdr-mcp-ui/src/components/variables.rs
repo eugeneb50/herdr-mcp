@@ -6,7 +6,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::client::use_api;
-use crate::vars::{display_value, group_auto};
+use crate::vars::group_auto;
+use herdr_mcp_api::playground::display_value;
 use herdr_mcp_api::{AutoVariablesResponse, SaveVariableRequest, VariableStore};
 
 pub(crate) fn user_entries(vars: &[VariableStore]) -> Vec<(String, String)> {
