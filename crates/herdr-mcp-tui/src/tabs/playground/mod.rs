@@ -906,6 +906,7 @@ async fn create_collection(app: &mut App, name: String, steps: Vec<RecipeStep>) 
         category: None,
         triggers: Vec::new(),
         gate: None,
+        trail: Default::default(),
     };
     match http.create_recipe(&req).await {
         Ok(r) => {
@@ -2684,7 +2685,7 @@ mod tests {
     fn a_failed_send_shows_its_error_once_wrapped() {
         let run: RunRecord = serde_json::from_value(serde_json::json!({
             "id": Uuid::nil(), "recipe_id": null, "name": null, "session_id": "w1",
-            "steps": [], "gate": null, "pass": 1, "status": "failed", "current_step": null,
+            "steps": [], "origin": { "kind": "api" }, "gate": null, "pass": 1, "status": "failed", "current_step": null,
             "results": { "get": { "error": "boom boom" } }, "variables": {},
             "failed_step": "get", "error": "boom boom",
             "started_at": "2026-10-24T00:00:00Z", "finished_at": null

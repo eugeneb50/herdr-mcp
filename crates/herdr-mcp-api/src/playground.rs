@@ -1041,6 +1041,7 @@ mod tests {
                 tool: HTTP_REQUEST.into(),
                 ..Default::default()
             }],
+            origin: Default::default(),
             gate: None,
             pass: 1,
             status: crate::RunStatus::Completed,

@@ -120,6 +120,7 @@ fn Sidebar(recipes: Vec<Recipe>, pick: Signal<Pick>, refresh: Signal<u32>) -> El
                 category: None,
                 triggers: Vec::new(),
                 gate: None,
+                trail: Default::default(),
             };
             match client.create_recipe(&req).await {
                 Ok(r) => {

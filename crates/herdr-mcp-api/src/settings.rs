@@ -177,6 +177,9 @@ pub const WATCHER_POLL_MS: &str = "intervals.watcher-poll-ms";
 pub const RECONNECT_BACKOFF_MS: &str = "intervals.reconnect-backoff-ms";
 pub const TUI_REFRESH_MS: &str = "intervals.tui-refresh-ms";
 pub const TUI_PANE_MS: &str = "intervals.tui-pane-ms";
+pub const KEEP_RUNS: &str = "runs.keep-runs";
+pub const KEEP_DAYS: &str = "runs.keep-days";
+pub const SNAPSHOT_LINES: &str = "runs.snapshot-lines";
 
 /// Every setting, in display order.
 pub const SPECS: &[Spec] = &[
@@ -307,6 +310,30 @@ pub const SPECS: &[Spec] = &[
         1_000,
         250,
         600_000,
+    ),
+    count(
+        KEEP_RUNS,
+        "runs kept",
+        "Finished runs kept per collection (ad-hoc runs count as one); older ones are deleted. 0 keeps every run. A collection can set its own.",
+        0,
+        0,
+        1_000_000,
+    ),
+    count(
+        KEEP_DAYS,
+        "days runs are kept",
+        "Finished runs older than this many days are deleted. 0 keeps them forever. A collection can set its own.",
+        0,
+        0,
+        36_500,
+    ),
+    count(
+        SNAPSHOT_LINES,
+        "failure snapshot lines",
+        "Lines of the pane a failed run last used, saved into the run's trail. 0 saves none. A collection can set its own.",
+        40,
+        0,
+        10_000,
     ),
     keys(
         "keys.tab-next",
@@ -775,6 +802,9 @@ mod tests {
             RECONNECT_BACKOFF_MS,
             TUI_REFRESH_MS,
             TUI_PANE_MS,
+            KEEP_RUNS,
+            KEEP_DAYS,
+            SNAPSHOT_LINES,
         ] {
             assert!(spec(key).is_some(), "{key}");
         }

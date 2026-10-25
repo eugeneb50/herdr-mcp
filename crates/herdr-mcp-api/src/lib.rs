@@ -21,16 +21,18 @@ pub mod variables;
 pub use agents::{AgentHandle, AgentsResponse};
 pub use client::{ApiClient, ApiError, schema_type, tool_is_error, tool_payload, tool_text};
 pub use config::{ClipboardConfig, ConfigResponse};
-pub use gate::{Check, Gate, GateAction, GateRule, Op};
+pub use gate::{Check, CheckResult, Gate, GateAction, GateRule, Op};
 pub use herdr::{
     HerdrEvent, HerdrPane, HerdrSession, PaneFilter, PanesResponse, RecipeTrigger, SessionsResponse,
 };
 pub use profile::AgentProfile;
 pub use recipe::{
     CreateRecipeRequest, Extract, InstantiateTemplateRequest, Recipe, RecipeStep, RecipeTemplate,
-    TemplateVariable, UpdateRecipeRequest, VarScope,
+    RunTrail, TemplateVariable, UpdateRecipeRequest, VarScope,
 };
-pub use run::{RunAction, RunEvent, RunEventKind, RunRecord, RunStatus, StartRunRequest};
+pub use run::{
+    RunAction, RunEvent, RunEventKind, RunOrigin, RunRecord, RunStatus, StartRunRequest, trail_text,
+};
 pub use settings::{Chord, SettingInfo, Settings, SettingsResponse};
 /// Re-exported so clients name recipe/execution ids without their own uuid dep.
 pub use uuid::Uuid;

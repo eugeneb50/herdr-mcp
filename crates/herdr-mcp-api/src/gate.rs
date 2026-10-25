@@ -84,25 +84,58 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
-impl Gate {
-    /// The first rule that matches, with its index. `lookup` resolves a
-    /// check's path in the run's scope.
-    pub fn decide(&self, lookup: impl Fn(&str) -> Option<Value>) -> Option<(usize, &GateRule)> {
-        self.rules
-            .iter()
-            .enumerate()
-            .find(|(_, rule)| rule.matches(&lookup))
-    }
+/// One check as the gate evaluated it: what `path` resolved to (`found`)
+/// and whether the check held. Recorded so a run's trail shows why the
+/// gate chose its rule.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CheckResult {
+    pub rule: usize,
+    pub path: String,
+    pub op: Op,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub value: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub found: Option<Value>,
+    pub held: bool,
 }
 
-impl GateRule {
-    pub fn matches(&self, lookup: &impl Fn(&str) -> Option<Value>) -> bool {
-        let mut results = self.checks.iter().map(|c| c.holds(lookup(c.path.trim())));
-        if self.any {
-            self.checks.is_empty() || results.any(|r| r)
-        } else {
-            results.all(|r| r)
+impl Gate {
+    /// The index of the first rule that matches, and every check of the
+    /// rules up to it as evaluated. `lookup` resolves a check's path in the
+    /// run's scope.
+    pub fn evaluate(
+        &self,
+        lookup: impl Fn(&str) -> Option<Value>,
+    ) -> (Option<usize>, Vec<CheckResult>) {
+        let mut evaluated = Vec::new();
+        for (i, rule) in self.rules.iter().enumerate() {
+            let held: Vec<bool> = rule
+                .checks
+                .iter()
+                .map(|c| {
+                    let found = lookup(c.path.trim());
+                    let held = c.holds(found.clone());
+                    evaluated.push(CheckResult {
+                        rule: i,
+                        path: c.path.clone(),
+                        op: c.op,
+                        value: c.value.clone(),
+                        found,
+                        held,
+                    });
+                    held
+                })
+                .collect();
+            let matched = if rule.any {
+                held.is_empty() || held.contains(&true)
+            } else {
+                !held.contains(&false)
+            };
+            if matched {
+                return (Some(i), evaluated);
+            }
         }
+        (None, evaluated)
     }
 }
 
@@ -222,7 +255,7 @@ mod tests {
             ],
             max_steps: DEFAULT_MAX_STEPS,
         };
-        let decide = |scope: Value| gate.decide(|p| scope.get(p).cloned()).map(|(i, _)| i);
+        let decide = |scope: Value| gate.evaluate(|p| scope.get(p).cloned()).0;
         assert_eq!(decide(json!({})), Some(0));
         assert_eq!(decide(json!({ "out": "error!" })), Some(1));
         assert_eq!(decide(json!({ "out": "fine", "code": 500 })), Some(1));
@@ -231,7 +264,22 @@ mod tests {
             rules: vec![],
             max_steps: 1,
         };
-        assert!(empty.decide(|_| None).is_none());
+        assert_eq!(empty.evaluate(|_| None), (None, vec![]));
+        // Every check of the rules tried is recorded, with what it found.
+        let (rule, checks) = gate.evaluate(|p| (p == "out").then(|| json!("fine")));
+        assert_eq!(rule, Some(2));
+        let found: Vec<_> = checks
+            .iter()
+            .map(|c| (c.rule, c.path.as_str(), c.found.clone(), c.held))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (0, "out", Some(json!("fine")), false),
+                (1, "out", Some(json!("fine")), false),
+                (1, "code", None, false),
+            ]
+        );
     }
 
     #[test]

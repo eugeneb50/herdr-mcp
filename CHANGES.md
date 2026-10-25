@@ -4,6 +4,17 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Run trail and retention.** Each run's log now says what started it (the
+  UI or API, an agent and its pane, a schedule, a trigger), what every step
+  actually sent (placeholders filled in, secrets redacted), which `{{ }}`
+  didn't resolve, the pane each step targets, and every gate check with the
+  value it found. A failed run saves the last lines of the pane it touched
+  last. `run_get` with `trail: true` returns all of it as a readable
+  timeline. Old runs can be deleted by count or age: globally with the new
+  `runs.keep-runs`, `runs.keep-days` and `runs.snapshot-lines` settings
+  (default: keep everything, 40 snapshot lines), or per collection with its
+  `trail`. **(breaking)** `gate_matched` is now `gate_decided`, also sent
+  when no rule matched.
 - **Collection gates: loops and end conditions.** A collection can end with
   a gate: rules checked in order after its last request, the first match
   deciding whether the run ends, fails with a message, or restarts from the

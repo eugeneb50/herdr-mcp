@@ -456,6 +456,11 @@ pub struct RecipeSaveParams {
     /// the first match decides (end, restart from step 1, or fail). A gate
     /// with no rules removes it.
     pub gate: Option<herdr_mcp_api::Gate>,
+    /// How long this recipe's runs are kept (`keep_runs` newest, or
+    /// `keep_days`) and the pane lines a failed run saves
+    /// (`snapshot_lines`); unset fields use the global `runs.*` settings,
+    /// 0 means no limit / no snapshot.
+    pub trail: Option<herdr_mcp_api::RunTrail>,
 }
 
 /// Parameters for `recipe_run`.
@@ -489,6 +494,11 @@ pub struct RecipeRunParams {
 #[serde(deny_unknown_fields)]
 pub struct RunGetParams {
     pub run_id: String,
+    /// Return the run's trail as text instead of its record: every event
+    /// with its time, what each step sent and got, why the gate chose its
+    /// rule, errors and pane snapshots. Use it to find out why a run failed.
+    #[serde(default)]
+    pub trail: bool,
 }
 
 /// Parameters for `run_control`.
@@ -661,6 +671,7 @@ impl HerdrMcpServer {
             category: req.category,
             triggers: req.triggers,
             gate: req.gate.filter(|g| !g.rules.is_empty()),
+            trail: req.trail,
         };
         self.persistence.save_recipe(&recipe).await?;
         Ok(recipe)
@@ -695,6 +706,9 @@ impl HerdrMcpServer {
         }
         if let Some(gate) = req.gate {
             recipe.gate = Some(gate).filter(|g| !g.rules.is_empty());
+        }
+        if let Some(trail) = req.trail {
+            recipe.trail = trail;
         }
         recipe.updated_at = chrono::Utc::now();
         self.persistence.save_recipe(&recipe).await?;
@@ -823,7 +837,8 @@ impl HerdrMcpServer {
                         recipe_id: Some(recipe_id),
                         ..Default::default()
                     };
-                    match crate::runs::start_run(&server, req).await {
+                    let origin = herdr_mcp_api::RunOrigin::Schedule;
+                    match crate::runs::start_run(&server, req, origin).await {
                         Ok((_, done)) => {
                             let _ = done.await;
                         }
@@ -1940,6 +1955,7 @@ impl HerdrMcpServer {
             triggers,
             category,
             gate,
+            trail,
         }): Parameters<RecipeSaveParams>,
     ) -> Result<CallToolResult, McpError> {
         let recipe = match recipe_id {
@@ -1953,6 +1969,7 @@ impl HerdrMcpServer {
                     triggers,
                     category,
                     gate,
+                    trail,
                 };
                 self.update_recipe(id, req)
                     .await
@@ -1971,6 +1988,7 @@ impl HerdrMcpServer {
                     category,
                     triggers: triggers.unwrap_or_default(),
                     gate,
+                    trail: trail.unwrap_or_default(),
                 };
                 self.create_recipe(req).await.map_err(to_mcp_err)?
             }
@@ -1995,6 +2013,7 @@ impl HerdrMcpServer {
             step_ids,
             wait,
         }): Parameters<RecipeRunParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         if recipe_id.is_none() && steps.is_none() {
             return Err(user_err("pass recipe_id or steps"));
@@ -2010,7 +2029,14 @@ impl HerdrMcpServer {
             variables,
             step_ids,
         };
-        let (run, done) = crate::runs::start_run(self, req)
+        let origin = match self.origin(&context.meta) {
+            Origin::Mcp => herdr_mcp_api::RunOrigin::Agent {
+                pane_id: herdr_mcp_core::session_context::pane_id(),
+            },
+            Origin::Run => herdr_mcp_api::RunOrigin::Run,
+            Origin::Api => herdr_mcp_api::RunOrigin::Api,
+        };
+        let (run, done) = crate::runs::start_run(self, req, origin)
             .await
             .map_err(|e| user_err(start_error_to_http(e).1))?;
         let run = if wait {
@@ -2025,17 +2051,27 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Recipes"),
-        description = "Get a run's record: status (running, paused, completed, failed, cancelled, interrupted), each step's state and result, and the error of a failed step."
+        description = "Get a run's record: status (running, paused, completed, failed, cancelled, interrupted), each step's state and result, and the error of a failed step. With trail: true, the run's trail as text instead: each event with its time, the params each step sent, why the gate chose its rule, and a snapshot of the pane a failed run last used."
     )]
     async fn run_get(
         &self,
-        Parameters(RunGetParams { run_id }): Parameters<RunGetParams>,
+        Parameters(RunGetParams { run_id, trail }): Parameters<RunGetParams>,
     ) -> Result<CallToolResult, McpError> {
         let id = parse_id("run_id", &run_id)?;
         let run = crate::runs::load(self, id)
             .await
             .map_err(to_mcp_err)?
             .ok_or_else(|| user_err(format!("no run {run_id}")))?;
+        if trail {
+            let events = self
+                .persistence
+                .load_run_events(&id, 0)
+                .await
+                .map_err(to_mcp_err)?;
+            return Ok(CallToolResult::success(vec![Content::text(
+                herdr_mcp_api::trail_text(&run, &events),
+            )]));
+        }
         Ok(CallToolResult::success(vec![
             Content::json(run).map_err(to_mcp_err)?,
         ]))
@@ -3199,6 +3235,29 @@ pub(crate) fn resolve_variables(
     }
 }
 
+/// The `{{ }}` placeholders left in `value` after resolving: ones whose
+/// path nothing in scope matched.
+pub(crate) fn unresolved_placeholders(value: &serde_json::Value) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut visit = |s: &str| {
+        for m in VARIABLE_RE.find_iter(s) {
+            if !found.iter().any(|f| f == m.as_str()) {
+                found.push(m.as_str().to_string());
+            }
+        }
+    };
+    fn walk(v: &serde_json::Value, visit: &mut impl FnMut(&str)) {
+        match v {
+            serde_json::Value::String(s) => visit(s),
+            serde_json::Value::Array(a) => a.iter().for_each(|v| walk(v, visit)),
+            serde_json::Value::Object(m) => m.values().for_each(|v| walk(v, visit)),
+            _ => {}
+        }
+    }
+    walk(value, &mut visit);
+    found
+}
+
 /// Resolve a `{{ }}` path against the run scope:
 ///
 /// - a scope key as-is (`template.session_id`, `result.pane_id`);
@@ -3379,7 +3438,7 @@ async fn start_run_handler(
     Query(q): Query<WaitQuery>,
     Json(req): Json<herdr_mcp_api::StartRunRequest>,
 ) -> Result<(StatusCode, Json<herdr_mcp_api::RunRecord>), (StatusCode, String)> {
-    let (run, done) = crate::runs::start_run(&server, req)
+    let (run, done) = crate::runs::start_run(&server, req, herdr_mcp_api::RunOrigin::Api)
         .await
         .map_err(start_error_to_http)?;
     if !q.wait {
@@ -3964,6 +4023,17 @@ mod tests {
         let mut value = serde_json::json!({ "t": "hi {{ step2.output }}" });
         resolve_variables(&mut value, &results);
         assert_eq!(value, serde_json::json!({ "t": "hi world" }));
+    }
+
+    #[test]
+    fn unresolved_placeholders_lists_each_once() {
+        let mut v =
+            serde_json::json!({"a": "{{ x }} {{ y.z }}", "b": ["{{ x }}", 1], "c": "{{ ok }}"});
+        resolve_variables(
+            &mut v,
+            &HashMap::from([("ok".to_string(), serde_json::json!("1"))]),
+        );
+        assert_eq!(unresolved_placeholders(&v), ["{{ x }}", "{{ y.z }}"]);
     }
 
     #[test]
@@ -4826,6 +4896,7 @@ esac
                 category: None,
                 triggers: Vec::new(),
                 gate: None,
+                trail: Default::default(),
             })
             .await
             .unwrap();

@@ -435,6 +435,24 @@ fails the step.
 5. The event log is the run; RunRecord is its fold
 ```
 
+**Trail.** The event log is also the run's audit trail. `step_started`
+carries the params as sent (placeholders filled, secret-named fields
+redacted as in the security audit log), the `{{ }}` nothing resolved, and
+the pane the step targets; the header records who started the run
+(`origin`: api, agent + its pane, run, schedule, trigger + event);
+`gate_decided` lists every check evaluated with what its path resolved to.
+When a run fails (a step, a gate `fail`, `max_steps`), `pane_snapshot` saves
+the last `snapshot_lines` lines of the pane it touched last (a step's
+`pane_id`, or an agent a step returned). `herdr_mcp_api::trail_text`
+renders it all as text (`run_get` with `trail: true`).
+
+**Retention.** After each run, and for every group at daemon start,
+finished runs of the same collection (ad-hoc runs and deleted collections'
+runs form one group) beyond the newest `keep_runs`, or older than
+`keep_days`, are deleted. A collection's `trail` fields win over the global
+`runs.keep-runs` / `runs.keep-days` / `runs.snapshot-lines` settings; 0 means
+no limit, and the defaults keep every run (snapshot: 40 lines).
+
 **Gate** (`herdr_mcp_api::gate`, shared so the UIs can preview it): an
 ordered list of rules; each has `checks` (all must hold, or any with
 `any: true`; none = always) and a `then` action. A check resolves `path`

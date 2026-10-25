@@ -24,6 +24,33 @@ pub struct Recipe {
     /// What a full run does after the last request (end, restart, fail).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<Gate>,
+    /// How long its runs are kept, and its failure snapshots.
+    #[serde(default, skip_serializing_if = "RunTrail::is_default")]
+    pub trail: RunTrail,
+}
+
+/// A collection's own run-history settings. A field left `None` uses the
+/// global `runs.*` setting; 0 means no limit (no snapshot for
+/// `snapshot_lines`).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct RunTrail {
+    /// Finished runs of this collection kept; older ones are deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_runs: Option<u32>,
+    /// Finished runs older than this many days are deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_days: Option<u32>,
+    /// Lines of the pane a failed run last used, saved into its trail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_lines: Option<u32>,
+}
+
+impl RunTrail {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// One request in a collection (recipe): a tool call, plus the variables
@@ -114,6 +141,8 @@ pub struct CreateRecipeRequest {
     pub triggers: Vec<RecipeTrigger>,
     #[serde(default)]
     pub gate: Option<Gate>,
+    #[serde(default)]
+    pub trail: RunTrail,
 }
 
 /// `PUT /api/recipes/{id}` body — every field optional (partial update).
@@ -128,4 +157,6 @@ pub struct UpdateRecipeRequest {
     pub category: Option<String>,
     /// A gate without rules clears it.
     pub gate: Option<Gate>,
+    /// Replaces the collection's run-history settings.
+    pub trail: Option<RunTrail>,
 }

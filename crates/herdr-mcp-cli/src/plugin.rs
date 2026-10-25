@@ -394,7 +394,7 @@ async fn follow(api: &ApiClient, id: herdr_mcp_api::Uuid) -> Result<()> {
         for event in api.run_events(id, since).await? {
             since = event.seq + 1;
             match event.kind {
-                RunEventKind::StepStarted { step } => println!("▶ {step}"),
+                RunEventKind::StepStarted { step, .. } => println!("▶ {step}"),
                 RunEventKind::StepFinished { step, result } => {
                     println!("✔ {step}");
                     for line in tool_text(&result).lines().take(12) {
@@ -402,8 +402,8 @@ async fn follow(api: &ApiClient, id: herdr_mcp_api::Uuid) -> Result<()> {
                     }
                 }
                 RunEventKind::StepFailed { step, error, .. } => println!("✘ {step}: {error}"),
-                RunEventKind::GateMatched {
-                    action: GateAction::Restart { .. },
+                RunEventKind::GateDecided {
+                    action: Some(GateAction::Restart { .. }),
                     ..
                 } => println!("↻ restart"),
                 RunEventKind::Error { error } => println!("✘ {error}"),
