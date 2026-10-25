@@ -116,7 +116,8 @@ herdr-mcp/
 │   │       ├── lib.rs      # Re-exports every wire type + ApiClient
 │   │       ├── agents.rs   # AgentHandle, AgentsResponse
 │   │       ├── recipe.rs   # Recipe, RecipeStep, ExecutionResult, templates, recipe requests
-│   │       ├── variables.rs # VariableStore, PlaygroundSnapshot, variable/tool envelopes
+│   │       ├── variables.rs # VariableStore, resolve, variable/tool envelopes
+│   │       ├── playground.rs # Collections model shared by web + TUI: tool/method forms, extract paths, request saves
 │   │       └── client.rs   # Typed ApiClient + ApiError
 │   ├── herdr-mcp-core/     # Config
 │   │   └── src/
@@ -456,7 +457,7 @@ type text or edit a field:
 |---|---|
 | Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "press Enter after" (`Ctrl+t`); addressed by pane id |
 | Overview | Stats, pane table (tab/label/agent/status/cwd) for the shown session (`s` cycles sessions), and the picked pane's text below it: re-read every `intervals.tui-pane-ms` (screen, or scrollback with `r`), scrollable, mouse drag selects (reading pauses while a selection is up), Ctrl+C or right-click Copy copies the selection or the whole text, Esc clears; Tab moves focus between table and text |
-| Playground | Tool runner + recipe builder (same as web playground) |
+| Playground | Collections, as on the web: a tree of collections (saved recipes) and their requests; edit a request's tool or herdr method, params (resolved preview) and extract rules, Send it (Ctrl+G) or run the collection, pick a result path to extract it; collection variables and triggers; new from a template. Ctrl+E shows herdr's live event stream |
 | Variables | Workspace-scoped variable editor |
 | Settings | Options (every `/api/settings` knob: Enter edit, Del default, Shift+Del all defaults), runtime info, clipboard config |
 

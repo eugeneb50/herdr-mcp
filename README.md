@@ -75,8 +75,8 @@ herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
 - **Live herdr events** — the bridge relays herdr's event stream as SSE (`/api/herdr/events`); the playground shows it live
 - **Cron scheduler** — schedule recipe runs on cron expressions
-- **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: tools, herdr API, recipe builder with triggers, runs, variables, herdr events
-- **TUI dashboard** — what `herdr-mcp` opens in a terminal: VS Code-style tabs (mouse + keyboard) for send, overview, playground, variables, settings
+- **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: collections of saved requests (tools, herdr API, HTTP, LLM) with extract rules and triggers, runs, variables, herdr events
+- **TUI dashboard** — what `herdr-mcp` opens in a terminal: VS Code-style tabs (mouse + keyboard) for send, overview, playground (the same collections as the web, plus herdr events), variables, settings
 - **Live agent registry** — Unix socket event subscriber tracks panes and agent status in real time; role/label resolution for a2a primitives
 - **Shell-out core** — talks to herdr through its CLI (`tokio::process::Command`, real argv) and socket; no other runtime dependencies
 
@@ -441,7 +441,6 @@ All endpoints return JSON unless noted. Request/response types live in
 | `GET` / `POST` | `/api/variables` | List / save variables |
 | `GET` | `/api/variables/auto` | Live view of herdr panes, agents and workspace variables |
 | `GET` / `DELETE` | `/api/variables/{key}` | Get / delete a variable |
-| `GET` / `POST` | `/api/playground` | Saved playground state |
 
 ### Recipe format
 

@@ -151,7 +151,7 @@ through deliberate team decision.
 - `crates/herdr-mcp-tui/` — TUI dashboard (`lib.rs` app loop, `tabs/`, `theme.rs`, `http.rs` bridge discovery); talks to the bridge through `herdr-mcp-api::ApiClient`
 - `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers), `runs.rs` (run engine), `triggers.rs`, `scheduler.rs`, `herdr_client.rs` (socket client, event subscriber, agent registry), `panes.rs` (herdr panes + sessions, the one pane fetch), `agents.rs` / `profiles.rs` (agent profiles), `persistence.rs`, `templates.rs`, `variables.rs`
 - `crates/herdr-mcp-cli/` — `src/main.rs` (mode choice: TUI / MCP stdio / HTTP only; `plugin`), `src/common.rs` (`serve_core`: the one server instance + background tasks), `src/plugin.rs` (herdr plugin), `tests/cli.rs`
-- `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the tool runner, herdr API, recipe builder and herdr events tabs; built into `herdr-mcp` and served by the HTTP bridge
+- `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the collections view (requests, HTTP/LLM builders) and herdr events; the collections model both UIs share is `herdr-mcp-api::playground`; built into `herdr-mcp` and served by the HTTP bridge
 - `data/` — runtime persistence (recipes, runs, variables, schedules, sessions, profiles)
 - `docs/` — `ARCHITECTURE.md` (reference), `SWARMS.md` (flow-engine proposal)
 

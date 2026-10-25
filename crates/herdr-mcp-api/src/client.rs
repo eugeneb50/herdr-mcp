@@ -346,6 +346,25 @@ impl ApiClient {
         self.get(&["api", "templates"]).await
     }
 
+    /// `GET /api/herdr/events` — herdr's live event stream (SSE), opened:
+    /// read it with `chunk()`, one `data: {HerdrEvent}` line per event. Use
+    /// a client without a request timeout, which would end the stream.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn herdr_events(&self) -> Result<reqwest::Response, ApiError> {
+        let resp = self
+            .request(Method::GET, &["api", "herdr", "events"])
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ApiError::Status {
+                status: status.as_u16(),
+                body: resp.text().await.unwrap_or_default(),
+            });
+        }
+        Ok(resp)
+    }
+
     /// `GET /api/herdr/schema` — the installed herdr's socket API schema.
     pub async fn herdr_schema(&self) -> Result<Value, ApiError> {
         self.get(&["api", "herdr", "schema"]).await
@@ -436,7 +455,7 @@ impl ApiClient {
         .await
     }
 
-    // ── variables / playground ─────────────────────────────────────────
+    // ── variables ─────────────────────────────────────────
 
     /// `GET /api/variables`.
     pub async fn list_variables(&self) -> Result<Vec<VariableStore>, ApiError> {
@@ -476,24 +495,6 @@ impl ApiClient {
     /// a run would resolve them.
     pub async fn resolve(&self, req: &ResolveRequest) -> Result<ResolveResponse, ApiError> {
         self.post(&["api", "variables", "resolve"], req).await
-    }
-
-    /// `GET /api/playground?workspace_id=` — last-used playground values.
-    pub async fn get_playground(&self, workspace_id: &str) -> Result<PlaygroundSnapshot, ApiError> {
-        let req = Self::ws_query(
-            self.request(Method::GET, &["api", "playground"]),
-            Some(workspace_id),
-        );
-        Self::json(req).await
-    }
-
-    /// `POST /api/playground` (201).
-    pub async fn save_playground(&self, snapshot: &PlaygroundSnapshot) -> Result<(), ApiError> {
-        self.no_content(
-            self.request(Method::POST, &["api", "playground"])
-                .json(snapshot),
-        )
-        .await
     }
 }
 

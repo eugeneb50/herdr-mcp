@@ -4,6 +4,13 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **TUI playground = web playground (breaking).** The TUI's tool runner and
+  recipe builder are gone. Its Playground tab now shows the web's
+  collections: the tree, the collection and request editors, Send and Run,
+  extract rules picked from result paths, collection variables, triggers and
+  templates. Ctrl+E shows herdr's live events. The model both UIs use moved
+  to `herdr-mcp-api::playground`. `/api/playground` and `PlaygroundSnapshot`
+  (the TUI's last-used values) are removed.
 - **`--mcp-only`.** MCP over stdio with no HTTP bridge, for an MCP client
   running beside a TUI that already serves the port. Before, whichever
   process started first took 7676.

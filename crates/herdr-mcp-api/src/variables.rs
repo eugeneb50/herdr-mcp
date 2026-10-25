@@ -1,11 +1,9 @@
-//! Variable, playground and tool-catalog wire types.
+//! Variable and tool-catalog wire types.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
-
-use crate::recipe::RecipeStep;
 
 /// A persistent variable stored in the herdr-mcp data directory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,19 +62,6 @@ pub struct ResolveResponse {
     /// Placeholders nothing in scope resolves (left as written), e.g. a
     /// step result that only exists during a run.
     pub unresolved: Vec<String>,
-}
-
-/// Playground last-used UI state (tool selection + field values + builder).
-/// Source of truth: `data/sessions/{ws}.playground.json` on the server.
-/// TUI and web resolve it on demand via `GET /api/playground`; never cached.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PlaygroundSnapshot {
-    pub workspace_id: String,
-    pub tool_name: Option<String>,
-    pub field_values: HashMap<String, String>,
-    pub builder_recipe_name: String,
-    pub builder_steps: Vec<RecipeStep>,
-    pub updated_at: DateTime<Utc>,
 }
 
 /// `GET /api/tools` response. Each tool is an MCP tool definition (name,

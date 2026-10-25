@@ -7,25 +7,23 @@
 
 use dioxus::prelude::*;
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::builders::{HttpBuilder, LlmWizard};
-use super::forms::{DynamicForm, ResponseViewer, build_params};
-use super::herdr_api::{Method, method_groups, methods};
+use super::forms::{DynamicForm, ResponseViewer};
 use super::recipes::{RunResults, TemplateForm, TriggerEditor};
-use super::tools::{ToolInfo, schema_parts, tool_groups, tool_list};
 use crate::client::use_api;
 use crate::components::variables::{UserTable, user_entries};
-use crate::vars::display_value;
-use herdr_mcp_api::{
-    ApiClient, CreateRecipeRequest, Extract, Recipe, RecipeStep, RecipeTemplate, ResolveRequest,
-    RunRecord, StartRunRequest, UpdateRecipeRequest, Uuid, VarScope,
+use herdr_mcp_api::playground::{
+    HERDR_API, HTTP_REQUEST, LLM_CALL, ToolInfo, add_request, delete_step, display_value, folders,
+    method_groups, methods, parse_value, raw_values, request_method, request_params,
+    request_schema, request_values, result_paths, save_step, set_steps, sorted_vars, tool_groups,
+    tool_label, tool_list, var_name,
 };
-
-/// The tool whose requests call any herdr socket method.
-const HERDR_API: &str = "herdr_api";
-const HTTP_REQUEST: &str = "http_request";
-const LLM_CALL: &str = "llm_call";
+use herdr_mcp_api::{
+    CreateRecipeRequest, Extract, Recipe, RecipeStep, RecipeTemplate, ResolveRequest, RunRecord,
+    StartRunRequest, UpdateRecipeRequest, Uuid, VarScope,
+};
 
 /// What the main panel shows.
 #[derive(Clone, PartialEq, Debug)]
@@ -34,204 +32,6 @@ pub enum Pick {
     Globals,
     Collection(Uuid),
     Request(Uuid, String),
-}
-
-/// Recipes by folder (`category`; `""` first, for none), each sorted by name.
-fn folders(recipes: &[Recipe]) -> Vec<(String, Vec<Recipe>)> {
-    let mut by: BTreeMap<String, Vec<Recipe>> = BTreeMap::new();
-    for r in recipes {
-        let folder = r.category.clone().unwrap_or_default().trim().to_string();
-        by.entry(folder).or_default().push(r.clone());
-    }
-    by.into_iter()
-        .map(|(f, mut rs)| {
-            rs.sort_by_key(|r| r.name.to_lowercase());
-            (f, rs)
-        })
-        .collect()
-}
-
-/// A request as the sidebar names it: the herdr method it calls, else its tool.
-fn tool_label(step: &RecipeStep) -> String {
-    match step.params.get("method").and_then(Value::as_str) {
-        Some(m) if step.tool == HERDR_API => m.to_string(),
-        _ => step.tool.clone(),
-    }
-}
-
-/// `requestN`, one past the highest N among `steps`.
-fn fresh_request_id(steps: &[RecipeStep]) -> String {
-    let n = steps
-        .iter()
-        .filter_map(|s| s.id.strip_prefix("request")?.parse::<usize>().ok())
-        .max()
-        .unwrap_or(0);
-    format!("request{}", n + 1)
-}
-
-/// Request ids are used as `{{ id.path }}`: letters, digits, `_` and `-`.
-fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-/// A params object as the form edits it: strings as-is, the rest as JSON.
-fn raw_values(params: &Value) -> HashMap<String, String> {
-    params
-        .as_object()
-        .map(|m| {
-            m.iter()
-                .map(|(k, v)| (k.clone(), display_value(v)))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// A variable typed in a form: JSON when it parses (`3`, `true`, `[1]`),
-/// else the text.
-fn parse_value(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
-}
-
-/// The form schema of a request: the herdr method's params for
-/// `herdr_api`, else the tool's.
-fn request_schema(
-    tools: &[ToolInfo],
-    methods: &[Method],
-    tool: &str,
-    method: &str,
-) -> (HashMap<String, Value>, HashSet<String>) {
-    if tool == HERDR_API {
-        methods
-            .iter()
-            .find(|m| m.name == method)
-            .map(|m| (m.props.clone(), m.required.clone()))
-            .unwrap_or_default()
-    } else {
-        tools
-            .iter()
-            .find(|t| t.name == tool)
-            .map(|t| schema_parts(&t.schema))
-            .unwrap_or_default()
-    }
-}
-
-/// The params a request sends: `{method, params}` for `herdr_api`.
-fn request_params(
-    props: &HashMap<String, Value>,
-    tool: &str,
-    method: &str,
-    values: &HashMap<String, String>,
-) -> Value {
-    let params = build_params(props, values);
-    if tool == HERDR_API {
-        serde_json::json!({ "method": method, "params": params })
-    } else {
-        params
-    }
-}
-
-/// Every leaf of `v` (and every empty container) with the path an
-/// [`Extract`] follows to it, in document order; at most `limit`.
-fn result_paths(v: &Value, limit: usize) -> Vec<(String, Value)> {
-    fn walk(v: &Value, path: String, out: &mut Vec<(String, Value)>, limit: usize) {
-        if out.len() >= limit {
-            return;
-        }
-        match v {
-            Value::Object(m) if !m.is_empty() => {
-                for (k, child) in m {
-                    let p = if path.is_empty() {
-                        k.clone()
-                    } else {
-                        format!("{path}.{k}")
-                    };
-                    walk(child, p, out, limit);
-                }
-            }
-            Value::Array(a) if !a.is_empty() => {
-                for (i, child) in a.iter().enumerate() {
-                    walk(child, format!("{path}[{i}]"), out, limit);
-                }
-            }
-            _ => out.push((path, v.clone())),
-        }
-    }
-    let mut out = Vec::new();
-    walk(v, String::new(), &mut out, limit);
-    out
-}
-
-/// A variable name suggested for `path`: its last key (`panes[0].pane_id` →
-/// `pane_id`).
-fn var_name(path: &str) -> String {
-    let last = path
-        .rsplit('.')
-        .map(|s| s.split('[').next().unwrap_or(""))
-        .find(|s| !s.is_empty())
-        .unwrap_or("value");
-    last.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect()
-}
-
-/// Replace request `old_id` of collection `id` with `step` (appending it if
-/// it is gone), reading the collection fresh so nothing else is clobbered.
-async fn save_step(
-    client: ApiClient,
-    id: Uuid,
-    old_id: &str,
-    step: RecipeStep,
-) -> Result<(), String> {
-    if !valid_id(&step.id) {
-        return Err("the request name may use letters, digits, _ and - only".into());
-    }
-    let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
-    if step.id != old_id && recipe.steps.iter().any(|s| s.id == step.id) {
-        return Err(format!(
-            "this collection already has a request `{}`",
-            step.id
-        ));
-    }
-    match recipe.steps.iter_mut().find(|s| s.id == old_id) {
-        Some(s) => *s = step,
-        None => recipe.steps.push(step),
-    }
-    set_steps(client, id, recipe.steps).await
-}
-
-async fn set_steps(client: ApiClient, id: Uuid, steps: Vec<RecipeStep>) -> Result<(), String> {
-    let req = UpdateRecipeRequest {
-        steps: Some(steps),
-        ..Default::default()
-    };
-    client
-        .update_recipe(id, &req)
-        .await
-        .map(drop)
-        .map_err(|e| e.to_string())
-}
-
-/// Append a new `tool` request (starting from `params`) to collection
-/// `id`; its id.
-async fn add_request(
-    client: ApiClient,
-    id: Uuid,
-    tool: &str,
-    params: Value,
-) -> Result<String, String> {
-    let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
-    let step_id = fresh_request_id(&recipe.steps);
-    recipe.steps.push(RecipeStep {
-        id: step_id.clone(),
-        tool: tool.into(),
-        params,
-        ..Default::default()
-    });
-    set_steps(client, id, recipe.steps).await?;
-    Ok(step_id)
 }
 
 #[component]
@@ -497,7 +297,7 @@ fn CollectionView(recipe: Recipe, pick: Signal<Pick>, refresh: Signal<u32>) -> E
     let reorder = move |next: Vec<RecipeStep>| {
         let client = client();
         spawn(async move {
-            match set_steps(client, id, next).await {
+            match set_steps(&client, id, next).await {
                 Ok(()) => refresh += 1,
                 Err(e) => msg.set(Some(Err(e))),
             }
@@ -506,7 +306,7 @@ fn CollectionView(recipe: Recipe, pick: Signal<Pick>, refresh: Signal<u32>) -> E
     let new_request = move |tool: &'static str, params: Value| {
         let client = client();
         spawn(async move {
-            match add_request(client, id, tool, params).await {
+            match add_request(&client, id, tool, params).await {
                 Ok(step) => {
                     pick.set(Pick::Request(id, step));
                     refresh += 1;
@@ -713,15 +513,6 @@ fn CollectionView(recipe: Recipe, pick: Signal<Pick>, refresh: Signal<u32>) -> E
     }
 }
 
-fn sorted_vars(vars: &HashMap<String, Value>) -> Vec<(String, String)> {
-    let mut out: Vec<_> = vars
-        .iter()
-        .map(|(k, v)| (k.clone(), display_value(v)))
-        .collect();
-    out.sort();
-    out
-}
-
 #[component]
 fn RequestEditor(
     recipe: Recipe,
@@ -738,25 +529,11 @@ fn RequestEditor(
         .find(|s| s.id == step_id)
         .cloned()
         .unwrap_or_default();
-    let herdr_step = step.tool == HERDR_API;
     let mut id = use_signal(|| step.id.clone());
     let mut description = use_signal(|| step.description.clone().unwrap_or_default());
     let mut tool = use_signal(|| step.tool.clone());
-    let mut method = use_signal(|| {
-        step.params
-            .get("method")
-            .and_then(Value::as_str)
-            .filter(|_| herdr_step)
-            .unwrap_or("workspace.list")
-            .to_string()
-    });
-    let mut values = use_signal(|| {
-        raw_values(if herdr_step {
-            &step.params["params"]
-        } else {
-            &step.params
-        })
-    });
+    let mut method = use_signal(|| request_method(&step));
+    let mut values = use_signal(|| request_values(&step));
     let mut extract = use_signal(|| step.extract.clone());
     let mut filter = use_signal(String::new);
     // HTTP and LLM requests open in their builder; this shows the plain fields.
@@ -834,7 +611,7 @@ fn RequestEditor(
         let next = current_step();
         async move {
             let new_id = next.id.clone();
-            match save_step(client, rid, &old_id, next).await {
+            match save_step(&client, rid, &old_id, next).await {
                 Err(e) => {
                     error.set(Some(e));
                     false
@@ -891,13 +668,7 @@ fn RequestEditor(
             let client = client();
             let old_id = old_id.clone();
             spawn(async move {
-                let result = match client.get_recipe(rid).await {
-                    Ok(mut r) => {
-                        r.steps.retain(|s| s.id != old_id);
-                        set_steps(client, rid, r.steps).await
-                    }
-                    Err(e) => Err(e.to_string()),
-                };
+                let result = delete_step(&client, rid, &old_id).await;
                 match result {
                     Ok(()) => {
                         pick.set(Pick::Collection(rid));
@@ -1268,87 +1039,5 @@ fn SendResult(
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn recipe(name: &str, category: Option<&str>) -> Recipe {
-        serde_json::from_value(serde_json::json!({
-            "id": Uuid::nil(), "name": name, "description": null, "steps": [],
-            "variables": {}, "created_at": "2026-10-19T00:00:00Z",
-            "updated_at": "2026-10-19T00:00:00Z", "is_template": false,
-            "category": category
-        }))
-        .unwrap()
-    }
-
-    #[test]
-    fn folders_group_by_category_unfiled_first() {
-        let rs = [
-            recipe("b", Some("smoke")),
-            recipe("a", None),
-            recipe("c", Some("smoke")),
-            recipe("d", Some(" ")),
-        ];
-        let got: Vec<(String, Vec<String>)> = folders(&rs)
-            .into_iter()
-            .map(|(f, rs)| (f, rs.into_iter().map(|r| r.name).collect()))
-            .collect();
-        assert_eq!(
-            got,
-            [
-                ("".to_string(), vec!["a".to_string(), "d".to_string()]),
-                ("smoke".to_string(), vec!["b".to_string(), "c".to_string()]),
-            ]
-        );
-    }
-
-    #[test]
-    fn result_paths_follow_extract_syntax() {
-        let v = serde_json::json!({ "panes": [{ "pane_id": "w1:p1", "tags": [] }], "n": 2 });
-        let paths: Vec<String> = result_paths(&v, 10).into_iter().map(|(p, _)| p).collect();
-        assert_eq!(paths, ["n", "panes[0].pane_id", "panes[0].tags"]);
-        assert_eq!(result_paths(&v, 1).len(), 1);
-        let top = result_paths(&serde_json::json!([{ "id": 1 }]), 10);
-        assert_eq!(top[0].0, "[0].id");
-        assert_eq!(var_name("panes[0].pane_id"), "pane_id");
-        assert_eq!(var_name("[0]"), "value");
-        assert_eq!(var_name("a.b-c"), "b_c");
-    }
-
-    #[test]
-    fn request_ids_and_params() {
-        let steps = [
-            RecipeStep {
-                id: "request2".into(),
-                ..Default::default()
-            },
-            RecipeStep {
-                id: "spawn".into(),
-                ..Default::default()
-            },
-        ];
-        assert_eq!(fresh_request_id(&steps), "request3");
-        assert!(valid_id("spawn_2-b") && !valid_id("a.b") && !valid_id(""));
-
-        let props: HashMap<String, Value> = [(
-            "lines".to_string(),
-            serde_json::json!({ "type": "integer" }),
-        )]
-        .into();
-        let values = [("lines".to_string(), "{{ n }}".to_string())].into();
-        assert_eq!(
-            request_params(&props, HERDR_API, "pane.read", &values),
-            serde_json::json!({ "method": "pane.read", "params": { "lines": "{{ n }}" } })
-        );
-        assert_eq!(parse_value("3"), serde_json::json!(3));
-        assert_eq!(parse_value("w1:p1"), serde_json::json!("w1:p1"));
-        assert_eq!(
-            raw_values(&serde_json::json!({ "a": "x", "b": [1] }))["b"],
-            "[1]"
-        );
     }
 }

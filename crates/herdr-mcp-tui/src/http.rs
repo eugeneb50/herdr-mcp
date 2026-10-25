@@ -29,6 +29,12 @@ pub fn client_for(port: u16, timeout: Duration, data_dir: &Path) -> Result<ApiCl
     Ok(ApiClient::with_timeout(&base(port), timeout)?.with_token(token(data_dir)))
 }
 
+/// Client for a long-lived stream (`/api/herdr/events`): no request
+/// timeout, which would end it.
+pub fn stream_client(port: u16, data_dir: &Path) -> Result<ApiClient, ApiError> {
+    Ok(ApiClient::new(&base(port))?.with_token(token(data_dir)))
+}
+
 /// A client for the bridge on `port` (the configured one) if its
 /// `GET /api/health` answers 2xx. No other port is tried: a bridge elsewhere
 /// may serve another data dir or herdr session.
