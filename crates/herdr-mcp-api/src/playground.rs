@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::{ApiClient, Recipe, RecipeStep, UpdateRecipeRequest, Uuid, schema_type};
+use crate::{ApiClient, Recipe, RecipeStep, RunRecord, UpdateRecipeRequest, Uuid, schema_type};
 
 /// The tool whose requests call any herdr socket method.
 pub const HERDR_API: &str = "herdr_api";
@@ -338,12 +338,73 @@ pub fn folders(recipes: &[Recipe]) -> Vec<(String, Vec<Recipe>)> {
         .collect()
 }
 
-/// A request as a list names it: the herdr method it calls, else its tool.
+/// A request as a list names it: the herdr method it calls, the HTTP
+/// method and URL (`GET example.com/x`), the LLM model, else its tool.
 pub fn tool_label(step: &RecipeStep) -> String {
-    match step.params.get("method").and_then(Value::as_str) {
-        Some(m) if step.tool == HERDR_API => m.to_string(),
-        _ => step.tool.clone(),
+    let param = |k| {
+        step.params
+            .get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
+    let label = match step.tool.as_str() {
+        HERDR_API => param("method").map(str::to_string),
+        HTTP_REQUEST => param("url")
+            .map(|url| url.split_once("://").map_or(url, |(_, rest)| rest))
+            .filter(|url| !url.is_empty())
+            .map(|url| {
+                let method = param("method").unwrap_or("GET").to_uppercase();
+                format!("{method} {url}")
+            }),
+        LLM_CALL => param("model").map(|m| format!("LLM {m}")),
+        _ => None,
+    };
+    label.unwrap_or_else(|| step.tool.clone())
+}
+
+const NEW_COLLECTION: &str = "New collection";
+
+/// `New collection`, numbered past the collections already named so.
+pub fn fresh_collection_name(recipes: &[Recipe]) -> String {
+    let taken = recipes
+        .iter()
+        .filter_map(|r| match r.name.strip_prefix(NEW_COLLECTION)? {
+            "" => Some(1),
+            n => n.strip_prefix(' ')?.parse::<usize>().ok(),
+        })
+        .max();
+    match taken {
+        None => NEW_COLLECTION.to_string(),
+        Some(n) => format!("{NEW_COLLECTION} {}", n + 1),
     }
+}
+
+/// A send's headline facts: its status, the HTTP status when the request
+/// was `http_request`, and how long the run took (`completed · 200 · 312 ms`).
+pub fn send_summary(run: &RunRecord, step_id: &str) -> String {
+    let mut out = vec![format!("{:?}", run.status).to_lowercase()];
+    let http = run
+        .steps
+        .iter()
+        .any(|s| s.id == step_id && s.tool == HTTP_REQUEST);
+    if http
+        && let Some(status) = run
+            .results
+            .get(step_id)
+            .and_then(crate::tool_payload)
+            .and_then(|p| p.get("status")?.as_u64())
+    {
+        out.push(status.to_string());
+    }
+    if let Some(done) = run.finished_at {
+        let ms = (done - run.started_at).num_milliseconds().max(0);
+        out.push(if ms < 1000 {
+            format!("{ms} ms")
+        } else {
+            format!("{:.1} s", ms as f64 / 1000.0)
+        });
+    }
+    out.join(" · ")
 }
 
 /// `requestN`, one past the highest N among `steps`.
@@ -924,6 +985,79 @@ mod tests {
         assert_eq!(var_name("panes[0].pane_id"), "pane_id");
         assert_eq!(var_name("[0]"), "value");
         assert_eq!(var_name("a.b-c"), "b_c");
+    }
+
+    #[test]
+    fn collection_names_count_past_the_taken_ones() {
+        assert_eq!(
+            fresh_collection_name(&[recipe("a", None)]),
+            "New collection"
+        );
+        let rs = [
+            recipe("New collection", None),
+            recipe("New collections", None),
+        ];
+        assert_eq!(fresh_collection_name(&rs), "New collection 2");
+        let rs = [
+            recipe("New collection", None),
+            recipe("New collection 4", None),
+        ];
+        assert_eq!(fresh_collection_name(&rs), "New collection 5");
+    }
+
+    #[test]
+    fn labels_name_what_a_request_calls() {
+        let step = |tool: &str, params: Value| RecipeStep {
+            tool: tool.into(),
+            params,
+            ..Default::default()
+        };
+        let http = step(
+            HTTP_REQUEST,
+            serde_json::json!({ "method": "post", "url": "https://example.com/x" }),
+        );
+        assert_eq!(tool_label(&http), "POST example.com/x");
+        let blank = step(HTTP_REQUEST, serde_json::json!({ "url": "https://" }));
+        assert_eq!(tool_label(&blank), HTTP_REQUEST);
+        let llm = step(LLM_CALL, serde_json::json!({ "model": "m1" }));
+        assert_eq!(tool_label(&llm), "LLM m1");
+        let bare = step(LLM_CALL, serde_json::json!({ "model": "" }));
+        assert_eq!(tool_label(&bare), LLM_CALL);
+        let herdr = step(HERDR_API, serde_json::json!({ "method": "pane.read" }));
+        assert_eq!(tool_label(&herdr), "pane.read");
+    }
+
+    #[test]
+    fn send_summary_has_http_status_and_time() {
+        let started: chrono::DateTime<chrono::Utc> = "2026-10-19T00:00:00Z".parse().unwrap();
+        let payload = serde_json::json!({ "status": 404, "ok": false }).to_string();
+        let mut run = RunRecord {
+            id: Uuid::nil(),
+            recipe_id: None,
+            name: None,
+            session_id: "w1".into(),
+            steps: vec![RecipeStep {
+                id: "get".into(),
+                tool: HTTP_REQUEST.into(),
+                ..Default::default()
+            }],
+            status: crate::RunStatus::Completed,
+            current_step: None,
+            results: [(
+                "get".to_string(),
+                serde_json::json!({ "content": [{ "type": "text", "text": payload }] }),
+            )]
+            .into(),
+            variables: HashMap::new(),
+            failed_step: None,
+            error: None,
+            started_at: started,
+            finished_at: Some(started + chrono::Duration::milliseconds(312)),
+        };
+        assert_eq!(send_summary(&run, "get"), "completed · 404 · 312 ms");
+        run.steps[0].tool = "list_panes".into();
+        run.finished_at = Some(started + chrono::Duration::milliseconds(1420));
+        assert_eq!(send_summary(&run, "get"), "completed · 1.4 s");
     }
 
     #[test]

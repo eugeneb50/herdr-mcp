@@ -1071,7 +1071,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Write"),
-        description = "Send key presses to a pane. Common keys: Enter, Escape, Tab, Backspace, Ctrl+c, Ctrl+d, ArrowUp, ArrowDown"
+        description = "Send key presses to a pane. Keys: Enter, Esc, Tab, Backspace, Space, Up, Down, Left, Right, F1-F12, Ctrl+<key> (e.g. Ctrl+c). herdr has no Home, End, PageUp, PageDown or Delete."
     )]
     async fn send_keys(
         &self,

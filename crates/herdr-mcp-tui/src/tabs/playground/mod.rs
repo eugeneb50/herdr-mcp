@@ -22,10 +22,11 @@ use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use herdr_mcp_api::playground::{
     BodyMode, CUSTOM_PROVIDER, HERDR_API, HTTP_METHODS, HTTP_REQUEST, KeyMode, LLM_CALL, Method,
-    PROVIDERS, ToolInfo, add_request, delete_step, display_value, event_names, folders, kv_json,
-    kv_rows, load_models, methods, model_choices, parse_value, parse_when, pick_provider,
-    provider_of, raw_values, request_method, request_params, request_schema, request_values,
-    result_paths, save_step, set_steps, sorted_vars, tool_list, var_name, when_text, with_value,
+    PROVIDERS, ToolInfo, add_request, delete_step, display_value, event_names, folders,
+    fresh_collection_name, kv_json, kv_rows, load_models, methods, model_choices, parse_value,
+    parse_when, pick_provider, provider_of, raw_values, request_method, request_params,
+    request_schema, request_values, result_paths, save_step, send_summary, set_steps, sorted_vars,
+    tool_list, var_name, when_text, with_value,
 };
 use herdr_mcp_api::{
     ApiClient, CreateRecipeRequest, Extract, InstantiateTemplateRequest, Recipe, RecipeStep,
@@ -100,6 +101,9 @@ pub fn tree_rows(recipes: &[Recipe]) -> Vec<TreeRow> {
     rows
 }
 
+/// A collection's own fields: name, folder, variables, triggers.
+type CollectionFields = (String, String, Vec<(String, String)>, Vec<RecipeTrigger>);
+
 /// A collection being edited: its own fields, saved with Save. Requests
 /// are saved one by one (from the request editor, or on reorder/delete).
 pub struct CollectionForm {
@@ -109,8 +113,8 @@ pub struct CollectionForm {
     pub vars: Vec<(String, String)>,
     pub triggers: Vec<RecipeTrigger>,
     pub row: usize,
-    /// Unsaved edits to the fields above.
-    pub changed: bool,
+    /// The fields as last opened or saved.
+    saved: CollectionFields,
     /// Delete was pressed once; the next press deletes.
     pub confirm_delete: bool,
     pub run: Option<RunRecord>,
@@ -118,17 +122,33 @@ pub struct CollectionForm {
 
 impl CollectionForm {
     fn new(r: &Recipe) -> Self {
-        Self {
+        let mut form = Self {
             id: r.id,
             name: r.name.clone(),
             folder: r.category.clone().unwrap_or_default(),
             vars: sorted_vars(&r.variables),
             triggers: r.triggers.clone(),
             row: 0,
-            changed: false,
+            saved: Default::default(),
             confirm_delete: false,
             run: None,
-        }
+        };
+        form.saved = form.fields();
+        form
+    }
+
+    fn fields(&self) -> CollectionFields {
+        (
+            self.name.clone(),
+            self.folder.clone(),
+            self.vars.clone(),
+            self.triggers.clone(),
+        )
+    }
+
+    /// The fields differ from the saved collection.
+    pub fn changed(&self) -> bool {
+        self.fields() != self.saved
     }
 
     pub fn rows(&self, requests: usize) -> Vec<CRow> {
@@ -182,6 +202,9 @@ pub struct RequestForm {
     pub models: Vec<Value>,
     pub row: usize,
     pub confirm_delete: bool,
+    /// The request as last opened or saved, built by [`RequestForm::step`]
+    /// so it compares with the form.
+    pub(crate) saved: RecipeStep,
     /// The params as a run would resolve them, and the placeholders that
     /// don't resolve outside a run.
     pub resolved: Value,
@@ -208,12 +231,18 @@ impl RequestForm {
             models: Vec::new(),
             row: 0,
             confirm_delete: false,
+            saved: step.clone(),
             resolved: Value::Null,
             unresolved: Vec::new(),
             response: None,
             paths: Vec::new(),
             path_index: 0,
         }
+    }
+
+    /// The form differs from the saved request.
+    pub fn unsaved(&self, tools: &[ToolInfo], methods: &[Method]) -> bool {
+        self.step(tools, methods) != self.saved
     }
 
     pub fn herdr(&self) -> bool {
@@ -487,6 +516,8 @@ pub enum Target {
 pub struct Editing {
     pub target: Target,
     pub area: TextArea<'static>,
+    /// The row was just added for this edit; Esc removes it again.
+    pub added: bool,
 }
 
 /// A picker or form drawn over the panels.
@@ -560,6 +591,9 @@ pub struct PlaygroundState {
     pub result_area: TextArea<'static>,
     /// Outcome of the last action.
     pub msg: Option<Result<String, String>>,
+    /// The unsaved edits a try to leave the form warned about; leaving
+    /// again with the same edits discards them.
+    discard: Option<String>,
     pub events: EventsState,
     // Layout from the last draw, for the mouse.
     pub(crate) tree_list: ListState,
@@ -652,7 +686,19 @@ impl PlaygroundState {
         let mut area = TextArea::new(text.split('\n').map(String::from).collect());
         area.move_cursor(tui_textarea::CursorMove::Bottom);
         area.move_cursor(tui_textarea::CursorMove::End);
-        self.editing = Some(Editing { target, area });
+        self.editing = Some(Editing {
+            target,
+            area,
+            added: false,
+        });
+    }
+
+    /// Edit the row just added at `target`; Esc takes it out again.
+    fn begin_add(&mut self, target: Target, text: String) {
+        self.begin_edit(target, text);
+        if let Some(e) = self.editing.as_mut() {
+            e.added = true;
+        }
     }
 }
 
@@ -787,6 +833,7 @@ fn open_collection(app: &mut App, id: Uuid) {
     pg.pick = Pick::Collection(id);
     pg.focus = Focus::Main;
     pg.msg = None;
+    pg.discard = None;
     pg.result_area = TextArea::default();
 }
 
@@ -794,18 +841,49 @@ async fn open_request(app: &mut App, rid: Uuid, step_id: &str) {
     let Some(step) = recipe(app, rid).and_then(|r| r.steps.iter().find(|s| s.id == step_id)) else {
         return;
     };
-    let form = RequestForm::new(rid, step);
+    let mut form = RequestForm::new(rid, step);
     if form.herdr() {
         load_schema(app).await;
     }
     let pg = &mut app.playground;
+    form.saved = form.step(&pg.tools, &pg.methods);
     pg.request = Some(form);
     pg.collection = None;
     pg.pick = Pick::Request(rid, step_id.to_string());
     pg.focus = Focus::Main;
     pg.msg = None;
+    pg.discard = None;
     pg.result_area = TextArea::default();
     preview(app).await;
+}
+
+/// Whether the open form may be left for another: yes when nothing in it
+/// is unsaved, else only on a second try with the same edits (the first
+/// warns).
+fn may_leave(app: &mut App) -> bool {
+    let pg = &mut app.playground;
+    let unsaved = match &pg.pick {
+        Pick::Collection(_) => pg
+            .collection
+            .as_ref()
+            .filter(|c| c.changed())
+            .map(|c| format!("{:?}", c.fields())),
+        Pick::Request(..) => pg.request.as_ref().and_then(|r| {
+            let step = r.step(&pg.tools, &pg.methods);
+            (step != r.saved).then(|| format!("{step:?}"))
+        }),
+        Pick::Nothing => None,
+    };
+    let Some(unsaved) = unsaved else {
+        return true;
+    };
+    if pg.discard.as_ref() == Some(&unsaved) {
+        pg.discard = None;
+        return true;
+    }
+    pg.discard = Some(unsaved);
+    pg.err("unsaved changes: Ctrl+S saves them, or do that again to discard them");
+    false
 }
 
 /// Put the tree selection on `row`, if it is there.
@@ -840,17 +918,26 @@ async fn create_collection(app: &mut App, name: String, steps: Vec<RecipeStep>) 
     }
 }
 
+/// Create an empty collection under a name no other has, and open it.
+async fn create_new_collection(app: &mut App) {
+    let name = fresh_collection_name(app.recipes.as_deref().unwrap_or_default());
+    create_collection(app, name, Vec::new()).await;
+}
+
 /// Open what tree row `i` names.
 async fn activate_tree(app: &mut App, i: usize) {
     let rows = tree_rows(app.recipes.as_deref().unwrap_or_default());
-    match rows.get(i).cloned() {
+    let row = rows.get(i).cloned();
+    let leaves = !matches!(row, Some(TreeRow::Globals | TreeRow::Folder(_)) | None);
+    if leaves && !may_leave(app) {
+        return;
+    }
+    match row {
         Some(TreeRow::Globals) => {
             app.tab = Tab::Variables;
             app.status_msg = "globals: every request and run sees them".into();
         }
-        Some(TreeRow::NewCollection) => {
-            create_collection(app, "New collection".into(), Vec::new()).await
-        }
+        Some(TreeRow::NewCollection) => create_new_collection(app).await,
         Some(TreeRow::FromTemplate) => {
             app.playground.overlay = Some(Overlay::Templates { index: 0 });
         }
@@ -900,7 +987,9 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
     if ctrl {
         match code {
             KeyCode::Char('n') => {
-                create_collection(app, "New collection".into(), Vec::new()).await;
+                if may_leave(app) {
+                    create_new_collection(app).await;
+                }
                 return Ok(true);
             }
             KeyCode::Char('s') => {
@@ -1067,13 +1156,11 @@ async fn handle_collection(app: &mut App, code: KeyCode, mods: KeyModifiers) -> 
             Some(CRow::Var(i)) => {
                 if let Some(c) = app.playground.collection.as_mut() {
                     c.vars.remove(i);
-                    c.changed = true;
                 }
             }
             Some(CRow::Trigger(i)) => {
                 if let Some(c) = app.playground.collection.as_mut() {
                     c.triggers.remove(i);
-                    c.changed = true;
                 }
             }
             _ => {}
@@ -1093,6 +1180,13 @@ async fn handle_collection(app: &mut App, code: KeyCode, mods: KeyModifiers) -> 
     let Some(row) = row else {
         return true;
     };
+    let leaves = matches!(
+        row,
+        CRow::Request(_) | CRow::AddRequest | CRow::AddHttp | CRow::AddLlm
+    );
+    if leaves && !may_leave(app) {
+        return true;
+    }
     match row {
         CRow::Name | CRow::Folder | CRow::Var(_) | CRow::Trigger(_) => {
             if matches!(row, CRow::Trigger(_)) {
@@ -1138,7 +1232,6 @@ async fn handle_collection(app: &mut App, code: KeyCode, mods: KeyModifiers) -> 
                 let i = c.triggers.len() - 1;
                 (CRow::Trigger(i), Target::Trigger(i))
             };
-            c.changed = true;
             c.row = c
                 .rows(requests)
                 .iter()
@@ -1148,7 +1241,7 @@ async fn handle_collection(app: &mut App, code: KeyCode, mods: KeyModifiers) -> 
                 Target::Trigger(i) => trigger_text(&c.triggers[i]),
                 _ => String::new(),
             };
-            app.playground.begin_edit(target, text);
+            app.playground.begin_add(target, text);
         }
         CRow::Save => save_collection(app).await,
         CRow::Delete => {
@@ -1443,7 +1536,7 @@ async fn handle_request(app: &mut App, code: KeyCode, mods: KeyModifiers) -> boo
                 .iter()
                 .position(|x| *x == RRow::Extract(i))
                 .unwrap_or(0);
-            pg.begin_edit(Target::Extract(i), " -> ".into());
+            pg.begin_add(Target::Extract(i), " -> ".into());
             if let Some(e) = pg.editing.as_mut() {
                 e.area.move_cursor(tui_textarea::CursorMove::Head);
             }
@@ -1516,7 +1609,8 @@ fn handle_paths(app: &mut App, code: KeyCode) -> bool {
     true
 }
 
-/// Keys while a field is being typed into: Enter or Esc ends the edit.
+/// Keys while a field is being typed into: Enter keeps the edit, Esc
+/// drops it (and a row added for it).
 async fn handle_edit(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
     // Ctrl+C / Ctrl+V / Ctrl+X fall through to the clipboard.
     if mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c' | 'v' | 'x')) {
@@ -1537,11 +1631,44 @@ async fn handle_edit(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
         }
         return true;
     }
-    let Some(Editing { target, area }) = app.playground.editing.take() else {
+    let Some(Editing {
+        target,
+        area,
+        added,
+    }) = app.playground.editing.take()
+    else {
         return true;
     };
-    commit(app, target, area.lines().join("\n")).await;
+    if code == KeyCode::Enter {
+        commit(app, target, area.lines().join("\n")).await;
+    } else if added {
+        remove_added(app, target);
+    }
     true
+}
+
+/// Take out the row added for an edit that was dropped. The add button
+/// moves up into its place, so the form's row stays.
+fn remove_added(app: &mut App, target: Target) {
+    let pg = &mut app.playground;
+    match target {
+        Target::Var(i) => {
+            if let Some(c) = pg.collection.as_mut() {
+                c.vars.remove(i);
+            }
+        }
+        Target::Trigger(i) => {
+            if let Some(c) = pg.collection.as_mut() {
+                c.triggers.remove(i);
+            }
+        }
+        Target::Extract(i) => {
+            if let Some(r) = pg.request.as_mut() {
+                r.extract.remove(i);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Write an edited field back to its form.
@@ -1564,7 +1691,6 @@ async fn commit(app: &mut App, target: Target, text: String) {
                 Target::Trigger(i) => c.triggers[i] = parse_trigger(&text),
                 _ => unreachable!(),
             }
-            c.changed = true;
         }
         Target::RequestId
         | Target::Description
@@ -1889,8 +2015,13 @@ async fn save_collection(app: &mut App) {
     match http.update_recipe(id, &req).await {
         Ok(_) => {
             reload_recipes(app).await;
-            if let Some(c) = app.playground.collection.as_mut() {
-                c.changed = false;
+            // As saved: trimmed, blank variables and triggers dropped.
+            let requests = request_count(app);
+            let fresh = recipe(app, id).map(CollectionForm::new);
+            if let (Some(c), Some(mut fresh)) = (app.playground.collection.as_mut(), fresh) {
+                fresh.row = c.row.min(fresh.rows(requests).len() - 1);
+                fresh.run = c.run.take();
+                *c = fresh;
             }
             select_tree(app, &TreeRow::Collection(id));
             app.playground.ok("saved");
@@ -1967,12 +2098,13 @@ async fn save_request(app: &mut App) -> bool {
     let (rid, saved_id) = (r.rid, r.saved_id.clone());
     let step = r.step(&pg.tools, &pg.methods);
     let new_id = step.id.clone();
-    match save_step(&http, rid, &saved_id, step).await {
+    match save_step(&http, rid, &saved_id, step.clone()).await {
         Ok(()) => {
             reload_recipes(app).await;
             if let Some(r) = app.playground.request.as_mut() {
                 r.saved_id = new_id.clone();
                 r.id = new_id.clone();
+                r.saved = step;
             }
             app.playground.pick = Pick::Request(rid, new_id.clone());
             select_tree(app, &TreeRow::Request(rid, new_id));
@@ -2093,6 +2225,7 @@ pub(crate) async fn finish_job(app: &mut App, job: Job) {
     }
     let fresh_vars = recipe(app, rid).map(|r| sorted_vars(&r.variables));
     let pg = &mut app.playground;
+    let width = pg.result_inner.width as usize;
     let run = match result {
         Ok(run) => run,
         Err(e) => {
@@ -2116,7 +2249,7 @@ pub(crate) async fn finish_job(app: &mut App, job: Job) {
             .as_mut()
             .filter(|r| r.rid == rid && r.saved_id == sid)
         {
-            let text = send_text(&run, &r.saved_id, &r.extract);
+            let text = send_text(&run, &r.saved_id, &r.extract, width);
             // A failed send has nothing to extract.
             r.paths = match send_payload(&run, &r.saved_id) {
                 Value::Null => Vec::new(),
@@ -2133,13 +2266,14 @@ pub(crate) async fn finish_job(app: &mut App, job: Job) {
             .and_then(|rs| rs.iter().find(|r| r.id == rid))
             .map(|r| r.steps.iter().map(|s| s.id.clone()).collect())
             .unwrap_or_default();
-        pg.result_area = TextArea::new(run_text(&run, &order));
+        pg.result_area = TextArea::new(run_text(&run, &order, width));
         // Not under an open edit either: it holds an index into them.
-        if !c.changed
+        if !c.changed()
             && pg.editing.is_none()
             && let Some(vars) = fresh_vars
         {
             c.vars = vars;
+            c.saved = c.fields();
         }
         c.run = Some(run);
     }
@@ -2154,11 +2288,30 @@ fn send_payload(run: &RunRecord, step_id: &str) -> Value {
         .unwrap_or(Value::Null)
 }
 
+/// `text`'s lines, each cut into lines of at most `width` characters (0:
+/// not cut).
+fn wrapped(text: &str, width: usize) -> Vec<String> {
+    text.split('\n')
+        .flat_map(|line| {
+            let chars: Vec<char> = line.chars().collect();
+            if width == 0 || chars.is_empty() {
+                return vec![line.to_string()];
+            }
+            chars.chunks(width).map(|c| c.iter().collect()).collect()
+        })
+        .collect()
+}
+
+/// A step's error, if its result is one.
+fn step_error(result: &Value) -> Option<&str> {
+    result.get("error").and_then(Value::as_str)
+}
+
 /// One step's result as text: its JSON payload pretty, else the tool's
-/// text, else the error.
-fn result_lines(result: &Value) -> Vec<String> {
-    if let Some(e) = result.get("error").and_then(Value::as_str) {
-        return vec![format!("error: {e}")];
+/// text, else the error (wrapped to `width`).
+fn result_lines(result: &Value, width: usize) -> Vec<String> {
+    if let Some(e) = step_error(result) {
+        return wrapped(&format!("error: {e}"), width);
     }
     let body = match herdr_mcp_api::tool_payload(result) {
         Some(v) => serde_json::to_string_pretty(&v).unwrap_or_default(),
@@ -2169,11 +2322,10 @@ fn result_lines(result: &Value) -> Vec<String> {
 
 /// A send's outcome: status, error, the variables its extract rules set,
 /// then the tool's response.
-fn send_text(run: &RunRecord, step_id: &str, rules: &[Extract]) -> Vec<String> {
-    let status = format!("{:?}", run.status).to_lowercase();
-    let mut out = vec![format!("Sent · {status}")];
+fn send_text(run: &RunRecord, step_id: &str, rules: &[Extract], width: usize) -> Vec<String> {
+    let mut out = vec![format!("Sent · {}", send_summary(run, step_id))];
     if let Some(e) = &run.error {
-        out.push(format!("error: {e}"));
+        out.extend(wrapped(&format!("error: {e}"), width));
     }
     if run.status == RunStatus::Completed {
         let set: Vec<String> = rules
@@ -2192,19 +2344,30 @@ fn send_text(run: &RunRecord, step_id: &str, rules: &[Extract]) -> Vec<String> {
             out.extend(set);
         }
     }
-    if let Some(result) = run.results.get(step_id) {
+    // The run's error already says what a failed step's result would.
+    if let Some(result) = run
+        .results
+        .get(step_id)
+        .filter(|r| run.error.is_none() || step_error(r).is_none())
+    {
         out.push(String::new());
-        out.extend(result_lines(result));
+        out.extend(result_lines(result, width));
     }
     out
 }
 
 /// A collection run: status, then each step's result in step order.
-fn run_text(run: &RunRecord, order: &[String]) -> Vec<String> {
+fn run_text(run: &RunRecord, order: &[String], width: usize) -> Vec<String> {
     let status = format!("{:?}", run.status).to_lowercase();
     let mut out = vec![format!("Run · {status}")];
-    if let Some(e) = &run.error {
-        out.push(format!("error: {e}"));
+    // A failed step shows its own error below.
+    let step_failed = run
+        .failed_step
+        .as_ref()
+        .and_then(|s| run.results.get(s))
+        .is_some_and(|r| step_error(r).is_some());
+    if let Some(e) = run.error.as_ref().filter(|_| !step_failed) {
+        out.extend(wrapped(&format!("error: {e}"), width));
     }
     for (n, id) in order.iter().enumerate() {
         let Some(result) = run.results.get(id) else {
@@ -2212,7 +2375,7 @@ fn run_text(run: &RunRecord, order: &[String]) -> Vec<String> {
         };
         out.push(String::new());
         out.push(format!("#{} {id}", n + 1));
-        out.extend(result_lines(result));
+        out.extend(result_lines(result, width));
     }
     out
 }
@@ -2438,6 +2601,105 @@ mod tests {
             form.params(&tools, &[]),
             serde_json::json!({ "lines": 5, "legacy": "x" })
         );
+    }
+
+    fn test_app() -> App {
+        App::new(crate::DashboardOptions {
+            data_dir: std::path::PathBuf::from("/tmp"),
+            http_port: 1,
+        })
+    }
+
+    #[test]
+    fn leaving_unsaved_edits_warns_once() {
+        let mut app = test_app();
+        let step = RecipeStep {
+            id: "get".into(),
+            tool: HTTP_REQUEST.into(),
+            params: serde_json::json!({ "url": "https://x" }),
+            ..Default::default()
+        };
+        let mut form = RequestForm::new(Uuid::nil(), &step);
+        form.saved = form.step(&[], &[]);
+        app.playground.request = Some(form);
+        app.playground.pick = Pick::Request(Uuid::nil(), "get".into());
+        assert!(may_leave(&mut app));
+
+        let edit = |app: &mut App, url: &str| {
+            let r = app.playground.request.as_mut().unwrap();
+            r.values.insert("url".into(), url.into());
+            assert!(r.unsaved(&[], &[]));
+        };
+        edit(&mut app, "https://y");
+        assert!(!may_leave(&mut app), "the first try warns");
+        assert!(matches!(app.playground.msg, Some(Err(_))));
+        // Edited again after the warning: it warns again.
+        edit(&mut app, "https://z");
+        assert!(!may_leave(&mut app));
+        assert!(may_leave(&mut app), "the second try discards");
+    }
+
+    #[tokio::test]
+    async fn esc_drops_an_edit_and_the_row_added_for_it() {
+        let mut app = test_app();
+        let recipe: Recipe = serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(), "name": "c", "description": null, "steps": [],
+            "variables": { "n": 1 }, "created_at": "2026-10-24T00:00:00Z",
+            "updated_at": "2026-10-24T00:00:00Z", "is_template": false
+        }))
+        .unwrap();
+        app.playground.collection = Some(CollectionForm::new(&recipe));
+        app.playground.pick = Pick::Collection(Uuid::nil());
+        let c = |app: &App| app.playground.collection.as_ref().unwrap().vars.clone();
+
+        // Esc on an existing field keeps its value, and nothing is unsaved.
+        app.playground.begin_edit(Target::Var(0), "n = 2".into());
+        handle_edit(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert_eq!(c(&app), [("n".to_string(), "1".to_string())]);
+        // Enter with the text unchanged leaves nothing unsaved either.
+        app.playground.begin_edit(Target::Var(0), "n = 1".into());
+        handle_edit(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert!(!app.playground.collection.as_ref().unwrap().changed());
+
+        // Esc on a just-added row takes it out.
+        app.playground
+            .collection
+            .as_mut()
+            .unwrap()
+            .vars
+            .push(Default::default());
+        app.playground.begin_add(Target::Var(1), String::new());
+        handle_edit(&mut app, KeyCode::Esc, KeyModifiers::NONE).await;
+        assert_eq!(c(&app).len(), 1);
+
+        // Enter keeps an edit.
+        app.playground.begin_edit(Target::Var(0), "n = 2".into());
+        handle_edit(&mut app, KeyCode::Enter, KeyModifiers::NONE).await;
+        assert_eq!(c(&app), [("n".to_string(), "2".to_string())]);
+        assert!(app.playground.collection.as_ref().unwrap().changed());
+    }
+
+    #[test]
+    fn a_failed_send_shows_its_error_once_wrapped() {
+        let run: RunRecord = serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(), "recipe_id": null, "name": null, "session_id": "w1",
+            "steps": [], "status": "failed", "current_step": null,
+            "results": { "get": { "error": "boom boom" } }, "variables": {},
+            "failed_step": "get", "error": "boom boom",
+            "started_at": "2026-10-24T00:00:00Z", "finished_at": null
+        }))
+        .unwrap();
+        assert_eq!(
+            send_text(&run, "get", &[], 8),
+            ["Sent · failed", "error: b", "oom boom"]
+        );
+        assert_eq!(
+            run_text(&run, &["get".into()], 0),
+            ["Run · failed", "", "#1 get", "error: boom boom"]
+        );
+        assert_eq!(wrapped("", 4), [""]);
+        assert_eq!(wrapped("abcde\nf", 0), ["abcde", "f"]);
+        assert_eq!(wrapped("abcde\nf", 2), ["ab", "cd", "e", "f"]);
     }
 
     #[test]

@@ -238,6 +238,18 @@ fn field(label: &str, value: String, on: bool) -> ListItem<'static> {
     )
 }
 
+/// `s` cut to `max` characters, ending in … when cut.
+fn fit(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    if max > 0 {
+        out.push('…');
+    }
+    out
+}
+
 /// A field value on one line (new lines shown as ⏎).
 fn one_line(s: &str) -> String {
     s.replace('\n', " ⏎ ")
@@ -505,7 +517,7 @@ fn render_collection(frame: &mut Frame, area: Rect, app: &mut App) {
             CRow::Trigger(n) => item(vec![Span::raw(trigger_text(&c.triggers[*n]))], on),
             CRow::AddTrigger => button("+ Trigger", on),
             CRow::Save => button(
-                if c.changed {
+                if c.changed() {
                     "Save collection *"
                 } else {
                     "Save collection"
@@ -624,11 +636,13 @@ fn render_request(frame: &mut Frame, area: Rect, app: &mut App) {
         let line = match row {
             RRow::Id => field("Request", r.id.clone(), on),
             RRow::Tool => {
+                // Borders, the row marker, the label and the gap take the rest.
+                let room = (area.width as usize).saturating_sub(20 + r.tool.chars().count());
                 let desc = pg
                     .tools
                     .iter()
                     .find(|t| t.name == r.tool)
-                    .map(|t| t.description.lines().next().unwrap_or("").to_string())
+                    .map(|t| fit(t.description.lines().next().unwrap_or(""), room))
                     .unwrap_or_default();
                 item(
                     vec![
@@ -709,7 +723,14 @@ fn render_request(frame: &mut Frame, area: Rect, app: &mut App) {
             RRow::Plain | RRow::Http(_) | RRow::Llm(_) => builder_line(r, row, &resolved, on),
             RRow::AddExtract => button("+ Extract", on),
             RRow::Send => button(if busy { "Sending…" } else { "Send" }, on),
-            RRow::Save => button("Save", on),
+            RRow::Save => button(
+                if r.unsaved(&pg.tools, &pg.methods) {
+                    "Save *"
+                } else {
+                    "Save"
+                },
+                on,
+            ),
             RRow::Delete => button(
                 if r.confirm_delete {
                     "Delete — Enter again to confirm"
@@ -1026,8 +1047,11 @@ fn render_editor(frame: &mut Frame, area: Rect, app: &App) {
     let height = editing.area.lines().len() as u16 + 5;
     let inner = modal(frame, area, 70, height.max(6), &format!(" {title} "));
     frame.render_widget(
-        Paragraph::new(Line::styled(format!("Enter/Esc done  {hint}"), dim_style()))
-            .wrap(Wrap { trim: true }),
+        Paragraph::new(Line::styled(
+            format!("Enter done · Esc cancel  {hint}"),
+            dim_style(),
+        ))
+        .wrap(Wrap { trim: true }),
         Rect::new(inner.x, inner.y, inner.width, 2.min(inner.height)),
     );
     frame.render_widget(

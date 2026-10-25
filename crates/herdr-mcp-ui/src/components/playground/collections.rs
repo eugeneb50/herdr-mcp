@@ -16,9 +16,9 @@ use crate::client::use_api;
 use crate::components::variables::{UserTable, user_entries};
 use herdr_mcp_api::playground::{
     HERDR_API, HTTP_REQUEST, LLM_CALL, ToolInfo, add_request, delete_step, display_value, folders,
-    method_groups, methods, parse_value, raw_values, request_method, request_params,
-    request_schema, request_values, result_paths, save_step, set_steps, sorted_vars, tool_groups,
-    tool_label, tool_list, var_name,
+    fresh_collection_name, method_groups, methods, parse_value, raw_values, request_method,
+    request_params, request_schema, request_values, result_paths, save_step, send_summary,
+    set_steps, sorted_vars, tool_groups, tool_label, tool_list, var_name,
 };
 use herdr_mcp_api::{
     CreateRecipeRequest, Extract, Recipe, RecipeStep, RecipeTemplate, ResolveRequest, RunRecord,
@@ -131,6 +131,7 @@ fn Sidebar(recipes: Vec<Recipe>, pick: Signal<Pick>, refresh: Signal<u32>) -> El
         });
     };
     let sel = |p: Pick| if *pick.read() == p { " tree-sel" } else { "" };
+    let new_name = fresh_collection_name(&recipes);
 
     rsx! {
         div { class: "pg-side",
@@ -141,7 +142,7 @@ fn Sidebar(recipes: Vec<Recipe>, pick: Signal<Pick>, refresh: Signal<u32>) -> El
             }
             button {
                 class: "btn btn-block",
-                onclick: move |_| create(("New collection".into(), Vec::new())),
+                onclick: move |_| create((new_name.clone(), Vec::new())),
                 "+ New collection"
             }
             if let Some(e) = error.read().as_deref() {
@@ -967,7 +968,7 @@ fn SendResult(
     rules: Vec<Extract>,
     on_extract: EventHandler<String>,
 ) -> Element {
-    let status = format!("{:?}", run.status).to_lowercase();
+    let status = send_summary(&run, &step_id);
     let ok = run.status == herdr_mcp_api::RunStatus::Completed;
     let result = run.results.get(&step_id).cloned();
     let tool_result = result.clone().filter(|r| r.get("error").is_none());
