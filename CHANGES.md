@@ -4,6 +4,9 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **`--mcp-only`.** MCP over stdio with no HTTP bridge, for an MCP client
+  running beside a TUI that already serves the port. Before, whichever
+  process started first took 7676.
 - **Security hardening: `[security]` (breaking).** A new config section,
   read at startup only:
   - `disabled-tools` hides tools and refuses calls to them from every

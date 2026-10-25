@@ -13,6 +13,7 @@ fn cli_help_lists_modes_and_plugin() {
         .success()
         .stdout(predicate::str::contains("--no-tui"))
         .stdout(predicate::str::contains("--http-only"))
+        .stdout(predicate::str::contains("--mcp-only"))
         .stdout(predicate::str::contains("plugin"));
 }
 

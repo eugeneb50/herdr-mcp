@@ -80,11 +80,12 @@ interpolation.
 
 ### 2.2 Front Ends on One Server
 
-One process serves the HTTP bridge (Axum, `--http <port>`) plus one of:
+One process serves the HTTP bridge (Axum, `--http <port>`; none with
+`--mcp-only`) plus one of:
 
 1. **TUI dashboard** — in a terminal (stdin is a TTY), the default
 2. **MCP stdio** (JSON-RPC over stdin/stdout) — when an MCP client launches
-   it (stdin is a pipe), or with `--no-tui`
+   it (stdin is a pipe), or with `--no-tui`; `--mcp-only` drops the bridge
 3. nothing more — `--http-only` (`http.http_only`)
 
 All share the same `HerdrMcpServer` instance, tool dispatch, and recipe
@@ -93,7 +94,8 @@ engine. The HTTP bridge exposes REST endpoints that mirror the MCP tools.
 ### 2.3 CLI Architecture
 
 One binary, `herdr-mcp`. With no subcommand it serves (mode as above); its
-flags are `--no-tui`, `--http`, `--http-only`, `--data-dir`, `--herdr-socket`.
+flags are `--no-tui`, `--http`, `--http-only`, `--mcp-only`, `--data-dir`,
+`--herdr-socket`.
 The only subcommand is `plugin` (manifest + the entry points herdr runs).
 While the TUI owns the terminal, tracing goes to `<data_dir>/herdr-mcp.log`.
 
@@ -683,6 +685,7 @@ cargo fmt --all -- --check
 herdr-mcp                         # terminal: TUI + HTTP bridge; piped stdin: MCP stdio + HTTP
 herdr-mcp --no-tui                # MCP stdio + HTTP bridge
 herdr-mcp --http-only             # HTTP bridge only
+herdr-mcp --mcp-only              # MCP stdio only, no bridge
 herdr-mcp plugin manifest         # print the herdr plugin manifest (see §13.3)
 ```
 

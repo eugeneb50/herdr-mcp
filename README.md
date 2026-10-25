@@ -60,6 +60,7 @@ deployment (see [Install & build](#install--build)).
 ```bash
 herdr-mcp --no-tui       # MCP stdio + HTTP, no TUI
 herdr-mcp --http-only    # the HTTP bridge alone
+herdr-mcp --mcp-only     # MCP stdio alone, no bridge (beside a running TUI)
 herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 ```
 
@@ -197,6 +198,7 @@ a bundle, the bridge serves only `/api/*`.
 | `herdr-mcp` | TUI dashboard + HTTP bridge in a terminal; MCP stdio + HTTP when stdin is not a terminal |
 | `herdr-mcp --no-tui` | MCP stdio + HTTP bridge, no TUI |
 | `herdr-mcp --http-only` | HTTP bridge only (no TUI, no MCP stdio) |
+| `herdr-mcp --mcp-only` | MCP stdio only (no TUI, no HTTP bridge) |
 | `herdr-mcp plugin manifest` | Print the herdr plugin manifest (the repo's `herdr-plugin.toml`) |
 
 | Flag | Description |
@@ -204,6 +206,7 @@ a bundle, the bridge serves only `/api/*`.
 | `--no-tui` | Serve MCP over stdio + HTTP instead of opening the TUI |
 | `--http <port>` | HTTP bridge port (default: 7676) |
 | `--http-only` | HTTP bridge only |
+| `--mcp-only` | MCP stdio only, no HTTP bridge: for an MCP client beside a TUI already serving the port |
 | `--data-dir <path>` | Data directory (default: `./data`) |
 | `--herdr-socket <path>` | herdr daemon socket path |
 
