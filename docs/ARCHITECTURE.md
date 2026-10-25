@@ -429,7 +429,7 @@ fails the step.
       under pane_id/role for agent handles
    d. apply its extract rules (variable_set), or fail the step
 4. After the last step, the recipe's gate (if any; skipped when only
-   `step_ids` run) picks its first matching rule (gate_matched):
+   `step_ids` run) picks its first matching rule (gate_decided):
    end → completed, fail → `error` + failed, restart → `pass` + 1 and
    back to 3 after `delay_ms`. No match completes the run.
 5. The event log is the run; RunRecord is its fold
@@ -453,7 +453,7 @@ runs form one group) beyond the newest `keep_runs`, or older than
 `runs.keep-runs` / `runs.keep-days` / `runs.snapshot-lines` settings; 0 means
 no limit, and the defaults keep every run (snapshot: 40 lines).
 
-**Gate** (`herdr_mcp_api::gate`, shared so the UIs can preview it): an
+**Gate** (`herdr_mcp_api::gate`, shared by the server and both UIs): an
 ordered list of rules; each has `checks` (all must hold, or any with
 `any: true`; none = always) and a `then` action. A check resolves `path`
 like a `{{ path }}` placeholder in the run's scope and compares it with
@@ -463,6 +463,18 @@ like a `{{ path }}` placeholder in the run's scope and compares it with
 number from 1. A gated run executes at most `max_steps` requests (default
 1000, every pass counted), then fails. Restart loops run in the one
 executor task: no recursion, and cancel interrupts a restart delay.
+`gate::rule_text` / `parse_rule` give a rule a one-line form
+(`code gt 399 or read.text contains "error" → fail msg`, `always → end`):
+the web's gate editor previews it under each rule, the TUI edits rules as
+that text, and the trail prints decisions with it.
+
+**Runs view.** Both playgrounds have a Runs view (web: the Runs tab,
+`playground/runs.rs`; TUI: the tree's Runs row, `tabs/playground/runs.rs`):
+the run list, newest first, filtered by collection or failed only, and the
+picked run's `trail_text`, re-read until the run ends. From there: copy the
+trail, focus the pane it last used in herdr (`herdr_api` `pane.focus`), run
+it again (`RunRecord::rerun`) or cancel it. The collection editor has the
+gate (`playground/flow.rs` on the web) and the run history fields.
 
 ### 6.3 Bundled Templates
 

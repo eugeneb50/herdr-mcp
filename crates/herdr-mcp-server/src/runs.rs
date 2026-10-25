@@ -1023,10 +1023,7 @@ mod tests {
         assert_eq!(first[0].found, Some("1".into()));
         assert!(first[0].held);
         let trail = herdr_mcp_api::trail_text(&done, &events);
-        assert!(
-            trail.contains("gate: rule 1 → restart after 1 ms"),
-            "{trail}"
-        );
+        assert!(trail.contains("gate: rule 1 → restart 1ms"), "{trail}");
         assert!(
             trail.contains("rule 1: count.value lt 3 — found \"1\" ✔"),
             "{trail}"

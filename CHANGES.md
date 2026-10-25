@@ -4,6 +4,13 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Runs view and flow editors.** The web playground has a Runs tab and the
+  TUI's tree a Runs row: every run, newest first, filtered by collection or
+  failed only, and the picked run's trail. Copy the trail, open the pane it
+  last used in herdr, run it again or cancel it. The collection editor sets
+  the gate (rules, their checks and action, max requests) and how long its
+  runs are kept; in the TUI a rule is one line such as
+  `run.pass lt 3 → restart 1000ms`.
 - **Run trail and retention.** Each run's log now says what started it (the
   UI or API, an agent and its pane, a schedule, a trigger), what every step
   actually sent (placeholders filled in, secrets redacted), which `{{ }}`
@@ -21,8 +28,8 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   first request (after an optional delay). Checks compare a result path or
   variable (`eq`, `ne`, `lt`, `gt`, `contains`, `exists`, `missing`);
   `{{ run.pass }}` counts passes and `max_steps` (default 1000) stops a
-  runaway loop. Set it with `recipe_save`'s `gate` or the recipe API; the
-  playground editors come next. Sending single requests ignores the gate.
+  runaway loop. Set it in the collection editor, with `recipe_save`'s `gate`
+  or the recipe API. Sending single requests ignores the gate.
 - **TUI playground = web playground (breaking).** The TUI's tool runner and
   recipe builder are gone. Its Playground tab now shows the web's
   collections: the tree, the collection and request editors, Send and Run,

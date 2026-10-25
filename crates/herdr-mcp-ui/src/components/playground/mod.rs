@@ -4,13 +4,16 @@
 pub mod builders;
 pub mod collections;
 pub mod events;
+pub mod flow;
 pub mod forms;
 pub mod recipes;
+pub mod runs;
 
 use dioxus::prelude::*;
 
 use collections::Collections;
 use events::HerdrEvents;
+use runs::Runs;
 
 use super::pane_options::LivePaneOptions;
 
@@ -34,15 +37,20 @@ pub fn Playground() -> Element {
                 "Collections"
             }
             button {
+                class: if *tab.read() == "runs" { "tab tab-active" } else { "tab" },
+                onclick: move |_| tab.set("runs"),
+                "Runs"
+            }
+            button {
                 class: if *tab.read() == "events" { "tab tab-active" } else { "tab" },
                 onclick: move |_| tab.set("events"),
                 "herdr Events"
             }
         }
-        if *tab.read() == "events" {
-            HerdrEvents {}
-        } else {
-            Collections {}
+        match *tab.read() {
+            "events" => rsx! { HerdrEvents {} },
+            "runs" => rsx! { Runs {} },
+            _ => rsx! { Collections {} },
         }
     }
 }

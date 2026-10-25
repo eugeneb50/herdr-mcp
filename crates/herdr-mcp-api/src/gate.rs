@@ -191,6 +191,214 @@ fn compare(left: Option<&Value>, right: &Value) -> Option<std::cmp::Ordering> {
     number(left?)?.partial_cmp(&number(right)?)
 }
 
+impl Op {
+    pub const ALL: [Op; 7] = [
+        Op::Eq,
+        Op::Ne,
+        Op::Lt,
+        Op::Gt,
+        Op::Contains,
+        Op::Exists,
+        Op::Missing,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Op::Eq => "eq",
+            Op::Ne => "ne",
+            Op::Lt => "lt",
+            Op::Gt => "gt",
+            Op::Contains => "contains",
+            Op::Exists => "exists",
+            Op::Missing => "missing",
+        }
+    }
+
+    /// `exists` / `missing` compare with nothing.
+    pub fn takes_value(self) -> bool {
+        !matches!(self, Op::Exists | Op::Missing)
+    }
+
+    fn parse(word: &str) -> Option<Self> {
+        Some(match word {
+            "eq" | "==" | "=" => Op::Eq,
+            "ne" | "!=" => Op::Ne,
+            "lt" | "<" => Op::Lt,
+            "gt" | ">" => Op::Gt,
+            "contains" => Op::Contains,
+            "exists" => Op::Exists,
+            "missing" | "null" => Op::Missing,
+            _ => return None,
+        })
+    }
+}
+
+/// A rule as one line, the form the TUI edits:
+/// `read.text contains "error" or code gt 399 → fail agent errored`,
+/// `run.pass lt 5 → restart 2000ms`, `always → end`.
+pub fn rule_text(rule: &GateRule) -> String {
+    let checks = if rule.checks.is_empty() {
+        "always".to_string()
+    } else {
+        rule.checks
+            .iter()
+            .map(|c| {
+                if c.op.takes_value() {
+                    format!("{} {} {}", c.path, c.op.name(), c.value)
+                } else {
+                    format!("{} {}", c.path, c.op.name())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(if rule.any { " or " } else { " and " })
+    };
+    format!("{checks} → {}", action_text(&rule.then))
+}
+
+/// An action as words: `end`, `restart`, `restart 2000ms`, `fail <message>`.
+pub fn action_text(action: &GateAction) -> String {
+    match action {
+        GateAction::End => "end".into(),
+        GateAction::Restart { delay_ms: 0 } => "restart".into(),
+        GateAction::Restart { delay_ms } => format!("restart {delay_ms}ms"),
+        GateAction::Fail { message } => format!("fail {message}"),
+    }
+}
+
+/// The inverse of [`rule_text`]. Values are JSON when they parse as JSON
+/// (`3`, `true`, `"a b"`), else the bare word.
+pub fn parse_rule(text: &str) -> Result<GateRule, String> {
+    let (left, right) = split_arrow(text)
+        .ok_or("a rule is `<checks> → <action>`, e.g. `count.value lt 3 → restart 500ms`")?;
+    let then = parse_action(right.trim())?;
+    let words = tokens(left.trim())?;
+    if words.is_empty() || matches!(words.as_slice(), [w] if w == "always" || w == "else") {
+        return Ok(GateRule {
+            checks: Vec::new(),
+            any: false,
+            then,
+        });
+    }
+    let mut checks = Vec::new();
+    let mut joins = Vec::new();
+    for part in words.split(|w| w == "and" || w == "or") {
+        let [path, op, rest @ ..] = part else {
+            return Err(format!(
+                "`{}`: a check is `<path> <op> [value]`",
+                part.join(" ")
+            ));
+        };
+        let op = Op::parse(op).ok_or_else(|| {
+            format!(
+                "`{op}` is not an operator ({})",
+                Op::ALL.map(Op::name).join(", ")
+            )
+        })?;
+        let value = match (op.takes_value(), rest) {
+            (false, []) => Value::Null,
+            (false, _) => return Err(format!("`{}` takes no value", op.name())),
+            (true, []) => return Err(format!("`{path} {}` needs a value", op.name())),
+            (true, words) => {
+                let raw = words.join(" ");
+                serde_json::from_str(&raw).unwrap_or(Value::String(raw))
+            }
+        };
+        checks.push(Check {
+            path: path.clone(),
+            op,
+            value,
+        });
+    }
+    joins.extend(words.iter().filter(|w| *w == "and" || *w == "or"));
+    if joins.windows(2).any(|w| w[0] != w[1]) {
+        return Err("use either `and` or `or` in one rule, not both".into());
+    }
+    Ok(GateRule {
+        checks,
+        any: joins.first().is_some_and(|j| *j == "or"),
+        then,
+    })
+}
+
+fn parse_action(text: &str) -> Result<GateAction, String> {
+    let (word, rest) = text.split_once(' ').unwrap_or((text, ""));
+    let rest = rest.trim();
+    match word {
+        "end" if rest.is_empty() => Ok(GateAction::End),
+        "restart" => {
+            let ms = rest.trim_end_matches("ms").trim();
+            let delay_ms = if ms.is_empty() {
+                0
+            } else {
+                ms.replace('_', "")
+                    .parse()
+                    .map_err(|_| format!("`{rest}`: restart takes a delay like `500ms`"))?
+            };
+            Ok(GateAction::Restart { delay_ms })
+        }
+        "fail" => Ok(GateAction::Fail {
+            message: if rest.is_empty() {
+                "the gate failed the run".into()
+            } else {
+                rest.to_string()
+            },
+        }),
+        _ => Err(format!(
+            "`{text}`: the action is `end`, `restart [500ms]` or `fail <message>`"
+        )),
+    }
+}
+
+/// `text` split at its first `→` (or `->`) outside quotes.
+fn split_arrow(text: &str) -> Option<(&str, &str)> {
+    let mut quoted = false;
+    for (i, c) in text.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '→' if !quoted => return Some((&text[..i], &text[i + c.len_utf8()..])),
+            '-' if !quoted && text[i..].starts_with("->") => {
+                return Some((&text[..i], &text[i + 2..]));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Words split on spaces; a `"…"` (JSON string) stays one word, quotes kept.
+fn tokens(text: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for c in text.chars() {
+        if quoted {
+            word.push(c);
+            match c {
+                '\\' if !escaped => escaped = true,
+                '"' if !escaped => quoted = false,
+                _ => escaped = false,
+            }
+        } else if c == '"' {
+            word.push(c);
+            quoted = true;
+        } else if c.is_whitespace() {
+            if !word.is_empty() {
+                out.push(std::mem::take(&mut word));
+            }
+        } else {
+            word.push(c);
+        }
+    }
+    if quoted {
+        return Err("a quote is not closed".into());
+    }
+    if !word.is_empty() {
+        out.push(word);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -280,6 +488,38 @@ mod tests {
                 (1, "code", None, false),
             ]
         );
+    }
+
+    #[test]
+    fn rule_text_round_trips() {
+        for text in [
+            "always → end",
+            "count.value lt 3 → restart 500ms",
+            "read.text missing → restart",
+            r#"read.text contains "an error" or code gt 399 → fail agent errored"#,
+            r#"a eq "ok" and b ne true and c exists → end"#,
+        ] {
+            let rule = parse_rule(text).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(rule_text(&rule), text);
+        }
+        let rule = parse_rule("x == ok -> fail").unwrap();
+        assert_eq!(rule.checks[0].value, json!("ok"));
+        assert_eq!(
+            rule_text(&rule),
+            r#"x eq "ok" → fail the gate failed the run"#
+        );
+        assert_eq!(parse_rule("else -> end").unwrap().checks, vec![]);
+        for bad in [
+            "x lt 3",
+            "x around 3 → end",
+            "x lt → end",
+            "x exists 3 → end",
+            "a exists and b exists or c exists → end",
+            "x eq 1 → jump",
+            r#"x eq "open → end"#,
+        ] {
+            assert!(parse_rule(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

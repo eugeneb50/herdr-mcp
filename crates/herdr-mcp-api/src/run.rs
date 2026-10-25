@@ -60,6 +60,51 @@ pub struct RunRecord {
     pub finished_at: Option<DateTime<Utc>>,
 }
 
+impl RunRecord {
+    /// The pane to look at for this run: the one its failure snapshot read,
+    /// else the last pane a step targeted or an agent a step started, else
+    /// the agent that started the run.
+    pub fn pane(&self, events: &[RunEvent]) -> Option<String> {
+        let from_events = events.iter().rev().find_map(|e| match &e.kind {
+            RunEventKind::PaneSnapshot { pane, .. } => Some(pane.clone()),
+            RunEventKind::StepStarted { pane, .. } => pane.clone(),
+            RunEventKind::StepFinished { result, .. } => crate::tool_payload(result)?
+                .get("pane_id")?
+                .as_str()
+                .map(str::to_string),
+            _ => None,
+        });
+        from_events.or_else(|| match &self.origin {
+            RunOrigin::Agent { pane_id } => pane_id.clone(),
+            _ => None,
+        })
+    }
+
+    /// A request that runs this again: the same saved collection (its
+    /// current requests) or the same ad-hoc steps, in the same workspace.
+    pub fn rerun(&self) -> StartRunRequest {
+        StartRunRequest {
+            recipe_id: self.recipe_id,
+            steps: self.recipe_id.is_none().then(|| self.steps.clone()),
+            name: self.name.clone(),
+            session_id: Some(self.session_id.clone()),
+            ..Default::default()
+        }
+    }
+
+    /// `failed · 2.10s · 3 passes` for a list row.
+    pub fn summary(&self) -> String {
+        let mut parts = vec![format!("{:?}", self.status).to_lowercase()];
+        if let Some(end) = self.finished_at {
+            parts.push(seconds(end - self.started_at));
+        }
+        if self.pass > 1 {
+            parts.push(format!("{} passes", self.pass));
+        }
+        parts.join(" · ")
+    }
+}
+
 /// What started a run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -329,7 +374,7 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
             } => {
                 let decided = match (rule, action) {
                     (Some(rule), Some(action)) => {
-                        format!("rule {} → {}", rule + 1, action_text(action))
+                        format!("rule {} → {}", rule + 1, crate::gate::action_text(action))
                     }
                     _ => "no rule matched → end".to_string(),
                 };
@@ -350,7 +395,7 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
                             "rule {}: {} {}{expected} — found {found} {}",
                             c.rule + 1,
                             c.path,
-                            op_text(c.op),
+                            c.op.name(),
                             if c.held { "✔" } else { "✘" }
                         ),
                     );
@@ -370,28 +415,6 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
         }
     }
     out
-}
-
-fn op_text(op: crate::Op) -> &'static str {
-    use crate::Op;
-    match op {
-        Op::Eq => "eq",
-        Op::Ne => "ne",
-        Op::Lt => "lt",
-        Op::Gt => "gt",
-        Op::Contains => "contains",
-        Op::Exists => "exists",
-        Op::Missing => "missing",
-    }
-}
-
-fn action_text(action: &GateAction) -> String {
-    match action {
-        GateAction::End => "end".into(),
-        GateAction::Restart { delay_ms: 0 } => "restart".into(),
-        GateAction::Restart { delay_ms } => format!("restart after {delay_ms} ms"),
-        GateAction::Fail { message } => format!("fail: {message}"),
-    }
 }
 
 fn seconds(d: chrono::Duration) -> String {

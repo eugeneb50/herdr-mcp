@@ -2,6 +2,7 @@
 //! request, the response, and the pickers drawn over them.
 
 use herdr_mcp_api::VarScope;
+use herdr_mcp_api::gate::rule_text;
 use herdr_mcp_api::playground::{
     BodyMode, HTTP_METHODS, KeyMode, PROVIDERS, display_value, json_body_error, model_choices,
     tool_label,
@@ -13,8 +14,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::{
-    CRow, Focus, HttpRow, LlmRow, Overlay, Pick, RRow, RequestForm, Target, TreeRow, View,
-    extract_text, kv_text, method_choices, request_count, tool_choices, tree_rows, trigger_text,
+    CRow, Focus, HttpRow, LlmRow, Overlay, Pick, RRow, RequestForm, Target, TrailField, TreeRow,
+    View, extract_text, kv_text, method_choices, request_count, tool_choices, tree_rows,
+    trigger_text,
 };
 use crate::App;
 use crate::theme::{
@@ -57,6 +59,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             match pg.view {
                 View::Collections => "  Collections",
                 View::Events => "  herdr Events",
+                View::Runs => "  Runs",
             },
             dim_style(),
         ),
@@ -67,6 +70,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
                 "   Tab panel  Enter open/edit  Ctrl+S save  Ctrl+G send/run  Ctrl+N new  Ctrl+E events"
             }
             View::Events => "   type to filter  Esc clear filter  Ctrl+D clear  Ctrl+E collections",
+            View::Runs => "   ↑/↓ pick  f failed only  c next collection  Esc collections",
         },
         dim_style(),
     ));
@@ -90,6 +94,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     );
     if app.playground.view == View::Events {
         render_events(frame, body, app);
+        return;
+    }
+    if app.playground.view == View::Runs {
+        super::runs::render(frame, body, app);
         return;
     }
 
@@ -145,6 +153,7 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
             let open = |p: Pick| pg.pick == p;
             match row {
                 TreeRow::Globals => item(vec![Span::raw("Globals")], on),
+                TreeRow::Runs => item(vec![Span::raw("Runs")], on),
                 TreeRow::NewCollection => {
                     item(vec![Span::styled("+ New collection", accent_style())], on)
                 }
@@ -478,6 +487,30 @@ fn render_collection(frame: &mut Frame, area: Rect, app: &mut App) {
                 lines.push((None, ListItem::new("")));
                 lines.push((None, heading("Triggers".into())));
             }
+            CRow::Gate(0) | CRow::AddGate
+                if !matches!(rows.get(i.wrapping_sub(1)), Some(CRow::Gate(_))) =>
+            {
+                lines.push((None, ListItem::new("")));
+                lines.push((None, heading("Gate · after the last request".into())));
+                lines.push((
+                    None,
+                    ListItem::new(Line::styled(
+                        "  first rule that holds: end, restart (loop) or fail; `path op value → action`",
+                        dim_style(),
+                    )),
+                ));
+            }
+            CRow::Trail(TrailField::KeepRuns) => {
+                lines.push((None, ListItem::new("")));
+                lines.push((None, heading("Run history".into())));
+                lines.push((
+                    None,
+                    ListItem::new(Line::styled(
+                        "  blank uses the global setting (Settings › runs); 0 means no limit",
+                        dim_style(),
+                    )),
+                ));
+            }
             CRow::Save => lines.push((None, ListItem::new(""))),
             _ => {}
         }
@@ -502,6 +535,27 @@ fn render_collection(frame: &mut Frame, area: Rect, app: &mut App) {
             CRow::AddHttp => button("+ HTTP", on),
             CRow::AddLlm => button("+ LLM", on),
             CRow::RunAll => button(if busy { "Running…" } else { "Run collection" }, on),
+            CRow::Runs => button("Runs ›", on),
+            CRow::Gate(n) => item(
+                vec![
+                    Span::styled(format!("{}. ", n + 1), dim_style()),
+                    Span::raw(rule_text(&c.gate[*n])),
+                ],
+                on,
+            ),
+            CRow::AddGate => button("+ Gate rule", on),
+            CRow::MaxSteps => field("Max requests", c.max_steps.to_string(), on),
+            CRow::Trail(f) => {
+                let value = match f.get(&c.trail) {
+                    Some(n) => n.to_string(),
+                    None => match app.knobs.number(f.setting()) {
+                        0 if *f == TrailField::SnapshotLines => "global: none".into(),
+                        0 => "global: keep all".into(),
+                        n => format!("global: {n}"),
+                    },
+                };
+                field(f.label(), value, on)
+            }
             CRow::Var(n) => {
                 let (k, v) = &c.vars[*n];
                 item(
@@ -1043,6 +1097,18 @@ fn render_editor(frame: &mut Frame, area: Rect, app: &App) {
             "path -> var: the path is followed into the result (e.g. panes[0].pane_id); empty saves its text".into(),
         ),
         Target::TemplateVar(_) => ("Template variable".to_string(), String::new()),
+        Target::Gate(_) => (
+            "Gate rule".to_string(),
+            "path op value [and|or …] → end | restart 500ms | fail message; ops: eq ne lt gt contains exists missing; `always → end` always matches".into(),
+        ),
+        Target::MaxSteps => (
+            "Max requests per run".to_string(),
+            "every pass of a restart loop counts; a run that would go over fails".into(),
+        ),
+        Target::Trail(f) => (
+            f.label().to_string(),
+            "a whole number; blank uses the global setting; 0 means no limit".into(),
+        ),
     };
     let height = editing.area.lines().len() as u16 + 5;
     let inner = modal(frame, area, 70, height.max(6), &format!(" {title} "));

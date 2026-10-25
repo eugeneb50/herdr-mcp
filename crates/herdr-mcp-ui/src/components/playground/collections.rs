@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use super::builders::{HttpBuilder, LlmWizard};
+use super::flow::{GateEditor, TrailEditor, no_gate};
 use super::forms::{DynamicForm, ResponseViewer};
 use super::recipes::{RunResults, TemplateForm, TriggerEditor};
 use crate::client::use_api;
@@ -267,6 +268,8 @@ fn CollectionView(recipe: Recipe, pick: Signal<Pick>, refresh: Signal<u32>) -> E
     let mut folder = use_signal(|| recipe.category.clone().unwrap_or_default());
     let mut vars: Signal<Vec<(String, String)>> = use_signal(|| sorted_vars(&recipe.variables));
     let mut triggers = use_signal(|| recipe.triggers.clone());
+    let gate = use_signal(|| recipe.gate.clone().unwrap_or_else(no_gate));
+    let trail = use_signal(|| recipe.trail);
     let mut run: Signal<Option<Value>> = use_signal(|| None);
     let mut busy = use_signal(|| false);
     let mut msg: Signal<Option<Result<String, String>>> = use_signal(|| None);
@@ -286,6 +289,9 @@ fn CollectionView(recipe: Recipe, pick: Signal<Pick>, refresh: Signal<u32>) -> E
                 category: Some(folder.read().trim().to_string()),
                 variables: Some(variables),
                 triggers: Some(triggers.read().clone()),
+                // No rules clears the gate.
+                gate: Some(gate.read().clone()),
+                trail: Some(*trail.read()),
                 ..Default::default()
             };
             match client.update_recipe(id, &req).await {
@@ -497,10 +503,19 @@ fn CollectionView(recipe: Recipe, pick: Signal<Pick>, refresh: Signal<u32>) -> E
                 "+ Variable"
             }
         }
+        GateEditor {
+            gate,
+            paths: steps
+                .iter()
+                .map(|s| s.id.clone())
+                .chain(["run.pass".to_string()])
+                .collect::<Vec<_>>(),
+        }
         TriggerEditor {
             triggers: triggers.read().clone(),
             on_change: move |next| triggers.set(next),
         }
+        TrailEditor { trail }
         div { class: "btn-row",
             button { class: "btn btn-primary", onclick: save, "Save collection" }
             button { class: "btn link-danger", onclick: delete, "Delete collection" }
