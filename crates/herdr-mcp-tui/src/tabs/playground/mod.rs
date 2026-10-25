@@ -21,10 +21,11 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use herdr_mcp_api::playground::{
-    HERDR_API, HTTP_REQUEST, LLM_CALL, Method, ToolInfo, add_request, delete_step, display_value,
-    event_names, folders, methods, parse_value, parse_when, raw_values, request_method,
-    request_params, request_schema, request_values, result_paths, save_step, set_steps,
-    sorted_vars, tool_list, var_name, when_text,
+    BodyMode, CUSTOM_PROVIDER, HERDR_API, HTTP_METHODS, HTTP_REQUEST, KeyMode, LLM_CALL, Method,
+    PROVIDERS, ToolInfo, add_request, delete_step, display_value, event_names, folders, kv_json,
+    kv_rows, load_models, methods, model_choices, parse_value, parse_when, pick_provider,
+    provider_of, raw_values, request_method, request_params, request_schema, request_values,
+    result_paths, save_step, set_steps, sorted_vars, tool_list, var_name, when_text, with_value,
 };
 use herdr_mcp_api::{
     ApiClient, CreateRecipeRequest, Extract, InstantiateTemplateRequest, Recipe, RecipeStep,
@@ -35,7 +36,7 @@ use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use serde_json::Value;
 
-use crate::{App, Tab, TextArea};
+use crate::{App, Tab, TextArea, inside};
 
 /// Result paths listed under a response.
 const MAX_PATHS: usize = 200;
@@ -173,6 +174,12 @@ pub struct RequestForm {
     /// Raw form values by param name.
     pub values: HashMap<String, String>,
     pub extract: Vec<Extract>,
+    /// Plain param fields instead of the HTTP builder or LLM wizard.
+    pub plain: bool,
+    /// The LLM wizard's provider is Custom (before a base URL says so).
+    pub custom: bool,
+    /// The models the LLM provider listed (Load models).
+    pub models: Vec<Value>,
     pub row: usize,
     pub confirm_delete: bool,
     /// The params as a run would resolve them, and the placeholders that
@@ -196,6 +203,9 @@ impl RequestForm {
             method: request_method(step),
             values: request_values(step),
             extract: step.extract.clone(),
+            plain: false,
+            custom: false,
+            models: Vec::new(),
             row: 0,
             confirm_delete: false,
             resolved: Value::Null,
@@ -250,14 +260,99 @@ impl RequestForm {
         if self.herdr() {
             rows.push(RRow::Method);
         }
-        rows.extend(
-            self.param_names(&props, &required)
-                .into_iter()
-                .map(RRow::Param),
-        );
+        let builder = self.tool == HTTP_REQUEST || self.tool == LLM_CALL;
+        if builder {
+            rows.push(RRow::Plain);
+        }
+        if builder && !self.plain {
+            rows.extend(if self.tool == HTTP_REQUEST {
+                self.http_rows()
+            } else {
+                self.llm_rows()
+            });
+        } else {
+            rows.extend(
+                self.param_names(&props, &required)
+                    .into_iter()
+                    .map(RRow::Param),
+            );
+        }
         rows.extend((0..self.extract.len()).map(RRow::Extract));
         rows.extend([RRow::AddExtract, RRow::Send, RRow::Save, RRow::Delete]);
         rows
+    }
+
+    fn value(&self, key: &str) -> &str {
+        self.values.get(key).map_or("", String::as_str)
+    }
+
+    /// The endpoint builder's rows.
+    fn http_rows(&self) -> Vec<RRow> {
+        let mut rows = vec![HttpRow::Method, HttpRow::Url];
+        rows.extend((0..kv_rows(self.value("query")).len()).map(HttpRow::Query));
+        rows.push(HttpRow::AddQuery);
+        rows.extend((0..kv_rows(self.value("headers")).len()).map(HttpRow::Header));
+        rows.extend([HttpRow::AddHeader, HttpRow::Body]);
+        if BodyMode::of(&self.values) != BodyMode::None {
+            rows.push(HttpRow::BodyText);
+        }
+        rows.push(HttpRow::Check);
+        rows.into_iter().map(RRow::Http).collect()
+    }
+
+    /// The LLM wizard's provider, an index into [`PROVIDERS`].
+    pub fn provider(&self) -> usize {
+        if self.custom {
+            CUSTOM_PROVIDER
+        } else {
+            provider_of(self.value("base_url"))
+        }
+    }
+
+    pub fn key_mode(&self) -> KeyMode {
+        KeyMode::of(&self.values, &PROVIDERS[self.provider()])
+    }
+
+    /// The LLM wizard's rows: provider and key, model, prompt.
+    fn llm_rows(&self) -> Vec<RRow> {
+        let mut rows = vec![LlmRow::Provider];
+        if self.provider() == CUSTOM_PROVIDER {
+            rows.push(LlmRow::BaseUrl);
+        }
+        rows.push(LlmRow::KeyFrom);
+        if self.key_mode() != KeyMode::None {
+            rows.push(LlmRow::Key);
+        }
+        rows.extend([
+            LlmRow::Model,
+            LlmRow::Models,
+            LlmRow::System,
+            LlmRow::Prompt,
+            LlmRow::Temperature,
+            LlmRow::MaxTokens,
+        ]);
+        rows.into_iter().map(RRow::Llm).collect()
+    }
+
+    /// The param a builder text row edits.
+    pub fn text_key(&self, row: &RRow) -> Option<&'static str> {
+        match row {
+            RRow::Http(HttpRow::Url) => Some("url"),
+            RRow::Http(HttpRow::BodyText) => BodyMode::of(&self.values).key(),
+            RRow::Llm(LlmRow::BaseUrl) => Some("base_url"),
+            RRow::Llm(LlmRow::Key) => self.key_mode().key(),
+            RRow::Llm(LlmRow::Model) => Some("model"),
+            RRow::Llm(LlmRow::System) => Some("system"),
+            RRow::Llm(LlmRow::Prompt) => Some("prompt"),
+            RRow::Llm(LlmRow::Temperature) => Some("temperature"),
+            RRow::Llm(LlmRow::MaxTokens) => Some("max_tokens"),
+            _ => None,
+        }
+    }
+
+    /// The name/value rows of a `query` or `headers` param.
+    pub fn kv(&self, key: &str) -> Vec<(String, String)> {
+        kv_rows(self.value(key))
     }
 
     /// The params this request sends.
@@ -299,12 +394,77 @@ pub enum RRow {
     Tool,
     Description,
     Method,
+    /// Plain fields instead of the builder (HTTP and LLM requests).
+    Plain,
+    Http(HttpRow),
+    Llm(LlmRow),
     Param(String),
     Extract(usize),
     AddExtract,
     Send,
     Save,
     Delete,
+}
+
+/// A row of the `http_request` endpoint builder.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum HttpRow {
+    Method,
+    Url,
+    Query(usize),
+    AddQuery,
+    Header(usize),
+    AddHeader,
+    /// The body mode: none, JSON or text.
+    Body,
+    BodyText,
+    Check,
+}
+
+/// A row of the `llm_call` wizard.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LlmRow {
+    Provider,
+    BaseUrl,
+    /// Where the key comes from.
+    KeyFrom,
+    Key,
+    Model,
+    /// Load the provider's models to pick from.
+    Models,
+    System,
+    Prompt,
+    Temperature,
+    MaxTokens,
+}
+
+/// The `query` or `headers` row (`None`: a new one) an HTTP builder row
+/// edits.
+fn kv_target(row: &RRow) -> Option<(&'static str, Option<usize>)> {
+    match row {
+        RRow::Http(HttpRow::Query(i)) => Some(("query", Some(*i))),
+        RRow::Http(HttpRow::AddQuery) => Some(("query", None)),
+        RRow::Http(HttpRow::Header(i)) => Some(("headers", Some(*i))),
+        RRow::Http(HttpRow::AddHeader) => Some(("headers", None)),
+        _ => None,
+    }
+}
+
+/// A query param as `name=value`, a header as `Name: value`.
+pub fn kv_text(key: &str, (k, v): &(String, String)) -> String {
+    if key == "headers" {
+        format!("{k}: {v}")
+    } else {
+        format!("{k}={v}")
+    }
+}
+
+fn parse_kv(key: &str, text: &str) -> (String, String) {
+    let sep = if key == "headers" { ':' } else { '=' };
+    match text.split_once(sep) {
+        Some((k, v)) => (k.trim().to_string(), v.trim().to_string()),
+        None => (text.trim().to_string(), String::new()),
+    }
 }
 
 /// What a text edit writes to when it ends.
@@ -317,6 +477,8 @@ pub enum Target {
     RequestId,
     Description,
     Param(String),
+    /// Row `.1` of the `query`/`headers` param `.0` (`None`: a new row).
+    Kv(&'static str, Option<usize>),
     Extract(usize),
     TemplateVar(usize),
 }
@@ -334,6 +496,11 @@ pub enum Overlay {
         index: usize,
     },
     Methods {
+        search: String,
+        index: usize,
+    },
+    /// The LLM provider's models.
+    Models {
         search: String,
         index: usize,
     },
@@ -415,6 +582,17 @@ impl PlaygroundState {
         self.msg = Some(Err(m.into()));
     }
 
+    /// Keep the tree selection on the same item as the collections change
+    /// from `before` to `after` (a gone item leaves it where it was, in
+    /// range).
+    pub fn follow_tree(&mut self, before: &[Recipe], after: &[Recipe]) {
+        let picked = tree_rows(before).get(self.tree).cloned();
+        let rows = tree_rows(after);
+        self.tree = picked
+            .and_then(|p| rows.iter().position(|r| *r == p))
+            .unwrap_or_else(|| self.tree.min(rows.len().saturating_sub(1)));
+    }
+
     /// The text field being typed into, if any.
     pub fn edit_area(&self) -> Option<&TextArea<'static>> {
         self.editing.as_ref().map(|e| &e.area)
@@ -445,7 +623,17 @@ impl PlaygroundState {
             }
             Pick::Request(..) => {
                 let r = self.request.as_ref()?;
-                match r.rows(&self.tools, &self.methods).get(r.row)? {
+                let row = r.rows(&self.tools, &self.methods).get(r.row)?.clone();
+                if let Some(key) = r.text_key(&row) {
+                    return Some((Target::Param(key.into()), r.value(key).to_string()));
+                }
+                if let Some((key, at)) = kv_target(&row) {
+                    let text = at
+                        .and_then(|i| r.kv(key).get(i).map(|kv| kv_text(key, kv)))
+                        .unwrap_or_default();
+                    return Some((Target::Kv(key, at), text));
+                }
+                match &row {
                     RRow::Id => Some((Target::RequestId, r.id.clone())),
                     RRow::Description => Some((Target::Description, r.description.clone())),
                     RRow::Param(name) => Some((
@@ -461,7 +649,8 @@ impl PlaygroundState {
     }
 
     fn begin_edit(&mut self, target: Target, text: String) {
-        let mut area = TextArea::new(vec![text]);
+        let mut area = TextArea::new(text.split('\n').map(String::from).collect());
+        area.move_cursor(tui_textarea::CursorMove::Bottom);
         area.move_cursor(tui_textarea::CursorMove::End);
         self.editing = Some(Editing { target, area });
     }
@@ -535,6 +724,8 @@ async fn reload_recipes(app: &mut App) {
     if let Some(http) = app.http.clone()
         && let Ok(v) = http.list_recipes().await
     {
+        let before = app.recipes.take().unwrap_or_default();
+        app.playground.follow_tree(&before, &v);
         app.recipes = Some(v);
     }
 }
@@ -1010,6 +1201,90 @@ fn cycle_param(r: &mut RequestForm, name: &str, variants: Vec<String>, forward: 
     r.values.insert(name.to_string(), choices[next].clone());
 }
 
+/// A builder row that steps through choices rather than taking text.
+fn builder_choice(row: &RRow) -> bool {
+    matches!(
+        row,
+        RRow::Plain
+            | RRow::Http(HttpRow::Method | HttpRow::Body | HttpRow::Check)
+            | RRow::Llm(LlmRow::Provider | LlmRow::KeyFrom)
+    )
+}
+
+/// The index after (or before) `at` in `0..n`, wrapping.
+fn step_index(at: usize, n: usize, forward: bool) -> usize {
+    if forward {
+        (at + 1) % n
+    } else {
+        (at + n - 1) % n
+    }
+}
+
+/// Step builder choice `row` forward or back (a toggle flips).
+fn step_builder(r: &mut RequestForm, row: &RRow, forward: bool) {
+    match row {
+        RRow::Plain => r.plain = !r.plain,
+        RRow::Http(HttpRow::Method) => {
+            let cur = r.value("method");
+            let at = HTTP_METHODS
+                .iter()
+                .position(|m| m.eq_ignore_ascii_case(cur))
+                .unwrap_or(0);
+            let next = HTTP_METHODS[step_index(at, HTTP_METHODS.len(), forward)];
+            r.values = with_value(&r.values, "method", next.into());
+        }
+        RRow::Http(HttpRow::Body) => {
+            let all = BodyMode::ALL;
+            let at = all
+                .iter()
+                .position(|m| *m == BodyMode::of(&r.values))
+                .unwrap_or(0);
+            r.values = all[step_index(at, all.len(), forward)].apply(&r.values);
+        }
+        RRow::Http(HttpRow::Check) => {
+            let on = r.value("check") == "true";
+            r.values = with_value(&r.values, "check", if on { "" } else { "true" }.into());
+        }
+        RRow::Llm(LlmRow::Provider) => {
+            let next = step_index(r.provider(), PROVIDERS.len(), forward);
+            r.custom = next == CUSTOM_PROVIDER;
+            r.values = pick_provider(&r.values, next);
+        }
+        RRow::Llm(LlmRow::KeyFrom) => {
+            let all = KeyMode::ALL;
+            let at = all.iter().position(|m| *m == r.key_mode()).unwrap_or(0);
+            let provider = &PROVIDERS[r.provider()];
+            r.values = all[step_index(at, all.len(), forward)].apply(&r.values, provider);
+        }
+        _ => {}
+    }
+}
+
+/// Load the LLM provider's models and open the picker.
+async fn fetch_models(app: &mut App) {
+    let Some(http) = client(app) else {
+        return;
+    };
+    let Some(values) = app.playground.request.as_ref().map(|r| r.values.clone()) else {
+        return;
+    };
+    let pg = &mut app.playground;
+    match load_models(&http, &values).await {
+        Ok(list) if list.is_empty() => pg.err("the provider listed no models"),
+        Ok(list) => {
+            pg.ok(format!("{} models", list.len()));
+            if let Some(r) = pg.request.as_mut() {
+                r.models = list;
+            }
+            pg.overlay = Some(Overlay::Models {
+                search: String::new(),
+                index: 0,
+            });
+        }
+        Err(e) => pg.err(format!("could not load models: {e}")),
+    }
+}
+
 async fn handle_request(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
     let pg = &app.playground;
     let Some(r) = pg.request.as_ref() else {
@@ -1032,6 +1307,13 @@ async fn handle_request(app: &mut App, code: KeyCode, mods: KeyModifiers) -> boo
     let choice = kind
         .as_ref()
         .is_some_and(|(_, (k, v))| k == "boolean" || !v.is_empty());
+    let builder_text = row.as_ref().is_some_and(|x| {
+        app.playground
+            .request
+            .as_ref()
+            .is_some_and(|r| r.text_key(x).is_some())
+            || kv_target(x).is_some()
+    });
     let Some(r) = app.playground.request.as_mut() else {
         return false;
     };
@@ -1049,7 +1331,31 @@ async fn handle_request(app: &mut App, code: KeyCode, mods: KeyModifiers) -> boo
                     r.values.remove(&name);
                     preview(app).await;
                 }
-                _ => {}
+                Some(other) => {
+                    if let Some(key) = r.text_key(&other) {
+                        r.values.remove(key);
+                    } else if let Some((key, Some(i))) = kv_target(&other) {
+                        let mut rows = r.kv(key);
+                        rows.remove(i);
+                        r.values = with_value(&r.values, key, kv_json(&rows));
+                    }
+                    preview(app).await;
+                }
+                None => {}
+            }
+            return true;
+        }
+        // Space and Enter step a builder choice (←/→ too, but not a toggle).
+        KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Left | KeyCode::Right
+            if row.as_ref().is_some_and(builder_choice) =>
+        {
+            let Some(row) = row else {
+                return true;
+            };
+            let toggle = matches!(row, RRow::Plain | RRow::Http(HttpRow::Check));
+            if !(toggle && matches!(code, KeyCode::Left | KeyCode::Right)) {
+                step_builder(r, &row, code != KeyCode::Left);
+                preview(app).await;
             }
             return true;
         }
@@ -1081,10 +1387,11 @@ async fn handle_request(app: &mut App, code: KeyCode, mods: KeyModifiers) -> boo
         _ => {}
     }
     if let Some(ch) = typed(code, mods) {
-        let text_row = matches!(
-            row,
-            Some(RRow::Param(_) | RRow::Id | RRow::Description | RRow::Extract(_))
-        );
+        let text_row = builder_text
+            || matches!(
+                row,
+                Some(RRow::Param(_) | RRow::Id | RRow::Description | RRow::Extract(_))
+            );
         if text_row && let Some((target, text)) = app.playground.row_text(0) {
             app.playground.begin_edit(target, format!("{text}{ch}"));
             return true;
@@ -1113,6 +1420,14 @@ async fn handle_request(app: &mut App, code: KeyCode, mods: KeyModifiers) -> boo
                 pg.begin_edit(target, text);
             }
         }
+        Some(RRow::Http(_) | RRow::Llm(_)) if builder_text => {
+            if let Some((target, text)) = pg.row_text(0) {
+                pg.begin_edit(target, text);
+            }
+        }
+        Some(RRow::Llm(LlmRow::Models)) => fetch_models(app).await,
+        // Choices step above.
+        Some(RRow::Plain | RRow::Http(_) | RRow::Llm(_)) => {}
         Some(RRow::AddExtract) => {
             let Some(r) = pg.request.as_mut() else {
                 return true;
@@ -1207,6 +1522,13 @@ async fn handle_edit(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
     if mods.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('c' | 'v' | 'x')) {
         return false;
     }
+    // Alt+Enter (Shift+Enter where the terminal tells) starts a new line.
+    if code == KeyCode::Enter && mods.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT) {
+        if let Some(e) = app.playground.editing.as_mut() {
+            e.area.insert_newline();
+        }
+        return true;
+    }
     if !matches!(code, KeyCode::Enter | KeyCode::Esc) {
         if let Some(e) = app.playground.editing.as_mut()
             && let Some(input) = crate::to_textarea_input(code, mods)
@@ -1244,7 +1566,11 @@ async fn commit(app: &mut App, target: Target, text: String) {
             }
             c.changed = true;
         }
-        Target::RequestId | Target::Description | Target::Param(_) | Target::Extract(_) => {
+        Target::RequestId
+        | Target::Description
+        | Target::Param(_)
+        | Target::Kv(..)
+        | Target::Extract(_) => {
             let Some(r) = pg.request.as_mut() else {
                 return;
             };
@@ -1257,6 +1583,20 @@ async fn commit(app: &mut App, target: Target, text: String) {
                     } else {
                         r.values.insert(name, text);
                     }
+                    preview(app).await;
+                }
+                Target::Kv(key, at) => {
+                    let mut rows = r.kv(key);
+                    let (k, v) = parse_kv(key, &text);
+                    match at {
+                        Some(i) if k.is_empty() => {
+                            rows.remove(i);
+                        }
+                        Some(i) => rows[i] = (k, v),
+                        None if !k.is_empty() => rows.push((k, v)),
+                        None => {}
+                    }
+                    r.values = with_value(&r.values, key, kv_json(&rows));
                     preview(app).await;
                 }
                 Target::Extract(i) => {
@@ -1296,6 +1636,30 @@ pub fn method_choices<'a>(methods: &'a [Method], search: &str) -> Vec<&'a str> {
         .collect()
 }
 
+/// A key in a filterable picker: arrows move, typing filters, Backspace
+/// unfilters. `true` when Enter picks `index`.
+fn picker_key(
+    search: &mut String,
+    index: &mut usize,
+    len: usize,
+    code: KeyCode,
+    mods: KeyModifiers,
+) -> bool {
+    if code == KeyCode::Enter {
+        return true;
+    }
+    if code == KeyCode::Backspace {
+        search.pop();
+        *index = 0;
+    } else if let Some(next) = moved(*index, len, code) {
+        *index = next;
+    } else if let Some(c) = typed(code, mods) {
+        search.push(c);
+        *index = 0;
+    }
+    false
+}
+
 async fn handle_overlay(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let Some(overlay) = app.playground.overlay.take() else {
         return;
@@ -1305,67 +1669,68 @@ async fn handle_overlay(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
     let pg = &mut app.playground;
     let next = match overlay {
-        Overlay::Tools { mut search, index } => {
+        Overlay::Tools {
+            mut search,
+            mut index,
+        } => {
             let len = tool_choices(&pg.tools, &search).len();
-            match code {
-                KeyCode::Enter => {
-                    let tool = tool_choices(&pg.tools, &search)
-                        .get(index)
-                        .map(|t| t.name.clone());
-                    if let (Some(tool), Some(r)) = (tool, pg.request.as_mut())
-                        && tool != r.tool
-                    {
-                        r.tool = tool;
-                        r.values.clear();
-                        if r.herdr() {
-                            load_schema(app).await;
-                        }
-                        preview(app).await;
+            if !picker_key(&mut search, &mut index, len, code, mods) {
+                Some(Overlay::Tools { search, index })
+            } else {
+                let tool = tool_choices(&pg.tools, &search)
+                    .get(index)
+                    .map(|t| t.name.clone());
+                if let (Some(tool), Some(r)) = (tool, pg.request.as_mut())
+                    && tool != r.tool
+                {
+                    r.tool = tool;
+                    r.values.clear();
+                    if r.herdr() {
+                        load_schema(app).await;
                     }
-                    None
+                    preview(app).await;
                 }
-                KeyCode::Backspace => {
-                    search.pop();
-                    Some(Overlay::Tools { search, index: 0 })
-                }
-                _ => match (moved(index, len, code), typed(code, mods)) {
-                    (Some(index), _) => Some(Overlay::Tools { search, index }),
-                    (None, Some(c)) => {
-                        search.push(c);
-                        Some(Overlay::Tools { search, index: 0 })
-                    }
-                    _ => Some(Overlay::Tools { search, index }),
-                },
+                None
             }
         }
-        Overlay::Methods { mut search, index } => {
+        Overlay::Methods {
+            mut search,
+            mut index,
+        } => {
             let len = method_choices(&pg.methods, &search).len();
-            match code {
-                KeyCode::Enter => {
-                    let method = method_choices(&pg.methods, &search)
-                        .get(index)
-                        .map(|m| m.to_string());
-                    if let (Some(method), Some(r)) = (method, pg.request.as_mut())
-                        && method != r.method
-                    {
-                        r.method = method;
-                        r.values.clear();
-                        preview(app).await;
-                    }
-                    None
+            if !picker_key(&mut search, &mut index, len, code, mods) {
+                Some(Overlay::Methods { search, index })
+            } else {
+                let method = method_choices(&pg.methods, &search)
+                    .get(index)
+                    .map(|m| m.to_string());
+                if let (Some(method), Some(r)) = (method, pg.request.as_mut())
+                    && method != r.method
+                {
+                    r.method = method;
+                    r.values.clear();
+                    preview(app).await;
                 }
-                KeyCode::Backspace => {
-                    search.pop();
-                    Some(Overlay::Methods { search, index: 0 })
+                None
+            }
+        }
+        Overlay::Models {
+            mut search,
+            mut index,
+        } => {
+            let choices = pg
+                .request
+                .as_ref()
+                .map(|r| model_choices(&r.models, &search))
+                .unwrap_or_default();
+            if !picker_key(&mut search, &mut index, choices.len(), code, mods) {
+                Some(Overlay::Models { search, index })
+            } else {
+                if let (Some((id, _)), Some(r)) = (choices.get(index), pg.request.as_mut()) {
+                    r.values.insert("model".into(), id.clone());
+                    preview(app).await;
                 }
-                _ => match (moved(index, len, code), typed(code, mods)) {
-                    (Some(index), _) => Some(Overlay::Methods { search, index }),
-                    (None, Some(c)) => {
-                        search.push(c);
-                        Some(Overlay::Methods { search, index: 0 })
-                    }
-                    _ => Some(Overlay::Methods { search, index }),
-                },
+                None
             }
         }
         Overlay::Templates { index } => {
@@ -1752,7 +2117,11 @@ pub(crate) async fn finish_job(app: &mut App, job: Job) {
             .filter(|r| r.rid == rid && r.saved_id == sid)
         {
             let text = send_text(&run, &r.saved_id, &r.extract);
-            r.paths = result_paths(&send_payload(&run, &r.saved_id), MAX_PATHS);
+            // A failed send has nothing to extract.
+            r.paths = match send_payload(&run, &r.saved_id) {
+                Value::Null => Vec::new(),
+                payload => result_paths(&payload, MAX_PATHS),
+            };
             r.path_index = 0;
             r.response = Some(run);
             pg.result_area = TextArea::new(text);
@@ -1765,7 +2134,9 @@ pub(crate) async fn finish_job(app: &mut App, job: Job) {
             .map(|r| r.steps.iter().map(|s| s.id.clone()).collect())
             .unwrap_or_default();
         pg.result_area = TextArea::new(run_text(&run, &order));
+        // Not under an open edit either: it holds an index into them.
         if !c.changed
+            && pg.editing.is_none()
             && let Some(vars) = fresh_vars
         {
             c.vars = vars;
@@ -1885,10 +2256,6 @@ pub fn cut(app: &mut App) -> Option<String> {
 }
 
 // ── mouse ──────────────────────────────────────────────────────────────
-
-fn inside(area: Rect, m: &MouseEvent) -> bool {
-    m.column >= area.x && m.column < area.right() && m.row >= area.y && m.row < area.bottom()
-}
 
 /// The list row under the mouse in a list drawn at `area` with `state`.
 fn row_at(area: Rect, state: &ListState, m: &MouseEvent) -> usize {
@@ -2071,5 +2438,93 @@ mod tests {
             form.params(&tools, &[]),
             serde_json::json!({ "lines": 5, "legacy": "x" })
         );
+    }
+
+    #[test]
+    fn tree_selection_follows_its_item() {
+        let mk = |name: &str| -> Recipe {
+            serde_json::from_value(serde_json::json!({
+                "id": Uuid::new_v4(), "name": name, "description": null, "steps": [],
+                "variables": {}, "created_at": "2026-10-24T00:00:00Z",
+                "updated_at": "2026-10-24T00:00:00Z", "is_template": false
+            }))
+            .unwrap()
+        };
+        let (a, b) = (mk("b"), mk("c"));
+        let mut pg = PlaygroundState {
+            tree: 4,
+            ..Default::default()
+        };
+        // A collection sorting above the picked one arrives.
+        pg.follow_tree(&[a.clone(), b.clone()], &[mk("a"), a.clone(), b.clone()]);
+        assert_eq!(pg.tree, 5);
+        // The picked one goes: the pick stays in range.
+        pg.follow_tree(&[a.clone(), b.clone()], &[a]);
+        assert_eq!(pg.tree, 3);
+    }
+
+    #[test]
+    fn http_builder_rows_edit_the_params() {
+        let step = RecipeStep {
+            id: "get".into(),
+            tool: HTTP_REQUEST.into(),
+            params: serde_json::json!({ "url": "https://x/{{id}}", "query": { "q": "1" } }),
+            ..Default::default()
+        };
+        let mut form = RequestForm::new(Uuid::nil(), &step);
+        let rows = form.rows(&[], &[]);
+        assert!(rows.contains(&RRow::Plain));
+        assert!(rows.contains(&RRow::Http(HttpRow::Query(0))));
+        assert!(!rows.contains(&RRow::Http(HttpRow::BodyText)));
+        assert_eq!(form.text_key(&RRow::Http(HttpRow::Url)), Some("url"));
+        // ←/→ on the method and body mode, Space on check.
+        step_builder(&mut form, &RRow::Http(HttpRow::Method), true);
+        step_builder(&mut form, &RRow::Http(HttpRow::Body), true);
+        step_builder(&mut form, &RRow::Http(HttpRow::Check), true);
+        assert_eq!(form.values["method"], "POST");
+        assert_eq!(form.values["json"], "{}");
+        assert_eq!(form.values["check"], "true");
+        assert!(form.rows(&[], &[]).contains(&RRow::Http(HttpRow::BodyText)));
+        assert_eq!(
+            parse_kv("headers", "Authorization: Bearer {{t}}"),
+            ("Authorization".into(), "Bearer {{t}}".into())
+        );
+        assert_eq!(kv_text("query", &("q".into(), "1".into())), "q=1");
+        // Plain fields show the schema's params instead.
+        step_builder(&mut form, &RRow::Plain, true);
+        assert!(
+            !form
+                .rows(&[], &[])
+                .iter()
+                .any(|r| matches!(r, RRow::Http(_)))
+        );
+    }
+
+    #[test]
+    fn llm_wizard_rows_follow_provider_and_key() {
+        let step = RecipeStep {
+            id: "ask".into(),
+            tool: LLM_CALL.into(),
+            params: serde_json::json!({ "model": "openai/gpt-4o-mini" }),
+            ..Default::default()
+        };
+        let mut form = RequestForm::new(Uuid::nil(), &step);
+        assert_eq!(PROVIDERS[form.provider()].name, "OpenRouter");
+        assert_eq!(form.key_mode(), KeyMode::Env);
+        let rows = form.rows(&[], &[]);
+        assert!(rows.contains(&RRow::Llm(LlmRow::Key)));
+        assert!(!rows.contains(&RRow::Llm(LlmRow::BaseUrl)));
+        // Back from OpenRouter wraps to Custom, which asks for a base URL.
+        step_builder(&mut form, &RRow::Llm(LlmRow::Provider), false);
+        assert_eq!(form.provider(), CUSTOM_PROVIDER);
+        assert!(form.rows(&[], &[]).contains(&RRow::Llm(LlmRow::BaseUrl)));
+        // Custom has no key of its own: none, then an env var, then a key.
+        assert_eq!(form.key_mode(), KeyMode::None);
+        step_builder(&mut form, &RRow::Llm(LlmRow::KeyFrom), true);
+        assert_eq!(form.values["api_key_env"], "LLM_API_KEY");
+        step_builder(&mut form, &RRow::Llm(LlmRow::KeyFrom), true);
+        assert_eq!(form.key_mode(), KeyMode::Key);
+        assert_eq!(form.text_key(&RRow::Llm(LlmRow::Key)), Some("api_key"));
+        assert_eq!(form.values["api_key"], "{{llm_api_key}}");
     }
 }

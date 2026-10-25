@@ -2,7 +2,10 @@
 //! request, the response, and the pickers drawn over them.
 
 use herdr_mcp_api::VarScope;
-use herdr_mcp_api::playground::{display_value, tool_label};
+use herdr_mcp_api::playground::{
+    BodyMode, HTTP_METHODS, KeyMode, PROVIDERS, display_value, json_body_error, model_choices,
+    tool_label,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -10,8 +13,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
 use super::{
-    CRow, Focus, Overlay, Pick, RRow, Target, TreeRow, View, extract_text, method_choices,
-    request_count, tool_choices, tree_rows, trigger_text,
+    CRow, Focus, HttpRow, LlmRow, Overlay, Pick, RRow, RequestForm, Target, TreeRow, View,
+    extract_text, kv_text, method_choices, request_count, tool_choices, tree_rows, trigger_text,
 };
 use crate::App;
 use crate::theme::{
@@ -235,6 +238,182 @@ fn field(label: &str, value: String, on: bool) -> ListItem<'static> {
     )
 }
 
+/// A field value on one line (new lines shown as ⏎).
+fn one_line(s: &str) -> String {
+    s.replace('\n', " ⏎ ")
+}
+
+/// A choice row: the options with the current one marked, and `hint`
+/// when focused.
+fn choice(label: &str, options: &[&str], at: usize, hint: &str, on: bool) -> ListItem<'static> {
+    let mut spans = vec![Span::styled(format!("{label:>12}: "), dim_style())];
+    for (i, o) in options.iter().enumerate() {
+        if i == at {
+            spans.push(Span::styled(format!("[{o}]"), accent_style()));
+        } else {
+            spans.push(Span::styled(format!(" {o} "), dim_style()));
+        }
+    }
+    if on && !hint.is_empty() {
+        spans.push(Span::styled(format!("  {hint}"), dim_style()));
+    }
+    item(spans, on)
+}
+
+fn checkbox(checked: bool, label: &str, on: bool) -> ListItem<'static> {
+    item(
+        vec![
+            Span::styled(if checked { "[x] " } else { "[ ] " }, accent_style()),
+            Span::raw(label.to_string()),
+        ],
+        on,
+    )
+}
+
+/// A builder row's line.
+fn builder_line(
+    r: &RequestForm,
+    row: &RRow,
+    resolved: &std::collections::HashMap<String, String>,
+    on: bool,
+) -> ListItem<'static> {
+    // A text field: its value (or `placeholder`), what it resolves to,
+    // and `hint` when focused.
+    let text = |label: &str, placeholder: &str, hint: &str| {
+        let key = r.text_key(row).unwrap_or_default();
+        let value = r.values.get(key).cloned().unwrap_or_default();
+        let mut spans = vec![Span::styled(format!("{label:>12}: "), dim_style())];
+        if value.is_empty() {
+            spans.push(Span::styled(placeholder.to_string(), dim_style()));
+        } else {
+            spans.push(Span::raw(one_line(&value)));
+        }
+        if let Some(res) = resolved.get(key).filter(|v| !v.is_empty() && **v != value) {
+            spans.push(Span::styled(
+                format!("  → {}", one_line(res)),
+                muted_style(),
+            ));
+        }
+        if on && !hint.is_empty() {
+            spans.push(Span::styled(format!("  {hint}"), dim_style()));
+        }
+        item(spans, on)
+    };
+    let provider = &PROVIDERS[r.provider()];
+    match row {
+        RRow::Plain => checkbox(r.plain, "Plain fields (instead of the builder)", on),
+        RRow::Http(h) => match *h {
+            HttpRow::Method => {
+                let method = r.values.get("method").map_or("GET", String::as_str);
+                let at = HTTP_METHODS
+                    .iter()
+                    .position(|m| m.eq_ignore_ascii_case(method))
+                    .unwrap_or(0);
+                item(
+                    vec![
+                        Span::styled(format!("{:>12}: ", "Method"), dim_style()),
+                        Span::styled(HTTP_METHODS[at], accent_style()),
+                        Span::styled(if on { "  ←/→ change" } else { "" }, dim_style()),
+                    ],
+                    on,
+                )
+            }
+            HttpRow::Url => text("URL", "https://api.example.com/v1/items/{{id}}", ""),
+            HttpRow::Query(i) | HttpRow::Header(i) => {
+                let key = if matches!(h, HttpRow::Query(_)) {
+                    "query"
+                } else {
+                    "headers"
+                };
+                let kv = r
+                    .kv(key)
+                    .get(i)
+                    .map(|kv| kv_text(key, kv))
+                    .unwrap_or_default();
+                item(vec![Span::raw(kv)], on)
+            }
+            HttpRow::AddQuery => button("+ Query param", on),
+            HttpRow::AddHeader => button("+ Header", on),
+            HttpRow::Body => {
+                let mode = BodyMode::of(&r.values);
+                let labels: Vec<&str> = BodyMode::ALL.iter().map(|m| m.label()).collect();
+                let at = BodyMode::ALL.iter().position(|m| *m == mode).unwrap_or(0);
+                choice("Body", &labels, at, "←/→ change", on)
+            }
+            HttpRow::BodyText => {
+                let json = BodyMode::of(&r.values) == BodyMode::Json;
+                let mut line = text(
+                    if json { "JSON" } else { "Text" },
+                    if json {
+                        r#"{"name": "{{name}}"}"#
+                    } else {
+                        "text body"
+                    },
+                    "Alt+Enter: new line",
+                );
+                if let Some(e) = json_body_error(&r.values) {
+                    line = ListItem::new(Line::from(vec![
+                        Span::styled(if on { "▸ " } else { "  " }, accent_style()),
+                        Span::styled(format!("{:>12}: ", "JSON"), dim_style()),
+                        Span::raw(one_line(&r.values["json"])),
+                        Span::styled(format!("  not JSON yet: {e}"), warn_style()),
+                    ]));
+                }
+                line
+            }
+            HttpRow::Check => checkbox(
+                r.values.get("check").is_some_and(|c| c == "true"),
+                "Fail on a non-2xx status (stops a collection run)",
+                on,
+            ),
+        },
+        RRow::Llm(l) => match l {
+            LlmRow::Provider => {
+                let names: Vec<&str> = PROVIDERS.iter().map(|p| p.name).collect();
+                choice("Provider", &names, r.provider(), provider.hint, on)
+            }
+            LlmRow::BaseUrl => text("Base URL", "https://my-server/v1", ""),
+            LlmRow::KeyFrom => {
+                let mode = r.key_mode();
+                let labels: Vec<&str> = KeyMode::ALL.iter().map(|m| m.label()).collect();
+                let at = KeyMode::ALL.iter().position(|m| *m == mode).unwrap_or(0);
+                choice("Key", &labels, at, "", on)
+            }
+            LlmRow::Key => match r.key_mode() {
+                KeyMode::Env => text(
+                    "Env var",
+                    provider.key_env.unwrap_or("LLM_API_KEY"),
+                    "read from herdr-mcp's environment when the request runs",
+                ),
+                _ => text(
+                    "Key",
+                    "",
+                    "keep it in a variable (e.g. {{llm_api_key}}): a pasted key is saved in the collection",
+                ),
+            },
+            LlmRow::Model => text(
+                "Model",
+                if provider.name == "OpenRouter" {
+                    "openai/gpt-4o-mini"
+                } else {
+                    "model id"
+                },
+                "",
+            ),
+            LlmRow::Models => button(&format!("Load models from {}", provider.name), on),
+            LlmRow::System => text("System", "(optional)", "Alt+Enter: new line"),
+            LlmRow::Prompt => text(
+                "Prompt",
+                "Summarise this: {{read.output}}",
+                "Alt+Enter: new line; later requests read the reply as {{this-request.text}}",
+            ),
+            LlmRow::Temperature => text("Temperature", "model default", ""),
+            LlmRow::MaxTokens => text("Max tokens", "model default", ""),
+        },
+        _ => item(Vec::new(), on),
+    }
+}
+
 fn render_collection(frame: &mut Frame, area: Rect, app: &mut App) {
     let requests = request_count(app);
     let Some(c) = app.playground.collection.as_ref() else {
@@ -385,6 +564,33 @@ fn render_request(frame: &mut Frame, area: Rect, app: &mut App) {
                 lines.push((None, ListItem::new("")));
                 lines.push((None, heading("Params".into())));
             }
+            RRow::Http(HttpRow::Method)
+            | RRow::Http(HttpRow::Query(0))
+            | RRow::Http(HttpRow::Header(0))
+            | RRow::Http(HttpRow::Body)
+            | RRow::Llm(LlmRow::Provider)
+            | RRow::Llm(LlmRow::Model)
+            | RRow::Llm(LlmRow::System) => {
+                let title = match row {
+                    RRow::Http(HttpRow::Method) => "Endpoint",
+                    RRow::Http(HttpRow::Query(_)) => "Query",
+                    RRow::Http(HttpRow::Header(_)) => "Headers",
+                    RRow::Http(HttpRow::Body) => "Body",
+                    RRow::Llm(LlmRow::Provider) => "Provider and key",
+                    RRow::Llm(LlmRow::Model) => "Model",
+                    _ => "Prompt",
+                };
+                lines.push((None, ListItem::new("")));
+                lines.push((None, heading(title.into())));
+            }
+            RRow::Http(HttpRow::AddQuery) if r.kv("query").is_empty() => {
+                lines.push((None, ListItem::new("")));
+                lines.push((None, heading("Query".into())));
+            }
+            RRow::Http(HttpRow::AddHeader) if r.kv("headers").is_empty() => {
+                lines.push((None, ListItem::new("")));
+                lines.push((None, heading("Headers".into())));
+            }
             RRow::Extract(0) => {
                 lines.push((None, ListItem::new("")));
                 lines.push((None, heading("Extract → variables".into())));
@@ -500,6 +706,7 @@ fn render_request(frame: &mut Frame, area: Rect, app: &mut App) {
                     on,
                 )
             }
+            RRow::Plain | RRow::Http(_) | RRow::Llm(_) => builder_line(r, row, &resolved, on),
             RRow::AddExtract => button("+ Extract", on),
             RRow::Send => button(if busy { "Sending…" } else { "Send" }, on),
             RRow::Save => button("Save", on),
@@ -679,6 +886,24 @@ fn render_overlay(frame: &mut Frame, area: Rect, app: &App) {
                 .collect();
             picker(frame, area, " herdr method ", search, items, *index);
         }
+        Overlay::Models { search, index } => {
+            let models = pg
+                .request
+                .as_ref()
+                .map(|r| r.models.as_slice())
+                .unwrap_or_default();
+            let items = model_choices(models, search)
+                .into_iter()
+                .enumerate()
+                .map(|(i, (id, ctx))| {
+                    item(
+                        vec![Span::raw(id), Span::styled(format!("  {ctx}"), dim_style())],
+                        i == *index,
+                    )
+                })
+                .collect();
+            picker(frame, area, " Model ", search, items, *index);
+        }
         Overlay::Templates { index } => {
             let templates = app.templates.as_deref().unwrap_or_default();
             let items = templates
@@ -780,14 +1005,26 @@ fn render_editor(frame: &mut Frame, area: Rect, app: &App) {
             "letters, digits, _ and -; other requests read its result as {{ name.path }}".into(),
         ),
         Target::Description => ("Description".to_string(), String::new()),
-        Target::Param(name) => (format!("Param {name}"), "{{ var }} placeholders resolve on the server".into()),
+        Target::Param(name) => (
+            format!("Param {name}"),
+            "{{ var }} placeholders resolve on the server; Alt+Enter new line".into(),
+        ),
+        Target::Kv(key, _) if *key == "headers" => (
+            "Header".to_string(),
+            "Name: value ({{ var }} resolves); empty removes it".into(),
+        ),
+        Target::Kv(..) => (
+            "Query param".to_string(),
+            "name=value ({{ var }} resolves); empty removes it".into(),
+        ),
         Target::Extract(_) => (
             "Extract rule".to_string(),
             "path -> var: the path is followed into the result (e.g. panes[0].pane_id); empty saves its text".into(),
         ),
         Target::TemplateVar(_) => ("Template variable".to_string(), String::new()),
     };
-    let inner = modal(frame, area, 70, 6, &format!(" {title} "));
+    let height = editing.area.lines().len() as u16 + 5;
+    let inner = modal(frame, area, 70, height.max(6), &format!(" {title} "));
     frame.render_widget(
         Paragraph::new(Line::styled(format!("Enter/Esc done  {hint}"), dim_style()))
             .wrap(Wrap { trim: true }),

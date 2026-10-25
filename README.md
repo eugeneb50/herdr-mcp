@@ -1,7 +1,7 @@
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)](https://rustup.rs/)
 [![herdr-mcp](https://img.shields.io/badge/herdr--mcp-v0.2.0-22c55e)](https://github.com/herdr-mcp)
-[![Tests](https://img.shields.io/badge/tests-261%20passing-22c55e)](https://github.com/herdr-mcp)
+[![Tests](https://img.shields.io/badge/tests-264%20passing-22c55e)](https://github.com/herdr-mcp)
 [![Crates](https://img.shields.io/badge/workspace-6%20crates-22c55e)](https://github.com/herdr-mcp)
 
 # herdr-mcp
@@ -552,8 +552,9 @@ Agents: [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md) shows how to combine them.
 | `llm_call` | An OpenAI-compatible chat call: OpenRouter by default, or OpenAI, Ollama, LM Studio, any `base_url`; key from `api_key` or an env var |
 | `llm_models` | The models such an API offers |
 
-In the web playground, **+ HTTP** opens an endpoint builder and **+ LLM** a
-provider → model → prompt wizard; both edit the same request a plain form does.
+In the playground (web and TUI), **+ HTTP** opens an endpoint builder and
+**+ LLM** a provider → model → prompt wizard (with a model picker filled from
+the provider); both edit the same request a plain form does.
 
 ### Recipes (6)
 | Tool | Description |

@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use herdr_mcp_api::HerdrEvent;
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
@@ -69,27 +69,32 @@ impl EventsState {
         let Some(rx) = self.rx.as_mut() else {
             return false;
         };
-        let mut any = false;
+        let mut new = Vec::new();
         while let Ok(ev) = rx.try_recv() {
-            self.events.insert(0, ev);
-            any = true;
+            new.push(ev);
         }
-        if any {
-            self.events.truncate(KEEP);
-            // Keep the picked event picked as new ones arrive above it.
-            if self.index > 0 {
-                self.index = (self.index + 1).min(self.events.len().saturating_sub(1));
-            }
+        if new.is_empty() {
+            return false;
         }
-        any
+        // Keep the picked event picked as new ones arrive above it (the
+        // top stays the top: it follows the newest).
+        let shown = new.iter().filter(|e| self.passes(e)).count();
+        new.reverse();
+        self.events.splice(0..0, new);
+        self.events.truncate(KEEP);
+        if self.index > 0 {
+            self.index = (self.index + shown).min(self.shown().len().saturating_sub(1));
+        }
+        true
+    }
+
+    fn passes(&self, e: &HerdrEvent) -> bool {
+        self.filter.is_empty() || e.event.contains(&self.filter)
     }
 
     /// The events the filter lets through.
     pub fn shown(&self) -> Vec<&HerdrEvent> {
-        self.events
-            .iter()
-            .filter(|e| self.filter.is_empty() || e.event.contains(&self.filter))
-            .collect()
+        self.events.iter().filter(|e| self.passes(e)).collect()
     }
 }
 
@@ -135,15 +140,14 @@ pub fn handle_key(ev: &mut EventsState, code: KeyCode, mods: KeyModifiers) -> bo
 /// Click picks an event; the wheel moves the pick.
 pub fn handle_mouse(ev: &mut EventsState, m: MouseEvent) -> bool {
     let area = ev.list_inner;
-    let over =
-        m.column >= area.x && m.column < area.right() && m.row >= area.y && m.row < area.bottom();
-    if !over {
+    if !crate::inside(area, &m) {
         return false;
     }
     match m.kind {
         MouseEventKind::ScrollDown => handle_key(ev, KeyCode::Down, KeyModifiers::NONE),
         MouseEventKind::ScrollUp => handle_key(ev, KeyCode::Up, KeyModifiers::NONE),
-        MouseEventKind::Down(_) => {
+        // Right-click is the copy menu's.
+        MouseEventKind::Down(MouseButton::Left) => {
             let i = ev.list.offset() + (m.row - area.y) as usize;
             if i < ev.shown().len() {
                 ev.index = i;
@@ -186,11 +190,19 @@ mod tests {
         assert_eq!(ev.events[0].event, "tab.created");
         ev.index = 1;
         tx.send(mk("pane.closed")).unwrap();
+        tx.send(mk("tab.closed")).unwrap();
         ev.drain();
         assert_eq!(ev.events[ev.index].event, "pane.created");
+        assert_eq!(ev.events[0].event, "tab.closed");
         handle_key(&mut ev, KeyCode::Char('p'), KeyModifiers::NONE);
         handle_key(&mut ev, KeyCode::Char('a'), KeyModifiers::NONE);
         assert_eq!(ev.shown().len(), 2);
         assert!(!ev.drain());
+        // Filtered: only events that pass move the pick.
+        ev.index = 1;
+        tx.send(mk("tab.created")).unwrap();
+        tx.send(mk("pane.focused")).unwrap();
+        ev.drain();
+        assert_eq!(ev.shown()[ev.index].event, "pane.created");
     }
 }

@@ -72,8 +72,10 @@ fn main() -> Result<()> {
         http_only: args.http_only.then_some(true),
         herdr_socket: args.herdr_socket,
     }))?;
+    // Also over an http-only config file or env, which clap can't see.
     if args.mcp_only {
         config.http.port = None;
+        config.http.http_only = false;
     }
     // SAFETY: single-threaded here; the runtime starts below.
     unsafe { config.export_herdr_socket() };

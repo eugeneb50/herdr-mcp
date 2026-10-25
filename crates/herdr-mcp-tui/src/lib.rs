@@ -580,6 +580,8 @@ impl App {
                 self.variables_state.entries = parse_variables(&v);
             }
             if let Ok(v) = http.list_recipes().await {
+                let before = self.recipes.take().unwrap_or_default();
+                self.playground.follow_tree(&before, &v);
                 self.recipes = Some(v);
             }
             if let Ok(v) = http.list_templates().await {
@@ -1472,7 +1474,7 @@ async fn handle_context_menu_key(app: &mut App, code: KeyCode, mods: KeyModifier
 }
 
 /// Whether mouse event `m` is inside `area`.
-fn inside(area: Rect, m: &MouseEvent) -> bool {
+pub(crate) fn inside(area: Rect, m: &MouseEvent) -> bool {
     m.column >= area.x && m.column < area.right() && m.row >= area.y && m.row < area.bottom()
 }
 

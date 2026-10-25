@@ -241,9 +241,12 @@ default to the `timeouts.http-request-ms` / `timeouts.llm-call-ms` settings.
 | `llm_call` | `model`, `prompt?`, `system?`, `messages`, `base_url?`, `api_key?`, `api_key_env?`, `temperature?`, `max_tokens?`, `extra?`, `timeout_ms?` | `POST {base_url}/chat/completions` (default OpenRouter); returns `{text, model, finish_reason, usage}`. Key: `api_key`, else env `api_key_env`, else `OPENROUTER_API_KEY` / `OPENAI_API_KEY` by host, else none |
 | `llm_models` | `base_url?`, `api_key?`, `api_key_env?`, `filter?` | `GET {base_url}/models` as `{base_url, models: [{id, name, context_length}]}` |
 
-The web playground's request editor shows `HttpBuilder` / `LlmWizard`
-(`playground/builders.rs`) for these two tools instead of the schema form;
-both edit the same raw values, and "Plain fields" switches back.
+The playground's request editor shows an endpoint builder and an LLM wizard
+for these two tools instead of the schema form: on the web `HttpBuilder` /
+`LlmWizard` (`playground/builders.rs`), in the TUI the `HttpRow` / `LlmRow`
+form rows. Both edit the same raw values, and "Plain fields" switches back.
+What they share (body and key modes, provider presets, key/value rows,
+`load_models`) is in `herdr-mcp-api::playground`.
 
 ### 4.10 Recipe & Run Tools (6)
 
@@ -457,7 +460,7 @@ type text or edit a field:
 |---|---|
 | Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "press Enter after" (`Ctrl+t`); addressed by pane id |
 | Overview | Stats, pane table (tab/label/agent/status/cwd) for the shown session (`s` cycles sessions), and the picked pane's text below it: re-read every `intervals.tui-pane-ms` (screen, or scrollback with `r`), scrollable, mouse drag selects (reading pauses while a selection is up), Ctrl+C or right-click Copy copies the selection or the whole text, Esc clears; Tab moves focus between table and text |
-| Playground | Collections, as on the web: a tree of collections (saved recipes) and their requests; edit a request's tool or herdr method, params (resolved preview) and extract rules, Send it (Ctrl+G) or run the collection, pick a result path to extract it; collection variables and triggers; new from a template. Ctrl+E shows herdr's live event stream |
+| Playground | Collections, as on the web: a tree of collections (saved recipes) and their requests; edit a request's tool or herdr method, params (resolved preview) and extract rules, Send it (Ctrl+G) or run the collection, pick a result path to extract it; collection variables and triggers; new from a template. HTTP and LLM requests get the endpoint builder and LLM wizard (Alt+Enter for a new line in a body or prompt). Ctrl+E shows herdr's live event stream |
 | Variables | Workspace-scoped variable editor |
 | Settings | Options (every `/api/settings` knob: Enter edit, Del default, Shift+Del all defaults), runtime info, clipboard config |
 

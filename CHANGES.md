@@ -8,12 +8,21 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   recipe builder are gone. Its Playground tab now shows the web's
   collections: the tree, the collection and request editors, Send and Run,
   extract rules picked from result paths, collection variables, triggers and
-  templates. Ctrl+E shows herdr's live events. The model both UIs use moved
-  to `herdr-mcp-api::playground`. `/api/playground` and `PlaygroundSnapshot`
-  (the TUI's last-used values) are removed.
+  templates. HTTP and LLM requests get the web's endpoint builder and LLM
+  wizard (provider, key, a model picker from the provider, prompt); Alt+Enter
+  starts a new line in a field. Ctrl+E shows herdr's live events. The model
+  both UIs use moved to `herdr-mcp-api::playground`. `/api/playground` and
+  `PlaygroundSnapshot` (the TUI's last-used values) are removed.
+- **Playground fixes.** Saving a request whose params the schema doesn't
+  list (or with herdr's schema not loaded) no longer turns numbers, bools
+  and objects into strings. The TUI's tree selection stays on its item as
+  collections change elsewhere. The events list keeps its pick when several
+  events arrive at once or the filter hides new ones, and right-click there
+  opens the copy menu again.
 - **`--mcp-only`.** MCP over stdio with no HTTP bridge, for an MCP client
   running beside a TUI that already serves the port. Before, whichever
-  process started first took 7676.
+  process started first took 7676. It wins over `http-only` in the config
+  file or env.
 - **Security hardening: `[security]` (breaking).** A new config section,
   read at startup only:
   - `disabled-tools` hides tools and refuses calls to them from every

@@ -247,8 +247,10 @@ pub fn event_names(schema: &Value) -> Vec<String> {
 // ── forms ──────────────────────────────────────────────────────────────
 
 /// Tool arguments from raw form values, each converted per its schema type
-/// (`{{ }}` placeholders stay strings for the server to resolve). Blank
-/// fields are left out, so optional params fall back to their defaults.
+/// (`{{ }}` placeholders stay strings for the server to resolve). A value
+/// the schema doesn't know (or with no schema loaded) reads as JSON, as
+/// [`raw_values`] wrote it. Blank fields are left out, so optional params
+/// fall back to their defaults.
 pub fn build_params(
     properties: &HashMap<String, Value>,
     values: &HashMap<String, String>,
@@ -258,8 +260,11 @@ pub fn build_params(
         if raw.trim().is_empty() {
             continue;
         }
-        let stype = properties.get(k).map(schema_type).unwrap_or("string");
-        map.insert(k.clone(), convert_param(stype, raw));
+        let value = match properties.get(k) {
+            Some(p) => convert_param(schema_type(p), raw),
+            None => parse_value(raw),
+        };
+        map.insert(k.clone(), value);
     }
     Value::Object(map)
 }
@@ -551,6 +556,328 @@ pub async fn delete_step(client: &ApiClient, id: Uuid, step_id: &str) -> Result<
     set_steps(client, id, recipe.steps).await
 }
 
+// ── builders ───────────────────────────────────────────────────────────
+// The `http_request` endpoint builder and the `llm_call` wizard edit the
+// same raw values the plain form does, so a request can switch between
+// them.
+
+/// Methods the endpoint builder offers.
+pub const HTTP_METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
+
+/// `values` with `key` set to `raw` ("" removes it).
+pub fn with_value(
+    values: &HashMap<String, String>,
+    key: &str,
+    raw: String,
+) -> HashMap<String, String> {
+    let mut next = values.clone();
+    if raw.is_empty() {
+        next.remove(key);
+    } else {
+        next.insert(key.to_string(), raw);
+    }
+    next
+}
+
+/// A JSON-object param (`query`, `headers`) as name/value rows
+/// (non-string values as JSON).
+pub fn kv_rows(raw: &str) -> Vec<(String, String)> {
+    serde_json::from_str::<serde_json::Map<String, Value>>(raw)
+        .map(|m| {
+            m.into_iter()
+                .map(|(k, v)| {
+                    let v = match v {
+                        Value::String(s) => s,
+                        other => other.to_string(),
+                    };
+                    (k, v)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Rows back to a JSON object string; rows without a name are dropped,
+/// and no rows at all is "" (the param is left out).
+pub fn kv_json(rows: &[(String, String)]) -> String {
+    let map: serde_json::Map<String, Value> = rows
+        .iter()
+        .filter(|(k, _)| !k.trim().is_empty())
+        .map(|(k, v)| (k.trim().to_string(), Value::String(v.clone())))
+        .collect();
+    if map.is_empty() {
+        String::new()
+    } else {
+        Value::Object(map).to_string()
+    }
+}
+
+/// How an `http_request` sends its body.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BodyMode {
+    None,
+    Json,
+    Text,
+}
+
+impl BodyMode {
+    pub const ALL: [BodyMode; 3] = [Self::None, Self::Json, Self::Text];
+
+    /// The mode `values` are in.
+    pub fn of(values: &HashMap<String, String>) -> Self {
+        if values.contains_key("json") {
+            Self::Json
+        } else if values.contains_key("body") {
+            Self::Text
+        } else {
+            Self::None
+        }
+    }
+
+    /// The param holding the body.
+    pub fn key(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Json => Some("json"),
+            Self::Text => Some("body"),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Json => "JSON",
+            Self::Text => "Text",
+        }
+    }
+
+    /// `values` switched to this mode, keeping the body text.
+    pub fn apply(self, values: &HashMap<String, String>) -> HashMap<String, String> {
+        let current = values
+            .get("json")
+            .or_else(|| values.get("body"))
+            .cloned()
+            .unwrap_or_default();
+        let mut out = values.clone();
+        out.remove("json");
+        out.remove("body");
+        match self {
+            Self::Json => {
+                let body = if current.is_empty() {
+                    "{}".into()
+                } else {
+                    current
+                };
+                out.insert("json".into(), body);
+            }
+            Self::Text => {
+                out.insert("body".into(), current);
+            }
+            Self::None => {}
+        }
+        out
+    }
+}
+
+/// Why a JSON body won't parse yet (`None` when it does, is blank, or has
+/// placeholders the server fills in first).
+pub fn json_body_error(values: &HashMap<String, String>) -> Option<String> {
+    let body = values.get("json")?;
+    if body.trim().is_empty() || body.contains("{{") {
+        return None;
+    }
+    serde_json::from_str::<Value>(body)
+        .err()
+        .map(|e| e.to_string())
+}
+
+/// An OpenAI-compatible provider preset.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Provider {
+    pub name: &'static str,
+    pub base_url: &'static str,
+    pub key_env: Option<&'static str>,
+    pub hint: &'static str,
+}
+
+pub static PROVIDERS: [Provider; 5] = [
+    Provider {
+        name: "OpenRouter",
+        base_url: "https://openrouter.ai/api/v1",
+        key_env: Some("OPENROUTER_API_KEY"),
+        hint: "Hundreds of models behind one key; ids look like openai/gpt-4o-mini.",
+    },
+    Provider {
+        name: "OpenAI",
+        base_url: "https://api.openai.com/v1",
+        key_env: Some("OPENAI_API_KEY"),
+        hint: "OpenAI's own API; ids look like gpt-4o-mini.",
+    },
+    Provider {
+        name: "Ollama",
+        base_url: "http://localhost:11434/v1",
+        key_env: None,
+        hint: "Local models; no key.",
+    },
+    Provider {
+        name: "LM Studio",
+        base_url: "http://localhost:1234/v1",
+        key_env: None,
+        hint: "Local models; no key.",
+    },
+    Provider {
+        name: "Custom",
+        base_url: "",
+        key_env: None,
+        hint: "Any OpenAI-compatible server: give its base URL (…/v1).",
+    },
+];
+
+/// The index of the Custom preset in [`PROVIDERS`].
+pub const CUSTOM_PROVIDER: usize = 4;
+
+/// The preset `base_url` belongs to (OpenRouter when unset, as the tool
+/// defaults to it), else Custom.
+pub fn provider_of(base_url: &str) -> usize {
+    let base = base_url.trim().trim_end_matches('/');
+    let base = if base.is_empty() {
+        PROVIDERS[0].base_url
+    } else {
+        base
+    };
+    PROVIDERS
+        .iter()
+        .position(|p| !p.base_url.is_empty() && p.base_url == base)
+        .unwrap_or(CUSTOM_PROVIDER)
+}
+
+/// `values` switched to provider `i` (its base URL; the key starts over).
+pub fn pick_provider(values: &HashMap<String, String>, i: usize) -> HashMap<String, String> {
+    let mut next = with_value(values, "base_url", PROVIDERS[i].base_url.to_string());
+    next.remove("api_key_env");
+    next.remove("api_key");
+    next
+}
+
+/// Where an `llm_call` gets its key.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum KeyMode {
+    /// From herdr-mcp's environment.
+    Env,
+    /// From a `{{variable}}` (or pasted).
+    Key,
+    None,
+}
+
+impl KeyMode {
+    pub const ALL: [KeyMode; 3] = [Self::Env, Self::Key, Self::None];
+
+    /// The mode `values` are in for `provider`.
+    pub fn of(values: &HashMap<String, String>, provider: &Provider) -> Self {
+        let set = |k: &str| values.get(k).is_some_and(|v| !v.is_empty());
+        if set("api_key") {
+            Self::Key
+        } else if set("api_key_env") || provider.key_env.is_some() {
+            Self::Env
+        } else {
+            Self::None
+        }
+    }
+
+    /// The param holding the key.
+    pub fn key(self) -> Option<&'static str> {
+        match self {
+            Self::Env => Some("api_key_env"),
+            Self::Key => Some("api_key"),
+            Self::None => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Env => "From an environment variable",
+            Self::Key => "From a variable (or pasted)",
+            Self::None => "No key",
+        }
+    }
+
+    /// `values` switched to this mode for `provider`.
+    pub fn apply(
+        self,
+        values: &HashMap<String, String>,
+        provider: &Provider,
+    ) -> HashMap<String, String> {
+        let mut next = values.clone();
+        next.remove("api_key");
+        next.remove("api_key_env");
+        match self {
+            Self::Key => {
+                next.insert("api_key".into(), "{{llm_api_key}}".into());
+            }
+            Self::Env if provider.key_env.is_none() => {
+                next.insert("api_key_env".into(), "LLM_API_KEY".into());
+            }
+            _ => {}
+        }
+        next
+    }
+}
+
+/// The models `values`' provider serves (`llm_models`); a `{{variable}}`
+/// key resolves like it would in a run.
+pub async fn load_models(
+    client: &ApiClient,
+    values: &HashMap<String, String>,
+) -> Result<Vec<Value>, String> {
+    let mut args = serde_json::Map::new();
+    for k in ["base_url", "api_key", "api_key_env"] {
+        if let Some(v) = values.get(k).filter(|s| !s.is_empty()) {
+            args.insert(k.into(), Value::String(v.clone()));
+        }
+    }
+    let args = match client
+        .resolve(&crate::ResolveRequest {
+            value: Value::Object(args.clone()),
+            ..Default::default()
+        })
+        .await
+    {
+        Ok(r) => r.value,
+        Err(_) => Value::Object(args),
+    };
+    let r = client
+        .call_tool("llm_models", &args)
+        .await
+        .map_err(|e| e.to_string())?;
+    if crate::tool_is_error(&r) {
+        let text = r
+            .pointer("/content/0/text")
+            .and_then(Value::as_str)
+            .unwrap_or("failed");
+        return Err(text.to_string());
+    }
+    Ok(crate::tool_payload(&r)
+        .and_then(|p| p["models"].as_array().cloned())
+        .unwrap_or_default())
+}
+
+/// Model ids matching `filter`, each with its context size ("128k ctx").
+pub fn model_choices(models: &[Value], filter: &str) -> Vec<(String, String)> {
+    let needle = filter.to_lowercase();
+    models
+        .iter()
+        .filter_map(|m| {
+            let id = m["id"].as_str()?.to_string();
+            let ctx = m["context_length"]
+                .as_u64()
+                .map(|n| format!("{}k ctx", n / 1000))
+                .unwrap_or_default();
+            id.to_lowercase().contains(&needle).then_some((id, ctx))
+        })
+        .take(200)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,6 +1015,10 @@ mod tests {
                 "lines": 5, "check": true, "keys": ["Enter"], "command": "echo {{x}}"
             })
         );
+        // No schema (herdr down, or a key it doesn't list): types survive
+        // the round trip through the form.
+        let saved = serde_json::json!({ "lines": 3, "strip": false, "pane_id": "w1:p2" });
+        assert_eq!(build_params(&HashMap::new(), &raw_values(&saved)), saved);
     }
 
     #[test]
@@ -737,5 +1068,59 @@ mod tests {
                 .unwrap()
                 .contains("default true")
         );
+    }
+
+    #[test]
+    fn kv_rows_round_trip_and_drop_blank_names() {
+        let rows = kv_rows(r#"{"a":"1","n":2}"#);
+        assert_eq!(rows, [("a".into(), "1".into()), ("n".into(), "2".into())]);
+        let mut rows = rows;
+        rows.push((" ".into(), "x".into()));
+        assert_eq!(kv_json(&rows), r#"{"a":"1","n":"2"}"#);
+        assert_eq!(kv_json(&[]), "");
+    }
+
+    #[test]
+    fn body_mode_switches_keep_the_text() {
+        let v: HashMap<String, String> = [("body".to_string(), "hi".to_string())].into();
+        assert_eq!(BodyMode::of(&v), BodyMode::Text);
+        let j = BodyMode::Json.apply(&v);
+        assert_eq!(j.get("json").map(String::as_str), Some("hi"));
+        assert!(!j.contains_key("body"));
+        assert!(json_body_error(&j).is_some());
+        assert!(BodyMode::None.apply(&j).is_empty());
+        assert_eq!(BodyMode::Json.apply(&HashMap::new())["json"], "{}");
+    }
+
+    #[test]
+    fn providers_and_key_modes() {
+        assert_eq!(PROVIDERS[provider_of("")].name, "OpenRouter");
+        assert_eq!(
+            PROVIDERS[provider_of("https://api.openai.com/v1/")].name,
+            "OpenAI"
+        );
+        assert_eq!(provider_of("http://box:8000/v1"), CUSTOM_PROVIDER);
+        let ollama = &PROVIDERS[2];
+        let v = pick_provider(&HashMap::new(), 2);
+        assert_eq!(KeyMode::of(&v, ollama), KeyMode::None);
+        let v = KeyMode::Env.apply(&v, ollama);
+        assert_eq!(v["api_key_env"], "LLM_API_KEY");
+        assert_eq!(KeyMode::of(&v, ollama), KeyMode::Env);
+        let v = KeyMode::Key.apply(&v, ollama);
+        assert_eq!(KeyMode::of(&v, ollama), KeyMode::Key);
+        assert!(!v.contains_key("api_key_env"));
+    }
+
+    #[test]
+    fn model_choices_filter_and_show_context() {
+        let models = vec![
+            serde_json::json!({"id": "openai/gpt-4o-mini", "context_length": 128000}),
+            serde_json::json!({"id": "meta/llama"}),
+        ];
+        assert_eq!(
+            model_choices(&models, "GPT"),
+            [("openai/gpt-4o-mini".to_string(), "128k ctx".to_string())]
+        );
+        assert_eq!(model_choices(&models, "").len(), 2);
     }
 }
