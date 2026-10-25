@@ -139,3 +139,11 @@ says why). To steer opencode beyond prompts, `send_keys` takes keys like
   pane and `idle` when someone did.
 - A `pane_watch` without `timeout_ms` waits until matched or the run is
   cancelled. Called directly (not in a recipe), give it a timeout.
+- Agents that show their thinking (opencode does) may print the marker
+  while reasoning about it, before the reply. Watch for the marker on a
+  line of its own: `match_text: "^\\s*READY\\s*$"`, `use_regex: true`.
+- The user's `[security]` config may disable tools (they're missing from
+  `tools/list`; calling one fails "disabled by [security]"), limit the
+  hosts `http_request` reaches, and by default keeps agents from adding
+  recipe triggers or schedules (`agent-triggers`). A refusal says which
+  setting; ask the user rather than working around it.

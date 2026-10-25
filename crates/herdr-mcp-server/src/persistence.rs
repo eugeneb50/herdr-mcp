@@ -59,11 +59,18 @@ impl Persistence {
         &self.data_dir
     }
 
+    /// Make the data dir and its folders, readable by its owner only: it
+    /// holds recipes, variables and run results, which may carry keys.
     pub async fn init(&self) -> anyhow::Result<()> {
         fs::create_dir_all(self.data_dir.join("recipes")).await?;
         fs::create_dir_all(self.data_dir.join("variables")).await?;
         fs::create_dir_all(self.data_dir.join("schedules")).await?;
         fs::create_dir_all(self.data_dir.join("sessions")).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&self.data_dir, std::fs::Permissions::from_mode(0o700)).await?;
+        }
         Ok(())
     }
 

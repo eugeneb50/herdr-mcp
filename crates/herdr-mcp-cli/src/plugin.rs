@@ -198,7 +198,7 @@ pub async fn run(cmd: PluginCommand, config: &herdr_mcp_core::Config) -> Result<
         PluginCommand::Open { pane } => open_pane(&pane),
         PluginCommand::Recipes => {
             let result = match port() {
-                Ok(port) => recipes(port).await,
+                Ok(port) => recipes(port, &config.data_dir).await,
                 Err(e) => Err(e),
             };
             if let Err(e) = &result {
@@ -207,7 +207,7 @@ pub async fn run(cmd: PluginCommand, config: &herdr_mcp_core::Config) -> Result<
             pause("\nPress Enter to close.");
             Ok(())
         }
-        PluginCommand::Web => web(port()?).await,
+        PluginCommand::Web => web(port()?, &config.data_dir).await,
     }
 }
 
@@ -223,7 +223,7 @@ async fn startup(port: u16, data_dir: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(data_dir)?;
     let lock = std::fs::File::create(data_dir.join("bridge-open.lock"))?;
     lock.lock()?;
-    if bridge(port).await.is_some() {
+    if bridge(port, data_dir).await.is_some() {
         return Ok(());
     }
     let env = format!("{CONTEXT_ENV}={}", context());
@@ -232,7 +232,7 @@ async fn startup(port: u16, data_dir: &std::path::Path) -> Result<()> {
     let reply = String::from_utf8_lossy(&reply);
     if out.status.success() {
         for _ in 0..60 {
-            if bridge(port).await.is_some() {
+            if bridge(port, data_dir).await.is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -313,14 +313,14 @@ fn read_line(prompt: &str) -> String {
     line.trim().to_string()
 }
 
-async fn bridge(port: u16) -> Option<ApiClient> {
+async fn bridge(port: u16, data_dir: &std::path::Path) -> Option<ApiClient> {
     let timeout =
         herdr_mcp_api::Settings::default().duration(herdr_mcp_api::settings::TUI_REQUEST_MS);
-    herdr_mcp_tui::http::live_bridge(port, timeout).await
+    herdr_mcp_tui::http::live_bridge(port, timeout, data_dir).await
 }
 
-async fn web(port: u16) -> Result<()> {
-    if bridge(port).await.is_none() {
+async fn web(port: u16, data_dir: &std::path::Path) -> Result<()> {
+    if bridge(port, data_dir).await.is_none() {
         notify("The herdr-mcp bridge is not running: run \"herdr-mcp: start the bridge\" first.");
         return Ok(());
     }
@@ -330,7 +330,10 @@ async fn web(port: u16) -> Result<()> {
         "xdg-open"
     };
     std::process::Command::new(opener)
-        .arg(format!("http://localhost:{port}"))
+        .arg(herdr_mcp_server::security::web_url(
+            port,
+            herdr_mcp_tui::http::token(data_dir).as_deref(),
+        ))
         .status()
         .with_context(|| format!("running {opener}"))?;
     Ok(())
@@ -338,7 +341,7 @@ async fn web(port: u16) -> Result<()> {
 
 /// The `recipes` popup: pick a saved recipe, run it with the context as
 /// `herdr`, and follow the run to the end.
-async fn recipes(port: u16) -> Result<()> {
+async fn recipes(port: u16, data_dir: &std::path::Path) -> Result<()> {
     let mut ctx = context();
     // Name the focused pane like trigger events do, so one recipe serves
     // both a keybinding and a trigger (`{{herdr.pane_id}}`).
@@ -347,7 +350,7 @@ async fn recipes(port: u16) -> Result<()> {
     {
         map.entry("pane_id").or_insert(pane);
     }
-    let api = bridge(port).await.with_context(|| {
+    let api = bridge(port, data_dir).await.with_context(|| {
         format!("The herdr-mcp bridge is not running on port {port}: run \"herdr-mcp: start the bridge\".")
     })?;
 

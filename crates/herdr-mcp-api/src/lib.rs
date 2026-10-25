@@ -31,6 +31,11 @@ pub use run::{RunAction, RunEvent, RunEventKind, RunRecord, RunStatus, StartRunR
 pub use settings::{Chord, SettingInfo, Settings, SettingsResponse};
 /// Re-exported so clients name recipe/execution ids without their own uuid dep.
 pub use uuid::Uuid;
+
+/// The bridge token's file in the data dir (`[security]`: required on a
+/// non-loopback bind or with `require-token`). Send it as
+/// `Authorization: Bearer <token>`, or `?token=` where headers can't go.
+pub const TOKEN_FILE: &str = "bridge.token";
 pub use variables::{
     AutoVariablesResponse, PlaygroundSnapshot, ResolveRequest, ResolveResponse,
     SaveVariableRequest, ToolsResponse, VariableStore,

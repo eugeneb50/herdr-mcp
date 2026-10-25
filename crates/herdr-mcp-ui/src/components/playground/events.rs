@@ -15,7 +15,12 @@ pub fn HerdrEvents() -> Element {
     let mut source: Signal<Option<web_sys::EventSource>> = use_signal(|| None);
 
     use_hook(move || {
-        let Ok(es) = web_sys::EventSource::new("/api/herdr/events") else {
+        // EventSource can't send headers: the token goes in the query.
+        let url = match crate::client::token() {
+            Some(t) => format!("/api/herdr/events?token={t}"),
+            None => "/api/herdr/events".to_string(),
+        };
+        let Ok(es) = web_sys::EventSource::new(&url) else {
             return;
         };
         let on_message =

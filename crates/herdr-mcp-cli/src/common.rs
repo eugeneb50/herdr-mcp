@@ -69,10 +69,11 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
             .unwrap_or_else(|| "127.0.0.1".into());
         let web_dir = config.http.web_dir.clone();
         tracing::info!("HTTP playground listening on http://{bind}:{port}");
-        if !is_loopback(&bind) {
-            tracing::warn!(
-                "http.bind-addr {bind} is not loopback: the bridge has no auth, so anyone \
-                 who can reach this address can run commands in your herdr panes"
+        if let Some(token) = &server.security.token {
+            tracing::info!(
+                "the bridge needs its token ({}): open {}",
+                config.data_dir.join(herdr_mcp_api::TOKEN_FILE).display(),
+                herdr_mcp_server::security::web_url(port, Some(token))
             );
         }
         tokio::spawn(async move {
@@ -83,15 +84,6 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
     }
 
     Ok(server)
-}
-
-/// Whether the bridge's bind address only accepts local connections.
-fn is_loopback(bind: &str) -> bool {
-    bind.eq_ignore_ascii_case("localhost")
-        || bind
-            .trim_matches(['[', ']'])
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Lock file in the data dir. Its holder is the data dir's daemon: the one
@@ -206,22 +198,5 @@ mod tests {
         assert!(try_lock(&path).unwrap().is_none(), "second holder");
         drop(first);
         assert!(try_lock(&path).unwrap().is_some(), "takeover after exit");
-    }
-
-    #[test]
-    fn only_loopback_binds_count_as_local() {
-        for local in [
-            "127.0.0.1",
-            "127.0.0.2",
-            "::1",
-            "[::1]",
-            "localhost",
-            "LocalHost",
-        ] {
-            assert!(is_loopback(local), "{local}");
-        }
-        for exposed in ["0.0.0.0", "::", "192.168.1.5", "box.lan"] {
-            assert!(!is_loopback(exposed), "{exposed}");
-        }
     }
 }

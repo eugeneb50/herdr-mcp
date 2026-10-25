@@ -26,6 +26,58 @@ pub struct Config {
     /// failing startup.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub settings: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
+
+    /// `[security]`: what callers may do. Read from the file only, never
+    /// changed over the API.
+    #[serde(default)]
+    pub security: SecurityConfig,
+}
+
+/// `[security]`: limits on what MCP clients, recipe runs and the bridge may
+/// do. Every field defaults to today's behaviour except `agent-triggers`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
+pub struct SecurityConfig {
+    /// Tools no caller can list or call (MCP clients, the bridge, recipe
+    /// steps), e.g. `["run_command", "send_keys"]`.
+    pub disabled_tools: Vec<String>,
+    /// Hosts `http_request` and the LLM tools may reach: `api.example.com`
+    /// or `*.example.com`. Empty: any host.
+    pub allow_hosts: Vec<String>,
+    /// Also refuse loopback and private-network addresses (`localhost`,
+    /// `10.0.0.0/8`, …) unless the host is in `allow-hosts`. Link-local and
+    /// cloud-metadata addresses are always refused unless it is.
+    pub block_private: bool,
+    /// The largest response body `http_request` and the LLM tools read.
+    pub max_response_bytes: u64,
+    /// Environment variables the LLM tools' `api_key_env` may name.
+    pub key_env: Vec<String>,
+    /// Whether MCP clients and recipe runs may add triggers or schedules,
+    /// or change a recipe that has them. The bridge API (web UI, TUI)
+    /// always may.
+    pub agent_triggers: bool,
+    /// Require the bridge token on `/api/*` even on a loopback bind (it is
+    /// always required on any other).
+    pub require_token: bool,
+    /// Append every tool call (secrets redacted) to `<data-dir>/audit.jsonl`.
+    pub audit_log: bool,
+}
+
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            disabled_tools: Vec::new(),
+            allow_hosts: Vec::new(),
+            block_private: false,
+            max_response_bytes: 10 * 1024 * 1024,
+            key_env: ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY"]
+                .map(String::from)
+                .to_vec(),
+            agent_triggers: false,
+            require_token: false,
+            audit_log: false,
+        }
+    }
 }
 
 impl Config {
@@ -113,6 +165,7 @@ impl Default for Config {
             herdr: Default::default(),
             clipboard: Default::default(),
             settings: BTreeMap::new(),
+            security: Default::default(),
         }
     }
 }
@@ -187,6 +240,7 @@ impl Config {
             herdr: other.herdr,
             clipboard: other.clipboard,
             settings: other.settings,
+            security: other.security,
         }
     }
 
@@ -609,6 +663,22 @@ mod tests {
         reset_settings_in_file(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text, "# mine\ndata-dir = \"./d\"\n");
+    }
+
+    #[test]
+    fn security_section_parses_over_defaults() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [security]
+            disabled-tools = ["run_command"]
+            block-private = true
+            "#,
+        )
+        .unwrap();
+        assert_eq!(cfg.security.disabled_tools, ["run_command"]);
+        assert!(cfg.security.block_private);
+        assert_eq!(cfg.security.key_env, SecurityConfig::default().key_env);
+        assert!(toml::from_str::<Config>("[security]\nnope = 1\n").is_err());
     }
 
     #[test]
