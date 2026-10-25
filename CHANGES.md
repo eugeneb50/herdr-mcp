@@ -24,8 +24,8 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   when no rule matched.
 - **Collection gates: loops and end conditions.** A collection can end with
   a gate: rules checked in order after its last request, the first match
-  deciding whether the run ends, fails with a message, or restarts from the
-  first request (after an optional delay). Checks compare a result path or
+  deciding whether the run ends, fails (with an optional message), or
+  restarts from the first request (after an optional delay). Checks compare a result path or
   variable (`eq`, `ne`, `lt`, `gt`, `contains`, `exists`, `missing`);
   `{{ run.pass }}` counts passes and `max_steps` (default 1000) stops a
   runaway loop. Set it in the collection editor, with `recipe_save`'s `gate`

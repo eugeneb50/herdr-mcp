@@ -2,34 +2,13 @@
 //! last request) and how long its runs are kept.
 
 use dioxus::prelude::*;
-use herdr_mcp_api::gate::{DEFAULT_MAX_STEPS, rule_text};
+use herdr_mcp_api::gate::rule_text;
+use herdr_mcp_api::playground::{display_value, parse_value};
 use herdr_mcp_api::settings::{KEEP_DAYS, KEEP_RUNS, SNAPSHOT_LINES};
 use herdr_mcp_api::{Check, Gate, GateAction, GateRule, Op, RunTrail};
 use serde_json::Value;
 
 use crate::client::use_api;
-
-/// An empty gate (no rules: the run just completes).
-pub fn no_gate() -> Gate {
-    Gate {
-        rules: Vec::new(),
-        max_steps: DEFAULT_MAX_STEPS,
-    }
-}
-
-/// A check's value as typed: strings bare, the rest as JSON.
-fn value_text(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
-/// What a value field holds: JSON when it parses (`3`, `true`), else text.
-fn parse_value(text: &str) -> Value {
-    serde_json::from_str(text.trim()).unwrap_or_else(|_| Value::String(text.to_string()))
-}
 
 fn action_kind(a: &GateAction) -> &'static str {
     match a {
@@ -179,8 +158,8 @@ fn GateRuleRow(gate: Signal<Gate>, index: usize, rule: GateRule, last: bool) -> 
                             class: "input mono",
                             r#type: "text",
                             placeholder: "value",
-                            value: "{value_text(&check.value)}",
-                            oninput: move |e| gate.write().rules[i].checks[j].value = parse_value(&e.value()),
+                            value: "{display_value(&check.value)}",
+                            oninput: move |e| gate.write().rules[i].checks[j].value = parse_value(e.value().trim()),
                         }
                     }
                     button {
@@ -210,7 +189,7 @@ fn GateRuleRow(gate: Signal<Gate>, index: usize, rule: GateRule, last: bool) -> 
                     onchange: move |e| {
                         gate.write().rules[i].then = match e.value().as_str() {
                             "restart" => GateAction::Restart { delay_ms: 1000 },
-                            "fail" => GateAction::Fail { message: "gate failed".into() },
+                            "fail" => GateAction::Fail { message: String::new() },
                             _ => GateAction::End,
                         };
                     },
@@ -237,7 +216,7 @@ fn GateRuleRow(gate: Signal<Gate>, index: usize, rule: GateRule, last: bool) -> 
                         input {
                             class: "input",
                             r#type: "text",
-                            placeholder: "message",
+                            placeholder: "message (optional)",
                             value: "{param}",
                             oninput: move |e| gate.write().rules[i].then = GateAction::Fail { message: e.value() },
                         }

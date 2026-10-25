@@ -31,9 +31,10 @@ use herdr_mcp_api::playground::{
     tool_list, var_name, when_text, with_value,
 };
 use herdr_mcp_api::{
-    ApiClient, CreateRecipeRequest, Extract, Gate, GateRule, InstantiateTemplateRequest, Recipe,
-    RecipeStep, RecipeTemplate, RecipeTrigger, ResolveRequest, RunRecord, RunStatus, RunTrail,
-    StartRunRequest, UpdateRecipeRequest, Uuid, VarScope,
+    ApiClient, Check, CreateRecipeRequest, Extract, Gate, GateAction, GateRule,
+    InstantiateTemplateRequest, Op, Recipe, RecipeStep, RecipeTemplate, RecipeTrigger,
+    ResolveRequest, RunRecord, RunStatus, RunTrail, StartRunRequest, UpdateRecipeRequest, Uuid,
+    VarScope,
 };
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
@@ -1341,17 +1342,24 @@ async fn handle_collection(app: &mut App, code: KeyCode, mods: KeyModifiers) -> 
                 return true;
             };
             // An example to edit; Esc takes it out again.
-            let example = "run.pass lt 3 → restart 1000ms";
-            if let Ok(rule) = parse_rule(example) {
-                c.gate.push(rule);
-            }
+            let rule = GateRule {
+                checks: vec![Check {
+                    path: "run.pass".into(),
+                    op: Op::Lt,
+                    value: 3.into(),
+                }],
+                any: false,
+                then: GateAction::Restart { delay_ms: 1000 },
+            };
+            let example = rule_text(&rule);
+            c.gate.push(rule);
             let i = c.gate.len() - 1;
             c.row = c
                 .rows(requests)
                 .iter()
                 .position(|r| *r == CRow::Gate(i))
                 .unwrap_or(0);
-            app.playground.begin_add(Target::Gate(i), example.into());
+            app.playground.begin_add(Target::Gate(i), example);
         }
         CRow::AddVar | CRow::AddTrigger => {
             if row == CRow::AddTrigger {
@@ -2418,7 +2426,7 @@ pub(crate) async fn finish_job(app: &mut App, job: Job) {
             return;
         }
     };
-    let status = format!("{:?}", run.status).to_lowercase();
+    let status = run.status.as_str().to_string();
     match run.status {
         RunStatus::Completed => pg.ok(status),
         _ => pg.err(run.error.clone().unwrap_or(status)),
@@ -2539,8 +2547,7 @@ fn send_text(run: &RunRecord, step_id: &str, rules: &[Extract], width: usize) ->
 
 /// A collection run: status, then each step's result in step order.
 fn run_text(run: &RunRecord, order: &[String], width: usize) -> Vec<String> {
-    let status = format!("{:?}", run.status).to_lowercase();
-    let mut out = vec![format!("Run · {status}")];
+    let mut out = vec![format!("Run · {}", run.status.as_str())];
     // A failed step shows its own error below.
     let step_failed = run
         .failed_step

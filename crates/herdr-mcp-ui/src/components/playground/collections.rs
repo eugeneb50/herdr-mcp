@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use super::builders::{HttpBuilder, LlmWizard};
-use super::flow::{GateEditor, TrailEditor, no_gate};
+use super::flow::{GateEditor, TrailEditor};
 use super::forms::{DynamicForm, ResponseViewer};
 use super::recipes::{RunResults, TemplateForm, TriggerEditor};
 use crate::client::use_api;
@@ -268,7 +268,12 @@ fn CollectionView(recipe: Recipe, pick: Signal<Pick>, refresh: Signal<u32>) -> E
     let mut folder = use_signal(|| recipe.category.clone().unwrap_or_default());
     let mut vars: Signal<Vec<(String, String)>> = use_signal(|| sorted_vars(&recipe.variables));
     let mut triggers = use_signal(|| recipe.triggers.clone());
-    let gate = use_signal(|| recipe.gate.clone().unwrap_or_else(no_gate));
+    let gate = use_signal(|| {
+        recipe.gate.clone().unwrap_or(herdr_mcp_api::Gate {
+            rules: Vec::new(),
+            max_steps: herdr_mcp_api::gate::DEFAULT_MAX_STEPS,
+        })
+    });
     let trail = use_signal(|| recipe.trail);
     let mut run: Signal<Option<Value>> = use_signal(|| None);
     let mut busy = use_signal(|| false);

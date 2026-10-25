@@ -473,70 +473,67 @@ fn extract_value(result: &Value, path: &str) -> Option<Value> {
 /// `keep_runs`, or older than `keep_days`. The recipe's own [`RunTrail`]
 /// wins over the global `runs.keep-*` settings; 0 keeps everything.
 pub(crate) async fn prune(server: &HerdrMcpServer, recipe: Option<Uuid>) {
-    if let Err(e) = prune_group(server, recipe).await {
+    if let Err(e) = prune_runs(server, Some(recipe)).await {
         tracing::warn!("pruning runs of {recipe:?}: {e:#}");
     }
-}
-
-async fn prune_group(server: &HerdrMcpServer, recipe: Option<Uuid>) -> anyhow::Result<()> {
-    let store = &server.persistence;
-    let trail = match recipe {
-        Some(id) => store.load_recipe(&id).await?.map(|r| r.trail),
-        None => None,
-    };
-    let saved = trail.is_some();
-    let trail = trail.unwrap_or_default();
-    let global = |key| u32::try_from(server.settings().number(key)).unwrap_or(u32::MAX);
-    let keep_runs = trail
-        .keep_runs
-        .unwrap_or_else(|| global(herdr_mcp_api::settings::KEEP_RUNS));
-    let keep_days = trail
-        .keep_days
-        .unwrap_or_else(|| global(herdr_mcp_api::settings::KEEP_DAYS));
-    if keep_runs == 0 && keep_days == 0 {
-        return Ok(());
-    }
-    let recipes: std::collections::HashSet<Uuid> = store
-        .list_recipes(None)
-        .await?
-        .into_iter()
-        .map(|r| r.id)
-        .collect();
-    let mut group = Vec::new();
-    for id in store.list_run_ids().await? {
-        let Some(header) = store.load_run_header(&id).await? else {
-            continue;
-        };
-        // A deleted recipe's runs fall in with the ad-hoc ones.
-        let of = header.recipe_id.filter(|r| recipes.contains(r));
-        let same = if saved { of == recipe } else { of.is_none() };
-        if same && !server.runs.is_live(id) {
-            group.push((header.started_at, id));
-        }
-    }
-    group.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    let cutoff = Utc::now() - chrono::Duration::days(i64::from(keep_days));
-    for (i, (at, id)) in group.into_iter().enumerate() {
-        let over = keep_runs > 0 && i >= keep_runs as usize;
-        let old = keep_days > 0 && at < cutoff;
-        if over || old {
-            store.delete_run(&id).await?;
-        }
-    }
-    Ok(())
 }
 
 /// [`prune`] every recipe's runs and the ad-hoc ones (at daemon start, so
 /// `keep_days` applies to collections that no longer run).
 pub async fn prune_all(server: &HerdrMcpServer) {
-    let recipes = match server.persistence.list_recipes(None).await {
-        Ok(r) => r,
-        Err(e) => return tracing::warn!("pruning runs: listing recipes: {e:#}"),
-    };
-    for r in recipes {
-        prune(server, Some(r.id)).await;
+    if let Err(e) = prune_runs(server, None).await {
+        tracing::warn!("pruning runs: {e:#}");
     }
-    prune(server, None).await;
+}
+
+/// Prune one group (`only`) or all of them, reading each run header once.
+async fn prune_runs(server: &HerdrMcpServer, only: Option<Option<Uuid>>) -> anyhow::Result<()> {
+    let store = &server.persistence;
+    let trails: HashMap<Uuid, RunTrail> = store
+        .list_recipes(None)
+        .await?
+        .into_iter()
+        .map(|r| (r.id, r.trail))
+        .collect();
+    // A deleted recipe's runs fall in with the ad-hoc ones.
+    let group_of = |recipe: Option<Uuid>| recipe.filter(|r| trails.contains_key(r));
+    let only = only.map(group_of);
+    let mut groups: HashMap<Option<Uuid>, Vec<(DateTime<Utc>, Uuid)>> = HashMap::new();
+    for id in store.list_run_ids().await? {
+        let Some(header) = store.load_run_header(&id).await? else {
+            continue;
+        };
+        let group = group_of(header.recipe_id);
+        if only.is_some_and(|o| o != group) || server.runs.is_live(id) {
+            continue;
+        }
+        groups
+            .entry(group)
+            .or_default()
+            .push((header.started_at, id));
+    }
+    let global = |key| u32::try_from(server.settings().number(key)).unwrap_or(u32::MAX);
+    for (group, mut runs) in groups {
+        let trail = group
+            .and_then(|id| trails.get(&id).copied())
+            .unwrap_or_default();
+        let keep_runs = trail
+            .keep_runs
+            .unwrap_or_else(|| global(herdr_mcp_api::settings::KEEP_RUNS));
+        let keep_days = trail
+            .keep_days
+            .unwrap_or_else(|| global(herdr_mcp_api::settings::KEEP_DAYS));
+        runs.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        let cutoff = Utc::now() - chrono::Duration::days(i64::from(keep_days));
+        for (i, (at, id)) in runs.into_iter().enumerate() {
+            let over = keep_runs > 0 && i >= keep_runs as usize;
+            let old = keep_days > 0 && at < cutoff;
+            if over || old {
+                store.delete_run(&id).await?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A run being executed: its record so far (the fold of what it emitted).
@@ -608,8 +605,16 @@ impl Executor {
                 self.emit(RunEventKind::PaneSnapshot { step, pane, text })
                     .await;
             }
-            Ok(_) | Err(_) => {
-                tracing::warn!("run {}: cannot snapshot pane {pane}", self.run.id);
+            Ok(result) => {
+                let result = serde_json::to_value(&result).unwrap_or_default();
+                let error = herdr_mcp_api::tool_text(&result);
+                tracing::warn!("run {}: cannot snapshot pane {pane}: {error}", self.run.id);
+            }
+            Err((code, error)) => {
+                tracing::warn!(
+                    "run {}: cannot snapshot pane {pane}: {code} {error}",
+                    self.run.id
+                );
             }
         }
     }
@@ -636,7 +641,12 @@ impl Executor {
             match action {
                 None | Some(GateAction::End) => return RunStatus::Completed,
                 Some(GateAction::Fail { message }) => {
-                    self.emit(RunEventKind::Error { error: message }).await;
+                    let error = if message.is_empty() {
+                        format!("gate rule {} failed the run", rule.map_or(0, |i| i + 1))
+                    } else {
+                        message
+                    };
+                    self.emit(RunEventKind::Error { error }).await;
                     self.snapshot(None).await;
                     return RunStatus::Failed;
                 }

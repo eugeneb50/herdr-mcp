@@ -2,11 +2,13 @@
 //!
 //! The gate is an ordered list of rules; the first whose checks hold decides
 //! (end, restart from the first request, or fail). No rule matching ends the
-//! run as completed. The evaluator is here, not in the server, so the UIs can
-//! preview which rule a finished run would take.
+//! run as completed. Rules also have a one-line text form ([`rule_text`],
+//! [`parse_rule`]) the UIs edit and the run trail prints.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::playground::display_value;
 
 /// Requests one run may execute in total, every pass of a restart loop
 /// counted, unless the gate sets its own `max_steps`.
@@ -76,8 +78,11 @@ pub enum GateAction {
         #[serde(default, skip_serializing_if = "is_zero")]
         delay_ms: u64,
     },
-    /// Stop; the run fails with `message`.
-    Fail { message: String },
+    /// Stop; the run fails with `message` (empty: the error names the rule).
+    Fail {
+        #[serde(default)]
+        message: String,
+    },
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -152,28 +157,21 @@ impl Check {
             Op::Lt => compare(left.as_ref(), &self.value).is_some_and(|o| o.is_lt()),
             Op::Gt => compare(left.as_ref(), &self.value).is_some_and(|o| o.is_gt()),
             Op::Contains => match left {
-                Some(Value::String(s)) => s.contains(&text(&self.value)),
+                Some(Value::String(s)) => s.contains(&display_value(&self.value)),
                 Some(Value::Array(items)) => items.iter().any(|i| loose_eq(i, &self.value)),
-                Some(Value::Object(map)) => map.contains_key(&text(&self.value)),
+                Some(Value::Object(map)) => map.contains_key(&display_value(&self.value)),
                 _ => false,
             },
         }
     }
 }
 
-/// A value as placeholder text: strings bare, null empty, the rest as JSON.
-fn text(v: &Value) -> String {
-    match v {
-        Value::String(s) => s.clone(),
-        Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
-
 fn loose_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::String(_), Value::Number(_) | Value::Bool(_))
-        | (Value::Number(_) | Value::Bool(_), Value::String(_)) => text(a).trim() == text(b).trim(),
+        | (Value::Number(_) | Value::Bool(_), Value::String(_)) => {
+            display_value(a).trim() == display_value(b).trim()
+        }
         (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
         _ => a == b,
     }
@@ -219,6 +217,8 @@ impl Op {
         !matches!(self, Op::Exists | Op::Missing)
     }
 
+    /// An op as typed in a rule; `==` `=` `!=` `<` `>` and `null` (for
+    /// `missing`) are accepted too.
     fn parse(word: &str) -> Option<Self> {
         Some(match word {
             "eq" | "==" | "=" => Op::Eq,
@@ -255,12 +255,13 @@ pub fn rule_text(rule: &GateRule) -> String {
     format!("{checks} → {}", action_text(&rule.then))
 }
 
-/// An action as words: `end`, `restart`, `restart 2000ms`, `fail <message>`.
+/// An action as words: `end`, `restart`, `restart 2000ms`, `fail`, `fail <message>`.
 pub fn action_text(action: &GateAction) -> String {
     match action {
         GateAction::End => "end".into(),
         GateAction::Restart { delay_ms: 0 } => "restart".into(),
         GateAction::Restart { delay_ms } => format!("restart {delay_ms}ms"),
+        GateAction::Fail { message } if message.is_empty() => "fail".into(),
         GateAction::Fail { message } => format!("fail {message}"),
     }
 }
@@ -337,14 +338,10 @@ fn parse_action(text: &str) -> Result<GateAction, String> {
             Ok(GateAction::Restart { delay_ms })
         }
         "fail" => Ok(GateAction::Fail {
-            message: if rest.is_empty() {
-                "the gate failed the run".into()
-            } else {
-                rest.to_string()
-            },
+            message: rest.to_string(),
         }),
         _ => Err(format!(
-            "`{text}`: the action is `end`, `restart [500ms]` or `fail <message>`"
+            "`{text}`: the action is `end`, `restart [500ms]` or `fail [message]`"
         )),
     }
 }
@@ -504,10 +501,7 @@ mod tests {
         }
         let rule = parse_rule("x == ok -> fail").unwrap();
         assert_eq!(rule.checks[0].value, json!("ok"));
-        assert_eq!(
-            rule_text(&rule),
-            r#"x eq "ok" → fail the gate failed the run"#
-        );
+        assert_eq!(rule_text(&rule), r#"x eq "ok" → fail"#);
         assert_eq!(parse_rule("else -> end").unwrap().checks, vec![]);
         for bad in [
             "x lt 3",

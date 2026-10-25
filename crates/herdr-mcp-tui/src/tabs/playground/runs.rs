@@ -140,10 +140,6 @@ fn status_style(s: RunStatus) -> ratatui::style::Style {
     }
 }
 
-fn status_name(s: RunStatus) -> String {
-    format!("{s:?}").to_lowercase()
-}
-
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -163,11 +159,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         .enumerate()
         .map(|(i, r)| {
             let line = Line::from(vec![
-                Span::styled(
-                    format!("{:<10}", status_name(r.status)),
-                    status_style(r.status),
-                ),
-                Span::raw(r.name.clone().unwrap_or_else(|| "ad-hoc run".into())),
+                Span::styled(format!("{:<10}", r.status.as_str()), status_style(r.status)),
+                Span::raw(r.title().to_string()),
                 Span::styled(
                     format!("  {}", r.started_at.format("%m-%d %H:%M:%S")),
                     dim_style(),
@@ -319,13 +312,9 @@ async fn open_pane(app: &mut App) {
     let Some(http) = client(app) else {
         return;
     };
-    let args = serde_json::json!({ "method": "pane.focus", "params": { "pane_id": pane } });
-    match http.call_tool("herdr_api", &args).await {
-        Ok(r) if !herdr_mcp_api::tool_is_error(&r) => {
-            app.playground.ok(format!("focused pane {pane} in herdr"));
-        }
-        Ok(r) => app.playground.err(herdr_mcp_api::tool_text(&r)),
-        Err(e) => app.playground.err(format!("cannot focus {pane}: {e}")),
+    match herdr_mcp_api::playground::focus_pane(&http, &pane).await {
+        Ok(m) => app.playground.ok(m),
+        Err(e) => app.playground.err(e),
     }
 }
 

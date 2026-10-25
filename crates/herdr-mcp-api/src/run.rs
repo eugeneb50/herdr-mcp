@@ -26,6 +26,18 @@ impl RunStatus {
     pub fn is_finished(self) -> bool {
         !matches!(self, Self::Running | Self::Paused)
     }
+
+    /// The status as on the wire: `running`, `failed`, …
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
+        }
+    }
 }
 
 /// One run of a recipe: what ran, where it got to, and what it produced.
@@ -61,6 +73,11 @@ pub struct RunRecord {
 }
 
 impl RunRecord {
+    /// The run's name, or `ad-hoc run`.
+    pub fn title(&self) -> &str {
+        self.name.as_deref().unwrap_or("ad-hoc run")
+    }
+
     /// The pane to look at for this run: the one its failure snapshot read,
     /// else the last pane a step targeted or an agent a step started, else
     /// the agent that started the run.
@@ -94,7 +111,7 @@ impl RunRecord {
 
     /// `failed · 2.10s · 3 passes` for a list row.
     pub fn summary(&self) -> String {
-        let mut parts = vec![format!("{:?}", self.status).to_lowercase()];
+        let mut parts = vec![self.status.as_str().to_string()];
         if let Some(end) = self.finished_at {
             parts.push(seconds(end - self.started_at));
         }
@@ -240,7 +257,7 @@ pub enum RunEventKind {
         action: Option<GateAction>,
         checks: Vec<CheckResult>,
     },
-    /// The last `lines` lines of `pane` when the run failed (`step`: the
+    /// The last lines of `pane` (as many as the trail's `snapshot_lines`) when the run failed (`step`: the
     /// failed step; none for a gate failure).
     PaneSnapshot {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -276,9 +293,13 @@ impl RunEventKind {
 pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
     use std::fmt::Write;
     let mut out = String::new();
-    let name = run.name.as_deref().unwrap_or("ad-hoc run");
-    let status = format!("{:?}", run.status).to_lowercase();
-    let _ = writeln!(out, "{name} · run {} · {status}", run.id);
+    let _ = writeln!(
+        out,
+        "{} · run {} · {}",
+        run.title(),
+        run.id,
+        run.status.as_str()
+    );
     let took = run
         .finished_at
         .map(|end| format!(" · took {}", seconds(end - run.started_at)))
@@ -307,7 +328,7 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
         match &event.kind {
             RunEventKind::Status { status } => match status {
                 RunStatus::Running if event.seq == 0 => {}
-                s => line(&mut out, "■", &format!("{s:?}").to_lowercase()),
+                s => line(&mut out, "■", s.as_str()),
             },
             RunEventKind::StepStarted {
                 step,

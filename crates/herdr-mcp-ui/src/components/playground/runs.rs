@@ -19,14 +19,6 @@ fn status_class(s: RunStatus) -> &'static str {
     }
 }
 
-fn status_name(s: RunStatus) -> String {
-    format!("{s:?}").to_lowercase()
-}
-
-fn run_name(r: &RunRecord) -> String {
-    r.name.clone().unwrap_or_else(|| "ad-hoc run".into())
-}
-
 /// When a run started, UTC.
 fn started(r: &RunRecord) -> String {
     r.started_at.format("%m-%d %H:%M:%S").to_string()
@@ -121,8 +113,8 @@ pub fn Runs() -> Element {
                         key: "{r.id}",
                         class: if pick() == Some(r.id) { "tree-item tree-sel run-row" } else { "tree-item run-row" },
                         onclick: move |_| pick.set(Some(r.id)),
-                        span { class: status_class(r.status), "{status_name(r.status)}" }
-                        span { class: "tree-name", "{run_name(&r)}" }
+                        span { class: status_class(r.status), "{r.status.as_str()}" }
+                        span { class: "tree-name", "{r.title()}" }
                         span { class: "muted mono", "{started(&r)}" }
                     }
                 }
@@ -167,14 +159,20 @@ fn RunDetail(run: RunRecord) -> Element {
     let copy = {
         let trail = trail.clone();
         move |_| {
-            let copied = web_sys::window()
-                .map(|w| w.navigator().clipboard().write_text(&trail))
-                .is_some();
-            msg.set(Some(if copied {
-                Ok("trail copied".into())
-            } else {
-                Err("no clipboard in this browser".into())
-            }));
+            let Some(write) =
+                web_sys::window().map(|w| w.navigator().clipboard().write_text(&trail))
+            else {
+                msg.set(Some(Err("no clipboard in this browser".into())));
+                return;
+            };
+            spawn(async move {
+                msg.set(Some(
+                    match wasm_bindgen_futures::JsFuture::from(write).await {
+                        Ok(_) => Ok("trail copied".into()),
+                        Err(_) => Err("the browser denied clipboard access".into()),
+                    },
+                ));
+            });
         }
     };
     let rerun = {
@@ -196,17 +194,9 @@ fn RunDetail(run: RunRecord) -> Element {
             let Some(pane) = pane.clone() else { return };
             let client = client();
             spawn(async move {
-                let args = serde_json::json!({
-                    "method": "pane.focus",
-                    "params": { "pane_id": pane },
-                });
-                match client.call_tool("herdr_api", &args).await {
-                    Ok(r) if !herdr_mcp_api::tool_is_error(&r) => {
-                        msg.set(Some(Ok(format!("focused pane {pane} in herdr"))));
-                    }
-                    Ok(r) => msg.set(Some(Err(herdr_mcp_api::tool_text(&r)))),
-                    Err(e) => msg.set(Some(Err(format!("cannot focus {pane}: {e}")))),
-                }
+                msg.set(Some(
+                    herdr_mcp_api::playground::focus_pane(&client, &pane).await,
+                ));
             });
         }
     };
@@ -222,8 +212,8 @@ fn RunDetail(run: RunRecord) -> Element {
     rsx! {
         div { class: "card",
             div { class: "response-head",
-                span { class: status_class(run.status), "{status_name(run.status)}" }
-                span { class: "mono", "{run_name(&run)}" }
+                span { class: status_class(run.status), "{run.status.as_str()}" }
+                span { class: "mono", "{run.title()}" }
                 span { class: "muted", "{run.summary()} · by {run.origin}" }
             }
             div { class: "btn-row",

@@ -1099,7 +1099,7 @@ fn render_editor(frame: &mut Frame, area: Rect, app: &App) {
         Target::TemplateVar(_) => ("Template variable".to_string(), String::new()),
         Target::Gate(_) => (
             "Gate rule".to_string(),
-            "path op value [and|or …] → end | restart 500ms | fail message; ops: eq ne lt gt contains exists missing; `always → end` always matches".into(),
+            "path op value [and|or …] → end | restart 500ms | fail [message]; ops: eq (==) ne (!=) lt (<) gt (>) contains exists missing (null); `always → end` always matches".into(),
         ),
         Target::MaxSteps => (
             "Max requests per run".to_string(),

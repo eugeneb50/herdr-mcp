@@ -430,8 +430,8 @@ fails the step.
    d. apply its extract rules (variable_set), or fail the step
 4. After the last step, the recipe's gate (if any; skipped when only
    `step_ids` run) picks its first matching rule (gate_decided):
-   end → completed, fail → `error` + failed, restart → `pass` + 1 and
-   back to 3 after `delay_ms`. No match completes the run.
+   end → completed, fail → `error` (its message, or the rule that failed)
+   + failed, restart → `pass` + 1 and back to 3 after `delay_ms`. No match completes the run.
 5. The event log is the run; RunRecord is its fold
 ```
 
