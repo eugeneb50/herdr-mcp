@@ -358,7 +358,15 @@ appends to the audit log after:
   `api` (`POST /api/tools/{name}`) or `run` (a recipe step) in the request
   `_meta`; only that session's tag is read, so any other caller is `mcp`.
 - **Policy:** `disabled-tools` are refused (and hidden from both tool
-  lists). Unless `agent-triggers` is on, only `api` calls may add triggers,
+  lists). `[mcp] tools` only narrows what external MCP clients list
+  (`CORE_TOOLS` by default; `lists` matches core, all, a category or a
+  name). The in-process session and `/api/tools` see every enabled tool.
+  `get_info` sends `INSTRUCTIONS` (herdr's skill rules, said in these
+  tools' terms) and enables resources, so `herdr-mcp://agent-guide` serves
+  AGENT-GUIDE.md. `caller_pane` is the client's `HERDR_PANE_ID`, inherited
+  by this stdio process, and `mcp` calls only: `split_pane` and
+  `agent_spawn` split it by default (`agents::split_direction`: right if
+  width ≥ 2 × height, else down) with `--no-focus`. Unless `agent-triggers` is on, only `api` calls may add triggers,
   change a recipe that has triggers or a schedule, or call
   `schedule_recipe` / `enable_schedule`.
 - **Outbound** (`outbound.rs`, `http_request` and the LLM tools): a

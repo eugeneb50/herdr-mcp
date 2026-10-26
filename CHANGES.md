@@ -4,6 +4,17 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Leaner MCP surface.** MCP clients list a core set of 26 tools by
+  default, about half the schema of all 46, so agents spend less context on
+  every turn. `[mcp] tools` lists more: `all`, a category or tool names.
+  Unlisted tools still run in recipes and the UIs. At connect the server
+  sends agents short usage rules (herdr's own skill, said in these tools'
+  terms) and serves AGENT-GUIDE.md as the resource
+  `herdr-mcp://agent-guide`. Inside a herdr pane, `split_pane` and
+  `agent_spawn` split the caller's own pane by default: right when it's wide,
+  down when it's tall. **(breaking)** `split_pane` leaves focus where it is
+  unless `no_focus: false`; `agent_spawn` with no workspace or tab splits
+  the caller's pane instead of the session's first one.
 - **Runs, completed.** The web Runs tab updates live from the run event
   stream instead of re-reading every 2 s, and both Runs views list the
   newest 200 runs (`GET /api/runs?limit=`, which only reads those runs'
