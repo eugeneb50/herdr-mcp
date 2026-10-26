@@ -14,12 +14,12 @@ use super::flow::{GateEditor, TrailEditor};
 use super::forms::{DynamicForm, ResponseViewer};
 use super::recipes::{RunResults, TemplateForm, TriggerEditor};
 use crate::client::use_api;
-use crate::components::variables::{UserTable, user_entries};
+use crate::components::variables::{GlobalsTable, user_entries};
 use herdr_mcp_api::playground::{
     HERDR_API, HTTP_REQUEST, LLM_CALL, ToolInfo, add_request, delete_step, display_value, folders,
     fresh_collection_name, method_groups, methods, parse_value, raw_values, request_method,
-    request_params, request_schema, request_values, result_paths, save_step, send_summary,
-    set_steps, sorted_vars, tool_groups, tool_label, tool_list, var_name,
+    request_params, request_schema, request_values, result_paths, save_collection_var, save_step,
+    send_summary, set_steps, sorted_vars, tool_groups, tool_label, tool_list, var_name,
 };
 use herdr_mcp_api::{
     CreateRecipeRequest, Extract, Recipe, RecipeStep, RecipeTemplate, ResolveRequest, RunRecord,
@@ -252,7 +252,7 @@ fn GlobalsView() -> Element {
                 oninput: move |e| search.set(e.value()),
             }
         }
-        UserTable {
+        GlobalsTable {
             entries,
             search: search.read().clone(),
             on_changed: move |_| refresh += 1,
@@ -564,6 +564,7 @@ fn RequestEditor(
     let mut response: Signal<Option<RunRecord>> = use_signal(|| None);
     let mut busy = use_signal(|| false);
     let mut error: Signal<Option<String>> = use_signal(|| None);
+    let mut notice: Signal<Option<String>> = use_signal(|| None);
 
     // herdr's methods, fetched when the request calls `herdr_api`.
     let schema = use_resource(move || {
@@ -864,6 +865,9 @@ fn RequestEditor(
                 if let Some(e) = error.read().as_deref() {
                     div { class: "alert alert-error mono pre-wrap", "{e}" }
                 }
+                if let Some(n) = notice.read().as_deref() {
+                    div { class: "alert", "{n}" }
+                }
             }
             div { class: "runner-right",
                 match response.read().clone() {
@@ -873,9 +877,32 @@ fn RequestEditor(
                             run,
                             step_id: id.read().trim().to_string(),
                             rules: extract.read().clone(),
-                            on_extract: move |path: String| {
-                                let var = var_name(&path);
-                                extract.write().push(Extract { path, var, scope: VarScope::Global });
+                            // Keep the value as a collection variable now, and
+                            // the rule (saved with the request) for later sends.
+                            on_extract: {
+                                let save = save.clone();
+                                move |(path, value): (String, Value)| {
+                                    let var = var_name(&path);
+                                    extract.write().push(Extract {
+                                        path: path.clone(),
+                                        var: var.clone(),
+                                        scope: VarScope::Collection,
+                                    });
+                                    let save = save.clone();
+                                    let client = client();
+                                    spawn(async move {
+                                        if !save().await {
+                                            return;
+                                        }
+                                        match save_collection_var(&client, rid, None, &var, value).await {
+                                            Ok(()) => {
+                                                notice.set(Some(format!("{path} saved as collection variable {var}")));
+                                                refresh += 1;
+                                            }
+                                            Err(e) => error.set(Some(format!("could not save {var}: {e}"))),
+                                        }
+                                    });
+                                }
                             },
                         }
                     },
@@ -894,7 +921,7 @@ fn ExtractEditor(rules: Vec<Extract>, on_change: EventHandler<Vec<Extract>>) -> 
             p { class: "field-desc",
                 "After a successful send or run, save part of the result as a variable for the next request. The path is followed into the result (e.g. "
                 code { "panes[0].pane_id" }
-                "); empty saves the text the tool returned. Click a path in the response to add one."
+                "); empty saves the text the tool returned. Click a path in the response to save its value as a collection variable and add its rule."
             }
             for (i, x) in rules.iter().cloned().enumerate() {
                 div { key: "{i}", class: "extract-row",
@@ -970,7 +997,7 @@ fn ExtractEditor(rules: Vec<Extract>, on_change: EventHandler<Vec<Extract>>) -> 
                         next.push(Extract {
                             path: String::new(),
                             var: String::new(),
-                            scope: VarScope::Global,
+                            scope: VarScope::Collection,
                         });
                         on_change.call(next);
                     }
@@ -988,7 +1015,7 @@ fn SendResult(
     run: RunRecord,
     step_id: String,
     rules: Vec<Extract>,
-    on_extract: EventHandler<String>,
+    on_extract: EventHandler<(String, Value)>,
 ) -> Element {
     let status = send_summary(&run, &step_id);
     let ok = run.status == herdr_mcp_api::RunStatus::Completed;
@@ -1045,7 +1072,7 @@ fn SendResult(
                     tbody {
                         for (path, value) in paths {
                             {
-                                let p = path.clone();
+                                let p = (path.clone(), value.clone());
                                 let shown = display_value(&value);
                                 rsx! {
                                     tr {

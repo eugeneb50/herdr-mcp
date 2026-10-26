@@ -37,9 +37,8 @@ use crossterm::{
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, ListState, Paragraph};
 use ratatui::{Terminal, backend::CrosstermBackend};
-use serde_json::Value;
 use tui_textarea::{Input as TaInput, Key as TaKey, TextArea};
 
 use std::io::Write;
@@ -63,7 +62,7 @@ fn log_debug(data_dir: &std::path::Path, msg: impl AsRef<str>) {
     }
 }
 
-use herdr_mcp_api::{ApiClient, ConfigResponse, HerdrPane, Recipe, RecipeTemplate, VariableStore};
+use herdr_mcp_api::{ApiClient, ConfigResponse, HerdrPane, Recipe, RecipeTemplate};
 use theme::{accent_style, dim_style, muted_style, title_style};
 
 /// Available tabs.
@@ -308,12 +307,19 @@ pub struct OverviewState {
 
 /// Variables tab state.
 pub struct VariablesState {
-    pub entries: Vec<(String, String)>, // (key, value)
+    /// Group headings and variables, as listed.
+    pub rows: Vec<tabs::variables::VarRow>,
     pub selected: usize,
+    pub(crate) list: ListState,
     pub editing: bool,
     pub edit_key_area: TextArea<'static>,
     pub edit_value_area: TextArea<'static>,
     pub edit_field: EditField,
+    /// Where the form saves, the variable's name before the edit (`None`
+    /// for a new one), and the group's name for the title.
+    pub edit_owner: tabs::variables::Owner,
+    pub edit_old: Option<String>,
+    pub edit_title: String,
     /// Which frame has keyboard focus (0 = variable list).
     pub focused_frame: usize,
 }
@@ -481,12 +487,16 @@ impl App {
                 view: Default::default(),
             },
             variables_state: VariablesState {
-                entries: Vec::new(),
+                rows: Vec::new(),
                 selected: 0,
+                list: ListState::default(),
                 editing: false,
                 edit_key_area: TextArea::default(),
                 edit_value_area: TextArea::default(),
                 edit_field: EditField::Key,
+                edit_owner: tabs::variables::Owner::Global,
+                edit_old: None,
+                edit_title: String::new(),
                 focused_frame: 0,
             },
             settings: SettingsState {
@@ -576,14 +586,8 @@ impl App {
             } else {
                 ok = false;
             }
-            if let Ok(v) = http.list_variables().await {
-                self.variables_state.entries = parse_variables(&v);
-            }
-            if let Ok(v) = http.list_recipes().await {
-                let before = self.recipes.take().unwrap_or_default();
-                self.playground.follow_tree(&before, &v);
-                self.recipes = Some(v);
-            }
+            // The collections too.
+            self.refresh_variables().await;
             if let Ok(v) = http.list_templates().await {
                 self.templates = Some(v);
             }
@@ -621,6 +625,15 @@ impl App {
     /// Refresh sessions and the shown session's panes. herdr's pane list is
     /// what exists; the registry (`GET /api/agents`, this server's session
     /// only) adds role and output by pane id.
+    /// Show tab `t`; the Variables tab re-reads what it lists.
+    async fn switch_tab(&mut self, t: Tab) {
+        self.tab = t;
+        self.status_msg.clear();
+        if t == Tab::Variables {
+            self.refresh_variables().await;
+        }
+    }
+
     async fn refresh_herdr(&mut self) {
         self.herdr.last_error = None;
         let Some(http) = self.http.clone() else {
@@ -793,11 +806,16 @@ impl App {
                 let pane = self.herdr.panes.get(self.overview.pane_index)?;
                 Some(pane.pane_id.clone())
             }
-            Tab::Variables if !self.variables_state.editing => self
-                .variables_state
-                .entries
-                .get(self.variables_state.selected)
-                .map(|(k, v)| format!("{k} = {v}")),
+            Tab::Variables if !self.variables_state.editing => {
+                match self
+                    .variables_state
+                    .rows
+                    .get(self.variables_state.selected)?
+                {
+                    tabs::variables::VarRow::Var(_, k, v) => Some(format!("{k} = {v}")),
+                    tabs::variables::VarRow::Heading(..) => None,
+                }
+            }
             Tab::Settings if self.settings.focused_frame == 0 => {
                 let row = self.settings.selected;
                 match row {
@@ -1295,8 +1313,7 @@ async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<
 
     // Tab hotkeys win over the active tab, whatever has focus.
     if let Some(t) = tab_hotkey(&app.knobs, code, mods, app.tab) {
-        app.tab = t;
-        app.status_msg.clear();
+        app.switch_tab(t).await;
         return Ok(());
     }
 
@@ -1532,8 +1549,7 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
             // Tab strip.
             for (i, r) in app.tab_rects.iter().enumerate() {
                 if m.row == r.y && m.column >= r.x && m.column < r.x + r.width {
-                    app.tab = Tab::ALL[i];
-                    app.status_msg.clear();
+                    app.switch_tab(Tab::ALL[i]).await;
                     return Ok(());
                 }
             }
@@ -1545,8 +1561,9 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
                 && m.row >= app.var_list_inner.y
                 && m.row < app.var_list_inner.bottom()
             {
-                let idx = (m.row - app.var_list_inner.y) as usize;
-                if idx < app.variables_state.entries.len() {
+                let idx =
+                    app.variables_state.list.offset() + (m.row - app.var_list_inner.y) as usize;
+                if idx < app.variables_state.rows.len() {
                     app.variables_state.selected = idx;
                 }
                 return Ok(());
@@ -1648,7 +1665,7 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
         MouseEventKind::ScrollDown => match app.tab {
             Tab::Variables
                 if !app.variables_state.editing
-                    && app.variables_state.selected + 1 < app.variables_state.entries.len() =>
+                    && app.variables_state.selected + 1 < app.variables_state.rows.len() =>
             {
                 app.variables_state.selected += 1;
             }
@@ -1675,18 +1692,6 @@ async fn handle_mouse(app: &mut App, m: MouseEvent) -> Result<()> {
         _ => {}
     }
     Ok(())
-}
-
-fn parse_variables(vars: &[VariableStore]) -> Vec<(String, String)> {
-    vars.iter()
-        .map(|v| {
-            let val = match &v.value {
-                Value::String(s) => s.clone(),
-                o => o.to_string(),
-            };
-            (v.key.clone(), val)
-        })
-        .collect()
 }
 
 /// Truncate a string to `max` display cells (char count, not grapheme width).

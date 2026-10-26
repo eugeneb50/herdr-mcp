@@ -27,8 +27,8 @@ use herdr_mcp_api::playground::{
     PROVIDERS, ToolInfo, add_request, delete_step, display_value, event_names, folders,
     fresh_collection_name, kv_json, kv_rows, load_models, methods, model_choices, parse_value,
     parse_when, pick_provider, provider_of, raw_values, request_method, request_params,
-    request_schema, request_values, result_paths, save_step, send_summary, set_steps, sorted_vars,
-    tool_list, var_name, when_text, with_value,
+    request_schema, request_values, result_paths, save_collection_var, save_step, send_summary,
+    set_steps, sorted_vars, tool_list, var_name, when_text, with_value,
 };
 use herdr_mcp_api::{
     ApiClient, Check, CreateRecipeRequest, Extract, Gate, GateAction, GateRule,
@@ -1041,7 +1041,7 @@ async fn activate_tree(app: &mut App, i: usize) {
     }
     match row {
         Some(TreeRow::Globals) => {
-            app.tab = Tab::Variables;
+            app.switch_tab(Tab::Variables).await;
             app.status_msg = "globals: every request and run sees them".into();
         }
         Some(TreeRow::Runs) => runs::open(app, None).await,
@@ -1122,7 +1122,7 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
             Pick::Nothing => false,
         },
         Focus::Response => handle_response(app, code, mods),
-        Focus::Paths => handle_paths(app, code),
+        Focus::Paths => handle_paths(app, code).await,
     };
     Ok(consumed)
 }
@@ -1676,7 +1676,7 @@ async fn handle_request(app: &mut App, code: KeyCode, mods: KeyModifiers) -> boo
             r.extract.push(Extract {
                 path: String::new(),
                 var: String::new(),
-                scope: VarScope::Global,
+                scope: VarScope::Collection,
             });
             let i = r.extract.len() - 1;
             r.row = r
@@ -1729,8 +1729,10 @@ fn handle_response(app: &mut App, code: KeyCode, mods: KeyModifiers) -> bool {
     }
 }
 
-/// The result paths: Enter adds an extract rule for the picked one.
-fn handle_paths(app: &mut App, code: KeyCode) -> bool {
+/// The result paths: Enter saves the picked one's value as a collection
+/// variable now, and adds an extract rule (saved with the request) so
+/// later sends and runs update it.
+async fn handle_paths(app: &mut App, code: KeyCode) -> bool {
     let pg = &mut app.playground;
     let Some(r) = pg.request.as_mut() else {
         return false;
@@ -1742,14 +1744,28 @@ fn handle_paths(app: &mut App, code: KeyCode) -> bool {
     match code {
         KeyCode::Esc => pg.focus = Focus::Main,
         KeyCode::Enter => {
-            if let Some((path, _)) = r.paths.get(r.path_index).cloned() {
-                let var = var_name(&path);
-                r.extract.push(Extract {
-                    path: path.clone(),
-                    var: var.clone(),
-                    scope: VarScope::Global,
-                });
-                pg.ok(format!("extract {path} → {var} added (Ctrl+S saves)"));
+            let Some((path, value)) = r.paths.get(r.path_index).cloned() else {
+                return true;
+            };
+            let (rid, var) = (r.rid, var_name(&path));
+            r.extract.push(Extract {
+                path: path.clone(),
+                var: var.clone(),
+                scope: VarScope::Collection,
+            });
+            if !save_request(app).await {
+                return true;
+            }
+            let Some(http) = client(app) else {
+                return true;
+            };
+            match save_collection_var(&http, rid, None, &var, value).await {
+                Ok(()) => {
+                    app.refresh_variables().await;
+                    app.playground
+                        .ok(format!("{path} saved as collection variable {var}"));
+                }
+                Err(e) => app.playground.err(format!("could not save {var}: {e}")),
             }
         }
         _ => return false,
@@ -2405,13 +2421,9 @@ pub(crate) async fn finish_job(app: &mut App, job: Job) {
         Job::Send(rid, sid, task) => (rid, Some(sid), task.await.map_err(joined).and_then(|r| r)),
         Job::Run(rid, task) => (rid, None, task.await.map_err(joined).and_then(|r| r)),
     };
-    // Extract rules may have written variables.
-    reload_recipes(app).await;
-    if let Some(http) = app.http.clone()
-        && let Ok(vars) = http.list_variables().await
-    {
-        app.variables_state.entries = crate::parse_variables(&vars);
-    }
+    // Extract rules may have written variables (this re-reads the
+    // collections too).
+    app.refresh_variables().await;
     let fresh_vars = recipe(app, rid).map(|r| sorted_vars(&r.variables));
     let pg = &mut app.playground;
     let width = pg.result_inner.width as usize;

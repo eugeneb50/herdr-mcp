@@ -1,130 +1,250 @@
-//! Variables tab: session variable store management. Bordered list + edit form.
+//! Variables tab: every variable a request can read, in one list. Globals,
+//! then each collection's own variables (both editable), then the auto
+//! variables herdr's panes resolve to (read-only).
 //!
-//! ↑/↓ navigate, `e`/`n` edit (key/value fields), `x` delete, Enter save.
+//! ↑/↓ navigate, Enter or Ctrl+E edit, Ctrl+N add to the selected group,
+//! Ctrl+X delete; in the form Tab switches field, Enter saves, Esc cancels.
+
+use std::collections::HashMap;
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers};
-use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
-
-use crate::theme::{
-    accent_style, dim_style, focused_panel_block, muted_style, panel_block, selected_style,
+use herdr_mcp_api::playground::{
+    collection_vars, delete_collection_var, display_value, parse_value, save_collection_var,
+    save_global,
 };
+use herdr_mcp_api::{Recipe, Uuid, VariableStore};
+use ratatui::layout::Rect;
+use ratatui::style::Modifier;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{List, ListItem, Paragraph};
+use serde_json::Value;
+
+use crate::theme::{accent_style, dim_style, focused_panel_block, muted_style, panel_block};
 use crate::{App, EditField, truncate};
+
+/// Where a variable lives.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Owner {
+    Global,
+    Collection(Uuid),
+    /// Resolved live from herdr; not stored, so not editable.
+    Auto,
+}
+
+/// A line of the list: a group heading (its owner and title) or a variable.
+#[derive(Clone, Debug, PartialEq)]
+pub enum VarRow {
+    Heading(Owner, String),
+    Var(Owner, String, String),
+}
+
+impl VarRow {
+    fn owner(&self) -> &Owner {
+        match self {
+            Self::Heading(o, _) | Self::Var(o, _, _) => o,
+        }
+    }
+}
+
+/// The list: globals, each collection by name, then the auto variables.
+/// Every collection gets a heading, so one without variables can get one.
+pub fn var_rows(
+    globals: &[VariableStore],
+    recipes: &[Recipe],
+    auto: &HashMap<String, Value>,
+) -> Vec<VarRow> {
+    let sorted = |vars: Vec<(String, String)>, owner: &Owner| {
+        let mut vars = vars;
+        vars.sort();
+        vars.into_iter()
+            .map(|(k, v)| VarRow::Var(owner.clone(), k, v))
+            .collect::<Vec<_>>()
+    };
+    let mut rows = vec![VarRow::Heading(Owner::Global, "Globals".into())];
+    let global: Vec<_> = globals
+        .iter()
+        .map(|v| (v.key.clone(), display_value(&v.value)))
+        .collect();
+    rows.extend(sorted(global, &Owner::Global));
+    for (id, name, vars) in collection_vars(recipes) {
+        let owner = Owner::Collection(id);
+        rows.push(VarRow::Heading(
+            owner.clone(),
+            format!("Collection · {name}"),
+        ));
+        rows.extend(sorted(vars, &owner));
+    }
+    rows.push(VarRow::Heading(
+        Owner::Auto,
+        "Auto · live from herdr's panes, read-only".into(),
+    ));
+    let auto: Vec<_> = auto
+        .iter()
+        .map(|(k, v)| (k.clone(), display_value(v)))
+        .collect();
+    rows.extend(sorted(auto, &Owner::Auto));
+    rows
+}
+
+impl App {
+    /// Re-read globals, collections and auto variables into the list,
+    /// keeping the selection on the same row where it still exists.
+    pub(crate) async fn refresh_variables(&mut self) {
+        let Some(http) = self.http.clone() else {
+            return;
+        };
+        let (Ok(globals), Ok(recipes)) = (http.list_variables().await, http.list_recipes().await)
+        else {
+            return;
+        };
+        let auto = http
+            .auto_variables(None)
+            .await
+            .map(|a| a.variables)
+            .unwrap_or_default();
+        let before = self.recipes.take().unwrap_or_default();
+        self.playground.follow_tree(&before, &recipes);
+        let rows = var_rows(&globals, &recipes, &auto);
+        self.recipes = Some(recipes);
+        let state = &mut self.variables_state;
+        let picked = state.rows.get(state.selected).cloned();
+        let same = |r: &VarRow| match (r, &picked) {
+            (VarRow::Var(o, k, _), Some(VarRow::Var(po, pk, _))) => o == po && k == pk,
+            (r, Some(p)) => r == p,
+            _ => false,
+        };
+        state.selected = rows
+            .iter()
+            .position(same)
+            .unwrap_or_else(|| state.selected.min(rows.len().saturating_sub(1)));
+        state.rows = rows;
+    }
+
+    /// The name of the group `owner` heads, for the edit form's title.
+    fn owner_title(&self, owner: &Owner) -> String {
+        match owner {
+            Owner::Global => "global".into(),
+            Owner::Collection(id) => self
+                .recipes
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .find(|r| r.id == *id)
+                .map_or_else(|| "collection".into(), |r| format!("collection {}", r.name)),
+            Owner::Auto => "auto".into(),
+        }
+    }
+}
 
 pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     if app.variables_state.editing {
         return handle_edit(app, code, mods).await;
     }
-    // Tab/BackTab consumed (no-op for single-frame).
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let state = &mut app.variables_state;
+    let count = state.rows.len();
+    let last = count.saturating_sub(1);
     match code {
         KeyCode::Tab | KeyCode::BackTab => return Ok(true),
-        _ => {}
+        KeyCode::Up => state.selected = state.selected.saturating_sub(1),
+        KeyCode::Down => state.selected = (state.selected + 1).min(last),
+        KeyCode::Home => state.selected = 0,
+        KeyCode::End => state.selected = last,
+        KeyCode::PageUp => state.selected = state.selected.saturating_sub(10),
+        KeyCode::PageDown => state.selected = (state.selected + 10).min(last),
+        KeyCode::Enter => begin_edit(app),
+        KeyCode::Char('e') if ctrl => begin_edit(app),
+        KeyCode::Char('n') if ctrl => begin_new(app),
+        KeyCode::Char('x') if ctrl => delete(app).await,
+        _ => return Ok(false),
     }
-    match code {
-        KeyCode::Up => {
-            app.variables_state.selected = app.variables_state.selected.saturating_sub(1);
-            Ok(true)
+    Ok(true)
+}
+
+/// Edit the selected variable.
+fn begin_edit(app: &mut App) {
+    let state = &app.variables_state;
+    let Some(row) = state.rows.get(state.selected).cloned() else {
+        return;
+    };
+    match row {
+        VarRow::Var(Owner::Auto, ..) => {
+            app.status_msg =
+                "auto variables are read-only; save one as a global to change it".into();
         }
-        KeyCode::Down => {
-            let count = app.variables_state.entries.len();
-            if count > 0 {
-                app.variables_state.selected = (app.variables_state.selected + 1).min(count - 1);
-            }
-            Ok(true)
-        }
-        KeyCode::Home => {
-            app.variables_state.selected = 0;
-            Ok(true)
-        }
-        KeyCode::End => {
-            let count = app.variables_state.entries.len();
-            if count > 0 {
-                app.variables_state.selected = count - 1;
-            }
-            Ok(true)
-        }
-        KeyCode::PageUp => {
-            app.variables_state.selected = app.variables_state.selected.saturating_sub(5);
-            Ok(true)
-        }
-        KeyCode::PageDown => {
-            let count = app.variables_state.entries.len();
-            if count > 0 {
-                app.variables_state.selected = (app.variables_state.selected + 5).min(count - 1);
-            }
-            Ok(true)
-        }
-        KeyCode::Char('e') if mods.contains(KeyModifiers::CONTROL) => {
-            // Don't allow editing auto-stored variables (they're regenerated on each run)
-            let (k, _) = app
-                .variables_state
-                .entries
-                .get(app.variables_state.selected)
-                .cloned()
-                .unwrap_or_default();
-            if is_auto_stored_key(&k) {
-                app.status_msg = "auto-stored variables cannot be edited".into();
-                return Ok(true);
-            }
-            let (k, v) = app
-                .variables_state
-                .entries
-                .get(app.variables_state.selected)
-                .cloned()
-                .unwrap_or_default();
-            app.variables_state.editing = true;
-            app.variables_state.edit_key_area = crate::TextArea::new(vec![k]);
-            app.variables_state.edit_value_area = crate::TextArea::new(vec![v]);
-            app.variables_state.edit_field = EditField::Key;
-            Ok(true)
-        }
-        KeyCode::Char('n') if mods.contains(KeyModifiers::CONTROL) => {
-            app.variables_state.editing = true;
-            app.variables_state.edit_key_area = crate::TextArea::default();
-            app.variables_state.edit_value_area = crate::TextArea::default();
-            app.variables_state.edit_field = EditField::Key;
-            Ok(true)
-        }
-        KeyCode::Char('x') if mods.contains(KeyModifiers::CONTROL) => {
-            if let Some((k, _)) = app
-                .variables_state
-                .entries
-                .get(app.variables_state.selected)
-                .cloned()
-                && let Some(http) = app.http.clone()
-            {
-                // Can only delete user-created variables, not auto-stored ones
-                if is_auto_stored_key(&k) {
-                    app.status_msg = "auto-stored variables are regenerated on each run".into();
-                    return Ok(true);
-                }
-                if let Err(e) = http.delete_variable(&k).await {
-                    app.status_msg = format!("delete failed: {e}");
-                } else {
-                    app.status_msg = format!("deleted {k}");
-                    app.refresh().await;
-                }
-            }
-            Ok(true)
-        }
-        _ => Ok(false),
+        VarRow::Var(owner, k, v) => open_form(app, owner, Some(k), v),
+        VarRow::Heading(..) => begin_new(app),
     }
 }
 
-/// Check if a variable key indicates it was auto-stored from a tool result.
-pub(crate) fn is_auto_stored_key(key: &str) -> bool {
-    key.starts_with("_") || key.starts_with("pane_") || key.contains("[")
+/// Add a variable to the selected row's group.
+fn begin_new(app: &mut App) {
+    let state = &app.variables_state;
+    let owner = state
+        .rows
+        .get(state.selected)
+        .map_or(Owner::Global, |r| r.owner().clone());
+    if owner == Owner::Auto {
+        app.status_msg = "auto variables are read-only; add a global instead".into();
+        return;
+    }
+    open_form(app, owner, None, String::new());
+}
+
+fn open_form(app: &mut App, owner: Owner, old: Option<String>, value: String) {
+    let title = app.owner_title(&owner);
+    let state = &mut app.variables_state;
+    state.editing = true;
+    // Typing goes on at the end of the text.
+    let area = |lines: Vec<String>| {
+        let mut area = crate::TextArea::new(lines);
+        area.move_cursor(tui_textarea::CursorMove::Bottom);
+        area.move_cursor(tui_textarea::CursorMove::End);
+        area
+    };
+    state.edit_key_area = area(vec![old.clone().unwrap_or_default()]);
+    state.edit_value_area = area(value.split('\n').map(String::from).collect());
+    state.edit_field = if old.is_some() {
+        EditField::Value
+    } else {
+        EditField::Key
+    };
+    state.edit_owner = owner;
+    state.edit_old = old;
+    state.edit_title = title;
+}
+
+async fn delete(app: &mut App) {
+    let state = &app.variables_state;
+    let Some(VarRow::Var(owner, key, _)) = state.rows.get(state.selected).cloned() else {
+        return;
+    };
+    let Some(http) = app.http.clone() else {
+        return;
+    };
+    let result = match &owner {
+        Owner::Global => http.delete_variable(&key).await.map_err(|e| e.to_string()),
+        Owner::Collection(id) => delete_collection_var(&http, *id, &key).await,
+        Owner::Auto => {
+            app.status_msg = "auto variables are read-only".into();
+            return;
+        }
+    };
+    app.status_msg = match result {
+        Ok(()) => format!("deleted {key}"),
+        Err(e) => format!("delete failed: {e}"),
+    };
+    app.refresh_variables().await;
 }
 
 async fn handle_edit(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result<bool> {
     // Only insert a character when no Ctrl/Alt modifier is held.
     let plain = !mods.contains(KeyModifiers::CONTROL) && !mods.contains(KeyModifiers::ALT);
     match code {
-        KeyCode::Tab => {
-            app.variables_state.edit_field = match app.variables_state.edit_field {
+        KeyCode::Tab | KeyCode::BackTab => {
+            let state = &mut app.variables_state;
+            state.edit_field = match state.edit_field {
                 EditField::Key => EditField::Value,
                 EditField::Value => EditField::Key,
             };
@@ -144,7 +264,15 @@ async fn handle_edit(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result
         {
             Ok(false)
         }
-        KeyCode::Backspace | KeyCode::Left | KeyCode::Right | KeyCode::Char(_) if plain => {
+        KeyCode::Backspace
+        | KeyCode::Delete
+        | KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::Char(_)
+            if plain =>
+        {
             app.feed_active_textarea(code, mods);
             Ok(true)
         }
@@ -153,32 +281,35 @@ async fn handle_edit(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Result
 }
 
 async fn save(app: &mut App) {
-    let key = app
-        .variables_state
-        .edit_key_area
-        .lines()
-        .join("\n")
-        .trim()
-        .to_string();
-    let value = app.variables_state.edit_value_area.lines().join("\n");
+    let state = &app.variables_state;
+    let key = state.edit_key_area.lines().join("").trim().to_string();
+    let value = parse_value(&state.edit_value_area.lines().join("\n"));
     if key.is_empty() {
-        app.status_msg = "key cannot be empty".into();
+        app.status_msg = "the name cannot be empty".into();
         return;
     }
-    let req = herdr_mcp_api::SaveVariableRequest {
-        key: key.clone(),
-        value: serde_json::Value::String(value),
-        ..Default::default()
+    let (owner, old) = (state.edit_owner.clone(), state.edit_old.clone());
+    let Some(http) = app.http.clone() else {
+        app.status_msg = "bridge not connected".into();
+        return;
     };
-    if let Some(http) = app.http.clone() {
-        match http.save_variable(&req).await {
-            Ok(_) => {
-                app.status_msg = format!("saved {key}");
-                app.variables_state.editing = false;
-                app.refresh().await;
-            }
-            Err(e) => app.status_msg = format!("save failed: {e}"),
+    let result = match &owner {
+        Owner::Global => save_global(&http, old.as_deref(), &key, value).await,
+        Owner::Collection(id) => save_collection_var(&http, *id, old.as_deref(), &key, value).await,
+        Owner::Auto => return,
+    };
+    match result {
+        Ok(()) => {
+            app.status_msg = format!("saved {key}");
+            app.variables_state.editing = false;
+            // Select what was saved.
+            app.variables_state
+                .rows
+                .push(VarRow::Var(owner, key, String::new()));
+            app.variables_state.selected = app.variables_state.rows.len() - 1;
+            app.refresh_variables().await;
         }
+        Err(e) => app.status_msg = format!("save failed: {e}"),
     }
 }
 
@@ -186,43 +317,22 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let header = Paragraph::new(Line::from(vec![
         Span::styled("Variables", accent_style().add_modifier(Modifier::BOLD)),
         Span::styled(
-            "  session variables store   (↑/↓ nav  Ctrl+e edit  Ctrl+n new  Ctrl+x delete)",
+            "  globals, each collection's own, auto   (↑/↓ nav  Enter edit  Ctrl+n new in group  Ctrl+x delete)",
             dim_style(),
         ),
     ]));
     frame.render_widget(header, Rect::new(area.x, area.y, area.width, 1));
-
     let body = Rect::new(
         area.x,
         area.y + 1,
         area.width,
         area.height.saturating_sub(1),
     );
-
     if app.variables_state.editing {
         render_edit(frame, body, app);
-        return;
+    } else {
+        render_list(frame, body, app);
     }
-
-    // Legend for variable types
-    let legend = Paragraph::new(Line::from(vec![
-        Span::styled("⟐ ", muted_style()),
-        Span::styled("auto-stored from tool results   ", dim_style()),
-        Span::styled("▸ ", muted_style()),
-        Span::styled("user-created", dim_style()),
-    ]));
-    frame.render_widget(legend, Rect::new(area.x, area.y + 1, area.width, 1));
-
-    render_list(
-        frame,
-        Rect::new(
-            area.x,
-            area.y + 2,
-            area.width,
-            area.height.saturating_sub(2),
-        ),
-        app,
-    );
 }
 
 fn render_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
@@ -233,106 +343,148 @@ fn render_list(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     };
     let inner = block.inner(area);
     frame.render_widget(block, area);
-
-    if app.variables_state.entries.is_empty() {
-        let line = Line::from("(no variables — press n to add one)");
-        frame.render_widget(Paragraph::new(vec![line]).wrap(Wrap { trim: false }), inner);
+    let state = &mut app.variables_state;
+    if state.rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new("(loading — Ctrl+R refreshes if the bridge is down)"),
+            inner,
+        );
         return;
     }
-
-    let items: Vec<ListItem> = app
-        .variables_state
-        .entries
+    let width = inner.width as usize;
+    let items: Vec<ListItem> = state
+        .rows
         .iter()
-        .take(inner.height as usize)
         .enumerate()
-        .map(|(i, (k, v))| {
-            let is_auto = is_auto_stored_key(k);
-            let style = if i == app.variables_state.selected {
-                selected_style()
-            } else {
-                Style::default()
+        .map(|(i, row)| {
+            let marker = if i == state.selected { "▸ " } else { "  " };
+            let line = match row {
+                VarRow::Heading(_, title) => Line::from(vec![
+                    Span::styled(marker, accent_style()),
+                    Span::styled(title.clone(), muted_style().add_modifier(Modifier::BOLD)),
+                ]),
+                VarRow::Var(owner, k, v) => {
+                    let key = truncate(k, 28);
+                    let room = width.saturating_sub(4 + key.chars().count() + 3);
+                    let value = truncate(&v.replace('\n', " ⏎ "), room);
+                    Line::from(vec![
+                        Span::styled(marker, accent_style()),
+                        Span::styled(
+                            format!("  {key}"),
+                            if *owner == Owner::Auto {
+                                dim_style()
+                            } else {
+                                accent_style()
+                            },
+                        ),
+                        Span::styled(" = ", dim_style()),
+                        Span::styled(
+                            value,
+                            if *owner == Owner::Auto {
+                                dim_style()
+                            } else {
+                                ratatui::style::Style::default()
+                            },
+                        ),
+                    ])
+                }
             };
-            let marker = if is_auto {
-                "⟐ " // Diamond marker for auto-stored variables
-            } else {
-                "▸ "
-            };
-            let key_display = if is_auto {
-                format!("{:>18} ", truncate(k, 18))
-            } else {
-                format!("{:>20} = ", truncate(k, 20))
-            };
-            let value_display = if is_auto {
-                truncate(v, 40)
-            } else {
-                truncate(v, 50)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(marker, accent_style()),
-                Span::styled(
-                    key_display,
-                    if is_auto { muted_style() } else { dim_style() },
-                ),
-                Span::styled(value_display, Style::default()),
-                // Auto-stored indicator
-                if is_auto {
-                    Span::styled(" [auto]", muted_style())
-                } else {
-                    Span::styled("", Style::default())
-                },
-            ]))
-            .style(style)
+            ListItem::new(line)
         })
         .collect();
-
-    let mut state = ListState::default();
-    state.select(Some(app.variables_state.selected));
-    frame.render_stateful_widget(List::new(items), inner, &mut state);
-
-    app.var_list_inner.clone_from(&inner);
+    state.list.select(Some(state.selected));
+    frame.render_stateful_widget(List::new(items), inner, &mut state.list);
+    app.var_list_inner = inner;
 }
 
 fn render_edit(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = if app.variables_state.focused_frame == 0 {
-        focused_panel_block(" Edit variable ")
+    let state = &app.variables_state;
+    let verb = if state.edit_old.is_some() {
+        "Edit"
     } else {
-        panel_block(" Edit variable ")
+        "New"
+    };
+    let title = format!(" {verb} {} variable ", state.edit_title);
+    let block = if state.focused_frame == 0 {
+        focused_panel_block(&title)
+    } else {
+        panel_block(&title)
     };
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let state = &app.variables_state;
     let k_focus = state.edit_field == EditField::Key;
-    let v_focus = state.edit_field == EditField::Value;
-
-    // key label + editor
-    frame.render_widget(
+    let label = |text: &str, on: bool| {
         Paragraph::new(Line::from(Span::styled(
-            "key:",
-            if k_focus { accent_style() } else { dim_style() },
-        ))),
+            text.to_string(),
+            if on { accent_style() } else { dim_style() },
+        )))
+    };
+    frame.render_widget(
+        label("name:", k_focus),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
-    let ta_k = app.variables_state.edit_key_area.clone();
-    frame.render_widget(&ta_k, Rect::new(inner.x, inner.y + 1, inner.width, 1));
-
-    // value label + editor
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "value:",
-            if v_focus { accent_style() } else { dim_style() },
-        ))),
+        &state.edit_key_area,
+        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+    );
+    frame.render_widget(
+        label("value (JSON is stored typed):", !k_focus),
         Rect::new(inner.x, inner.y + 2, inner.width, 1),
     );
-    let ta_v = app.variables_state.edit_value_area.clone();
-    frame.render_widget(&ta_v, Rect::new(inner.x, inner.y + 3, inner.width, 1));
-
-    let help_y = (inner.y + 4).min(inner.y + inner.height.saturating_sub(1));
     frame.render_widget(
-        Paragraph::new(Line::from(
-            "Tab=switch field  Ctrl+v paste  Enter=save  Esc=cancel",
+        &state.edit_value_area,
+        Rect::new(inner.x, inner.y + 3, inner.width, 1),
+    );
+    let help_y = (inner.y + 5).min(inner.y + inner.height.saturating_sub(1));
+    frame.render_widget(
+        Paragraph::new(Line::styled(
+            "Tab switch field  Ctrl+v paste  Enter save  Esc cancel",
+            dim_style(),
         )),
         Rect::new(inner.x, help_y, inner.width, 1),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_group_globals_collections_then_auto() {
+        let global: VariableStore = serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(), "key": "token", "value": "t",
+            "created_at": "2026-10-25T00:00:00Z", "updated_at": "2026-10-25T00:00:00Z"
+        }))
+        .unwrap();
+        let recipe = |name: &str, vars: Value| -> Recipe {
+            serde_json::from_value(serde_json::json!({
+                "id": Uuid::new_v4(), "name": name, "description": null, "steps": [],
+                "variables": vars, "created_at": "2026-10-25T00:00:00Z",
+                "updated_at": "2026-10-25T00:00:00Z", "is_template": false
+            }))
+            .unwrap()
+        };
+        let (b, a) = (
+            recipe("b", serde_json::json!({ "n": 2 })),
+            recipe("a", serde_json::json!({})),
+        );
+        let auto = [("w1:p1".to_string(), serde_json::json!({ "label": "x" }))].into();
+        let rows = var_rows(&[global], &[b.clone(), a.clone()], &auto);
+        assert_eq!(
+            rows,
+            [
+                VarRow::Heading(Owner::Global, "Globals".into()),
+                VarRow::Var(Owner::Global, "token".into(), "t".into()),
+                VarRow::Heading(Owner::Collection(a.id), "Collection · a".into()),
+                VarRow::Heading(Owner::Collection(b.id), "Collection · b".into()),
+                VarRow::Var(Owner::Collection(b.id), "n".into(), "2".into()),
+                VarRow::Heading(
+                    Owner::Auto,
+                    "Auto · live from herdr's panes, read-only".into()
+                ),
+                VarRow::Var(Owner::Auto, "w1:p1".into(), r#"{"label":"x"}"#.into()),
+            ]
+        );
+    }
 }

@@ -627,6 +627,85 @@ pub async fn delete_step(client: &ApiClient, id: Uuid, step_id: &str) -> Result<
     set_steps(client, id, recipe.steps).await
 }
 
+// ── variables ──────────────────────────────────────────────────────────
+// The variables tab edits globals and every collection's own variables;
+// a rename (`old` differs from `key`) drops the old name.
+
+/// Save global `key`, dropping `old` when it was renamed.
+pub async fn save_global(
+    client: &ApiClient,
+    old: Option<&str>,
+    key: &str,
+    value: Value,
+) -> Result<(), String> {
+    let req = crate::SaveVariableRequest {
+        key: key.to_string(),
+        value,
+        ..Default::default()
+    };
+    client
+        .save_variable(&req)
+        .await
+        .map_err(|e| e.to_string())?;
+    match old.filter(|o| *o != key) {
+        Some(old) => client.delete_variable(old).await.map_err(|e| e.to_string()),
+        None => Ok(()),
+    }
+}
+
+/// Save collection `id`'s variable `key`, dropping `old` when it was
+/// renamed; the collection is read fresh so nothing else is clobbered.
+pub async fn save_collection_var(
+    client: &ApiClient,
+    id: Uuid,
+    old: Option<&str>,
+    key: &str,
+    value: Value,
+) -> Result<(), String> {
+    let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
+    if let Some(old) = old {
+        recipe.variables.remove(old);
+    }
+    recipe.variables.insert(key.to_string(), value);
+    set_collection_vars(client, id, recipe.variables).await
+}
+
+/// Remove collection `id`'s variable `key`.
+pub async fn delete_collection_var(client: &ApiClient, id: Uuid, key: &str) -> Result<(), String> {
+    let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
+    recipe.variables.remove(key);
+    set_collection_vars(client, id, recipe.variables).await
+}
+
+async fn set_collection_vars(
+    client: &ApiClient,
+    id: Uuid,
+    variables: HashMap<String, Value>,
+) -> Result<(), String> {
+    let req = UpdateRecipeRequest {
+        variables: Some(variables),
+        ..Default::default()
+    };
+    client
+        .update_recipe(id, &req)
+        .await
+        .map(drop)
+        .map_err(|e| e.to_string())
+}
+
+/// A collection's id, name and variables (name, value as a form shows it).
+pub type CollectionVars = (Uuid, String, Vec<(String, String)>);
+
+/// Every collection with its variables, by collection name.
+pub fn collection_vars(recipes: &[Recipe]) -> Vec<CollectionVars> {
+    let mut out: Vec<_> = recipes
+        .iter()
+        .map(|r| (r.id, r.name.clone(), sorted_vars(&r.variables)))
+        .collect();
+    out.sort_by_key(|c| c.1.to_lowercase());
+    out
+}
+
 // ── builders ───────────────────────────────────────────────────────────
 // The `http_request` endpoint builder and the `llm_call` wizard edit the
 // same raw values the plain form does, so a request can switch between
