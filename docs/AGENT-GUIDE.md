@@ -63,7 +63,20 @@ the run. Steps refer to earlier results and variables with `{{ … }}`:
   global variable.
 
 A step can also `extract` part of its result into a variable for later
-runs. Run state is persisted: a run survives your session, and the user
+runs. A recipe's optional `gate` decides what a full run does after its last
+step: rules are checked in order and the first whose `checks` hold ends the
+run, fails it, or restarts it from step 1 (a loop until some condition):
+
+```json
+"gate": { "rules": [
+  { "checks": [{ "path": "read.text", "op": "missing" }], "then": { "action": "restart", "delay_ms": 2000 } },
+  { "checks": [{ "path": "read.text", "op": "contains", "value": "error" }], "then": { "action": "fail", "message": "agent errored" } },
+  { "then": { "action": "end" } }
+], "max_steps": 200 }
+```
+
+Ops: `eq`, `ne`, `lt`, `gt`, `contains`, `exists`, `missing`. `{{ run.pass }}`
+counts passes; `max_steps` caps the requests one run may execute. Run state is persisted: a run survives your session, and the user
 sees it live in the TUI and web playground.
 
 ### Tools

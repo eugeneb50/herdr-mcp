@@ -452,6 +452,10 @@ pub struct RecipeSaveParams {
     pub triggers: Option<Vec<herdr_mcp_api::RecipeTrigger>>,
     /// Playground folder; "" clears it.
     pub category: Option<String>,
+    /// What a full run does after the last step: rules checked in order,
+    /// the first match decides (end, restart from step 1, or fail). A gate
+    /// with no rules removes it.
+    pub gate: Option<herdr_mcp_api::Gate>,
 }
 
 /// Parameters for `recipe_run`.
@@ -656,6 +660,7 @@ impl HerdrMcpServer {
             is_template: false,
             category: req.category,
             triggers: req.triggers,
+            gate: req.gate.filter(|g| !g.rules.is_empty()),
         };
         self.persistence.save_recipe(&recipe).await?;
         Ok(recipe)
@@ -687,6 +692,9 @@ impl HerdrMcpServer {
         }
         if let Some(category) = req.category {
             recipe.category = Some(category).filter(|c| !c.trim().is_empty());
+        }
+        if let Some(gate) = req.gate {
+            recipe.gate = Some(gate).filter(|g| !g.rules.is_empty());
         }
         recipe.updated_at = chrono::Utc::now();
         self.persistence.save_recipe(&recipe).await?;
@@ -1919,7 +1927,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Recipes"),
-        description = "Save a recipe. Without recipe_id it creates one (name and steps required); with recipe_id the fields given replace the saved ones. Steps run in order and a failing step stops the run; a step's params may use {{ stepId.path }} (an earlier step's result) and {{ var }} (variables). Returns the saved recipe."
+        description = "Save a recipe. Without recipe_id it creates one (name and steps required); with recipe_id the fields given replace the saved ones. Steps run in order and a failing step stops the run; a step's params may use {{ stepId.path }} (an earlier step's result) and {{ var }} (variables). An optional gate decides what a full run does after the last step: its rules are checked in order and the first whose checks hold ends the run, restarts it from step 1 (a loop; {{ run.pass }} counts passes), or fails it; max_steps caps the requests one run may execute. Returns the saved recipe."
     )]
     async fn recipe_save(
         &self,
@@ -1931,6 +1939,7 @@ impl HerdrMcpServer {
             variables,
             triggers,
             category,
+            gate,
         }): Parameters<RecipeSaveParams>,
     ) -> Result<CallToolResult, McpError> {
         let recipe = match recipe_id {
@@ -1943,6 +1952,7 @@ impl HerdrMcpServer {
                     variables,
                     triggers,
                     category,
+                    gate,
                 };
                 self.update_recipe(id, req)
                     .await
@@ -1960,6 +1970,7 @@ impl HerdrMcpServer {
                     variables: variables.unwrap_or_default(),
                     category,
                     triggers: triggers.unwrap_or_default(),
+                    gate,
                 };
                 self.create_recipe(req).await.map_err(to_mcp_err)?
             }
@@ -3195,7 +3206,7 @@ pub(crate) fn resolve_variables(
 /// - `step.text`: the same, explicitly;
 /// - `step.a.b[0].c`: navigated in the step's result, falling back to the
 ///   JSON the tool returned as text (`{{exec.output}}`, `{{spawn.pane_id}}`).
-fn resolve_json_path(
+pub(crate) fn resolve_json_path(
     root: &HashMap<String, serde_json::Value>,
     path: &str,
 ) -> Option<serde_json::Value> {
@@ -4814,6 +4825,7 @@ esac
                 variables: HashMap::new(),
                 category: None,
                 triggers: Vec::new(),
+                gate: None,
             })
             .await
             .unwrap();

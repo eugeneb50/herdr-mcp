@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::RecipeTrigger;
+use crate::{Gate, RecipeTrigger};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
@@ -21,6 +21,9 @@ pub struct Recipe {
     /// herdr events that start a run of this recipe.
     #[serde(default)]
     pub triggers: Vec<RecipeTrigger>,
+    /// What a full run does after the last request (end, restart, fail).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<Gate>,
 }
 
 /// One request in a collection (recipe): a tool call, plus the variables
@@ -109,6 +112,8 @@ pub struct CreateRecipeRequest {
     pub category: Option<String>,
     #[serde(default)]
     pub triggers: Vec<RecipeTrigger>,
+    #[serde(default)]
+    pub gate: Option<Gate>,
 }
 
 /// `PUT /api/recipes/{id}` body — every field optional (partial update).
@@ -121,4 +126,6 @@ pub struct UpdateRecipeRequest {
     pub triggers: Option<Vec<RecipeTrigger>>,
     /// The folder the playground files it under; `""` clears it.
     pub category: Option<String>,
+    /// A gate without rules clears it.
+    pub gate: Option<Gate>,
 }

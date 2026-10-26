@@ -119,6 +119,7 @@ fn Sidebar(recipes: Vec<Recipe>, pick: Signal<Pick>, refresh: Signal<u32>) -> El
                 variables: HashMap::new(),
                 category: None,
                 triggers: Vec::new(),
+                gate: None,
             };
             match client.create_recipe(&req).await {
                 Ok(r) => {
