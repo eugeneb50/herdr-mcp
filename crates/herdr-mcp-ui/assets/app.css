@@ -330,3 +330,20 @@ select.input { appearance: auto; }
 .provider:hover { border-color: rgba(52, 211, 153, 0.4); }
 .provider-sel { border-color: var(--accent); background: rgba(52, 211, 153, 0.08); }
 .provider-name { font-weight: 600; font-size: 0.85rem; margin-bottom: 0.2rem; }
+
+/* Collection gate and run history */
+.gate-rule { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.75rem; margin-bottom: 0.6rem; }
+.gate-rule .btn-row { align-items: center; margin-bottom: 0.5rem; }
+.gate-check { display: grid; grid-template-columns: 2fr auto 2fr auto; gap: 0.5rem; margin-bottom: 0.5rem; align-items: center; }
+.gate-preview { display: block; font-size: 0.75rem; margin-top: 0.35rem; }
+.input-narrow { width: auto; flex: 0 0 auto; }
+.spacer { flex: 1; }
+
+/* Runs */
+.runs { display: grid; grid-template-columns: minmax(16rem, 1fr) 2fr; gap: 1rem; align-items: start; }
+.run-row { display: grid; grid-template-columns: auto 1fr auto; gap: 0.5rem; align-items: center; width: 100%; }
+.run-row .muted { font-size: 0.75rem; }
+.trail { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.75rem; line-height: 1.45; max-height: 70vh; overflow-y: auto; margin: 0; }
+.pill-ok { background: rgba(52,211,153,0.15); color: var(--accent); }
+.pill-live { background: rgba(96,165,250,0.18); color: #93c5fd; }
+@media (max-width: 800px) { .runs { grid-template-columns: 1fr; } .gate-check { grid-template-columns: 1fr 1fr; } }

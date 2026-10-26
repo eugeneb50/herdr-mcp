@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use herdr_mcp_api::{
-    Extract, Gate, GateAction, RecipeStep, RunAction, RunEvent, RunEventKind, RunRecord, RunStatus,
-    StartRunRequest, VarScope,
+    Extract, Gate, GateAction, RecipeStep, RunAction, RunEvent, RunEventKind, RunOrigin, RunRecord,
+    RunStatus, RunTrail, StartRunRequest, VarScope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use crate::server::{
     HerdrMcpServer, dispatch_tool, navigate, resolve_json_path, resolve_variables, step_text,
+    unresolved_placeholders,
 };
 
 /// The immutable start of a run.
@@ -37,6 +38,8 @@ pub struct RunHeader {
     pub session_id: String,
     /// Snapshot of the steps as they were when the run started.
     pub steps: Vec<RecipeStep>,
+    #[serde(default)]
+    pub origin: RunOrigin,
     /// Snapshot of the recipe's gate (none when only some steps run).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gate: Option<Gate>,
@@ -133,6 +136,7 @@ pub fn fold(header: RunHeader, events: &[RunEvent]) -> RunRecord {
         name: header.name,
         session_id: header.session_id,
         steps: header.steps,
+        origin: header.origin,
         gate: header.gate,
         pass: 1,
         status: RunStatus::Running,
@@ -162,7 +166,7 @@ pub fn apply(run: &mut RunRecord, event: &RunEvent) {
                 run.current_step = None;
             }
         }
-        RunEventKind::StepStarted { step } => run.current_step = Some(step.clone()),
+        RunEventKind::StepStarted { step, .. } => run.current_step = Some(step.clone()),
         RunEventKind::StepFinished { step, result } => record_result(run, step, result),
         RunEventKind::StepFailed {
             step,
@@ -183,13 +187,14 @@ pub fn apply(run: &mut RunRecord, event: &RunEvent) {
         RunEventKind::VariableSet { var, value, .. } => {
             run.variables.insert(var.clone(), value.clone());
         }
-        RunEventKind::GateMatched { action, .. } => {
-            if let GateAction::Restart { .. } = action {
+        RunEventKind::GateDecided { action, .. } => {
+            if let Some(GateAction::Restart { .. }) = action {
                 run.pass += 1;
                 run.variables.insert(PASS_VAR.to_string(), run.pass.into());
             }
         }
         RunEventKind::Error { error } => run.error = Some(error.clone()),
+        RunEventKind::PaneSnapshot { .. } => {}
     }
 }
 
@@ -302,16 +307,18 @@ pub enum StartError {
 pub async fn start_run(
     server: &HerdrMcpServer,
     req: StartRunRequest,
+    origin: RunOrigin,
 ) -> Result<(RunRecord, JoinHandle<RunRecord>), StartError> {
-    start_with(server, req, Control::Run).await
+    start_with(server, req, Control::Run, origin).await
 }
 
 pub(crate) async fn start_with(
     server: &HerdrMcpServer,
     req: StartRunRequest,
     initial: Control,
+    origin: RunOrigin,
 ) -> Result<(RunRecord, JoinHandle<RunRecord>), StartError> {
-    let (recipe_id, name, mut steps, mut gate, collection) = match req.recipe_id {
+    let (recipe_id, name, mut steps, mut gate, trail, collection) = match req.recipe_id {
         Some(id) => {
             let recipe = server
                 .persistence
@@ -324,6 +331,7 @@ pub(crate) async fn start_with(
                 Some(recipe.name),
                 recipe.steps,
                 recipe.gate,
+                recipe.trail,
                 recipe.variables,
             )
         }
@@ -332,6 +340,7 @@ pub(crate) async fn start_with(
             req.name,
             req.steps.unwrap_or_default(),
             None,
+            RunTrail::default(),
             HashMap::new(),
         ),
     };
@@ -355,6 +364,7 @@ pub(crate) async fn start_with(
         name,
         session_id,
         steps,
+        origin,
         gate,
         seed,
         started_at: Utc::now(),
@@ -372,6 +382,13 @@ pub(crate) async fn start_with(
         run: fold(header, &[]),
         next_seq: 0,
         steps_run: 0,
+        snapshot_lines: trail.snapshot_lines.unwrap_or_else(|| {
+            let n = server
+                .settings()
+                .number(herdr_mcp_api::settings::SNAPSHOT_LINES);
+            u32::try_from(n).unwrap_or(u32::MAX)
+        }),
+        last_pane: None,
         ctl: rx,
     };
     exec.emit(RunEventKind::Status {
@@ -451,6 +468,74 @@ fn extract_value(result: &Value, path: &str) -> Option<Value> {
     navigate(result, path).or_else(|| navigate(&herdr_mcp_api::tool_payload(result)?, path))
 }
 
+/// Delete the finished runs of `recipe` (`None`: ad-hoc runs, and runs of
+/// deleted recipes) that its retention no longer keeps: beyond the newest
+/// `keep_runs`, or older than `keep_days`. The recipe's own [`RunTrail`]
+/// wins over the global `runs.keep-*` settings; 0 keeps everything.
+pub(crate) async fn prune(server: &HerdrMcpServer, recipe: Option<Uuid>) {
+    if let Err(e) = prune_runs(server, Some(recipe)).await {
+        tracing::warn!("pruning runs of {recipe:?}: {e:#}");
+    }
+}
+
+/// [`prune`] every recipe's runs and the ad-hoc ones (at daemon start, so
+/// `keep_days` applies to collections that no longer run).
+pub async fn prune_all(server: &HerdrMcpServer) {
+    if let Err(e) = prune_runs(server, None).await {
+        tracing::warn!("pruning runs: {e:#}");
+    }
+}
+
+/// Prune one group (`only`) or all of them, reading each run header once.
+async fn prune_runs(server: &HerdrMcpServer, only: Option<Option<Uuid>>) -> anyhow::Result<()> {
+    let store = &server.persistence;
+    let trails: HashMap<Uuid, RunTrail> = store
+        .list_recipes(None)
+        .await?
+        .into_iter()
+        .map(|r| (r.id, r.trail))
+        .collect();
+    // A deleted recipe's runs fall in with the ad-hoc ones.
+    let group_of = |recipe: Option<Uuid>| recipe.filter(|r| trails.contains_key(r));
+    let only = only.map(group_of);
+    let mut groups: HashMap<Option<Uuid>, Vec<(DateTime<Utc>, Uuid)>> = HashMap::new();
+    for id in store.list_run_ids().await? {
+        let Some(header) = store.load_run_header(&id).await? else {
+            continue;
+        };
+        let group = group_of(header.recipe_id);
+        if only.is_some_and(|o| o != group) || server.runs.is_live(id) {
+            continue;
+        }
+        groups
+            .entry(group)
+            .or_default()
+            .push((header.started_at, id));
+    }
+    let global = |key| u32::try_from(server.settings().number(key)).unwrap_or(u32::MAX);
+    for (group, mut runs) in groups {
+        let trail = group
+            .and_then(|id| trails.get(&id).copied())
+            .unwrap_or_default();
+        let keep_runs = trail
+            .keep_runs
+            .unwrap_or_else(|| global(herdr_mcp_api::settings::KEEP_RUNS));
+        let keep_days = trail
+            .keep_days
+            .unwrap_or_else(|| global(herdr_mcp_api::settings::KEEP_DAYS));
+        runs.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+        let cutoff = Utc::now() - chrono::Duration::days(i64::from(keep_days));
+        for (i, (at, id)) in runs.into_iter().enumerate() {
+            let over = keep_runs > 0 && i >= keep_runs as usize;
+            let old = keep_days > 0 && at < cutoff;
+            if over || old {
+                store.delete_run(&id).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A run being executed: its record so far (the fold of what it emitted).
 struct Executor {
     server: HerdrMcpServer,
@@ -458,6 +543,11 @@ struct Executor {
     next_seq: u64,
     /// Steps started so far, every pass counted (for the gate's `max_steps`).
     steps_run: u32,
+    /// Lines of `last_pane` saved when the run fails; 0: none.
+    snapshot_lines: u32,
+    /// The pane the run touched last: a step's `pane_id`, or an agent a
+    /// step returned.
+    last_pane: Option<String>,
     ctl: watch::Receiver<Control>,
 }
 
@@ -483,7 +573,50 @@ impl Executor {
         let status = self.execute_steps().await;
         self.emit(RunEventKind::Status { status }).await;
         self.server.runs.live().remove(&self.run.id);
+        prune(&self.server, self.run.recipe_id).await;
         self.run
+    }
+
+    /// Save the last lines of the pane the run touched last into its log
+    /// (`step`: the step that failed).
+    async fn snapshot(&mut self, step: Option<String>) {
+        let Some(pane) = self.last_pane.clone() else {
+            return;
+        };
+        if self.snapshot_lines == 0 {
+            return;
+        }
+        let args = serde_json::json!({
+            "pane_id": pane,
+            "lines": self.snapshot_lines,
+            "source": "recent",
+        });
+        match dispatch_tool(
+            &self.server,
+            "read_pane",
+            args,
+            crate::security::Origin::Run,
+        )
+        .await
+        {
+            Ok(result) if result.is_error != Some(true) => {
+                let result = serde_json::to_value(&result).unwrap_or_default();
+                let text = herdr_mcp_api::tool_text(&result);
+                self.emit(RunEventKind::PaneSnapshot { step, pane, text })
+                    .await;
+            }
+            Ok(result) => {
+                let result = serde_json::to_value(&result).unwrap_or_default();
+                let error = herdr_mcp_api::tool_text(&result);
+                tracing::warn!("run {}: cannot snapshot pane {pane}: {error}", self.run.id);
+            }
+            Err((code, error)) => {
+                tracing::warn!(
+                    "run {}: cannot snapshot pane {pane}: {code} {error}",
+                    self.run.id
+                );
+            }
+        }
     }
 
     /// Run every step, then follow the gate (again from the first step on a
@@ -497,22 +630,27 @@ impl Executor {
                 return RunStatus::Completed;
             };
             let vars = &self.run.variables;
-            let Some((rule, matched)) = gate.decide(|p| resolve_json_path(vars, p)) else {
-                return RunStatus::Completed;
-            };
-            let action = matched.then.clone();
-            self.emit(RunEventKind::GateMatched {
+            let (rule, checks) = gate.evaluate(|p| resolve_json_path(vars, p));
+            let action = rule.map(|i| gate.rules[i].then.clone());
+            self.emit(RunEventKind::GateDecided {
                 rule,
                 action: action.clone(),
+                checks,
             })
             .await;
             match action {
-                GateAction::End => return RunStatus::Completed,
-                GateAction::Fail { message } => {
-                    self.emit(RunEventKind::Error { error: message }).await;
+                None | Some(GateAction::End) => return RunStatus::Completed,
+                Some(GateAction::Fail { message }) => {
+                    let error = if message.is_empty() {
+                        format!("gate rule {} failed the run", rule.map_or(0, |i| i + 1))
+                    } else {
+                        message
+                    };
+                    self.emit(RunEventKind::Error { error }).await;
+                    self.snapshot(None).await;
                     return RunStatus::Failed;
                 }
-                GateAction::Restart { delay_ms } => {
+                Some(GateAction::Restart { delay_ms }) => {
                     let delay = tokio::time::sleep(std::time::Duration::from_millis(delay_ms));
                     tokio::select! {
                         () = delay => {}
@@ -538,15 +676,27 @@ impl Executor {
                     self.steps_run, self.run.pass
                 );
                 self.emit(RunEventKind::Error { error }).await;
+                self.snapshot(None).await;
                 return Some(RunStatus::Failed);
             }
             self.steps_run += 1;
-            self.emit(RunEventKind::StepStarted {
-                step: step.id.clone(),
-            })
-            .await;
             let mut params = step.params.clone();
             resolve_variables(&mut params, &self.run.variables);
+            let pane = params
+                .get("pane_id")
+                .and_then(Value::as_str)
+                .filter(|p| !p.is_empty() && !p.contains("{{"))
+                .map(str::to_string);
+            if pane.is_some() {
+                self.last_pane.clone_from(&pane);
+            }
+            self.emit(RunEventKind::StepStarted {
+                step: step.id.clone(),
+                params: crate::security::redact(&params),
+                unresolved: unresolved_placeholders(&params),
+                pane,
+            })
+            .await;
             let outcome = tokio::select! {
                 r = dispatch_tool(&self.server, &step.tool, params, crate::security::Origin::Run) => Some(r),
                 () = cancelled(&mut self.ctl) => None,
@@ -556,6 +706,10 @@ impl Executor {
             match outcome {
                 Some(Ok(result)) => {
                     let result = serde_json::to_value(&result).unwrap_or_default();
+                    // An agent a step started is the pane to look at next.
+                    if let Some(p) = tool_payload(&result).get("pane_id").and_then(Value::as_str) {
+                        self.last_pane = Some(p.to_string());
+                    }
                     self.emit(RunEventKind::StepFinished {
                         step: step.clone(),
                         result: result.clone(),
@@ -563,21 +717,23 @@ impl Executor {
                     .await;
                     if let Err(error) = self.extract(def, &result).await {
                         self.emit(RunEventKind::StepFailed {
-                            step,
+                            step: step.clone(),
                             error,
                             status_code: 422,
                         })
                         .await;
+                        self.snapshot(Some(step)).await;
                         return Some(RunStatus::Failed);
                     }
                 }
                 Some(Err((code, error))) => {
                     self.emit(RunEventKind::StepFailed {
-                        step,
+                        step: step.clone(),
                         error,
                         status_code: code.as_u16(),
                     })
                     .await;
+                    self.snapshot(Some(step)).await;
                     return Some(RunStatus::Failed);
                 }
                 None => {
@@ -680,6 +836,22 @@ mod tests {
     use crate::{AgentRegistry, Persistence};
     use std::time::Duration;
 
+    /// Tests start runs as the API would.
+    async fn start_run(
+        server: &HerdrMcpServer,
+        req: StartRunRequest,
+    ) -> Result<(RunRecord, JoinHandle<RunRecord>), StartError> {
+        super::start_run(server, req, RunOrigin::Api).await
+    }
+
+    async fn start_with(
+        server: &HerdrMcpServer,
+        req: StartRunRequest,
+        initial: Control,
+    ) -> Result<(RunRecord, JoinHandle<RunRecord>), StartError> {
+        super::start_with(server, req, initial, RunOrigin::Api).await
+    }
+
     fn test_server(dir: &std::path::Path) -> HerdrMcpServer {
         let data = dir.join("data");
         let registry = AgentRegistry::new(Arc::new(Persistence::new(data.clone())));
@@ -756,6 +928,7 @@ mod tests {
             category: None,
             triggers: Vec::new(),
             gate: None,
+            trail: Default::default(),
         };
         server.persistence.save_recipe(&recipe).await.unwrap();
         recipe.id
@@ -799,11 +972,12 @@ mod tests {
         start_run(server, req).await.unwrap().1.await.unwrap()
     }
 
-    fn gate_events(server_events: &[RunEvent]) -> Vec<(usize, GateAction)> {
-        server_events
+    /// The gate's decisions: the rule matched and its action, if any.
+    fn gate_events(events: &[RunEvent]) -> Vec<Option<(usize, GateAction)>> {
+        events
             .iter()
             .filter_map(|e| match &e.kind {
-                RunEventKind::GateMatched { rule, action } => Some((*rule, action.clone())),
+                RunEventKind::GateDecided { rule, action, .. } => Some(rule.zip(action.clone())),
                 _ => None,
             })
             .collect()
@@ -842,8 +1016,29 @@ mod tests {
         let restart = GateAction::Restart { delay_ms: 1 };
         assert_eq!(
             gate_events(&events),
-            [(0, restart.clone()), (0, restart), (1, GateAction::End)]
+            [
+                Some((0, restart.clone())),
+                Some((0, restart)),
+                Some((1, GateAction::End))
+            ]
         );
+        let first = events
+            .iter()
+            .find_map(|e| match &e.kind {
+                RunEventKind::GateDecided { checks, .. } => Some(checks.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].found, Some("1".into()));
+        assert!(first[0].held);
+        let trail = herdr_mcp_api::trail_text(&done, &events);
+        assert!(trail.contains("gate: rule 1 → restart 1ms"), "{trail}");
+        assert!(
+            trail.contains("rule 1: count.value lt 3 — found \"1\" ✔"),
+            "{trail}"
+        );
+        assert!(trail.contains("gate: rule 2 → end"), "{trail}");
         // The folded log agrees with the live record.
         let header = server
             .persistence
@@ -852,6 +1047,124 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(fold(header, &events), done);
+    }
+
+    /// A step's start records its params as sent (secrets redacted), the
+    /// placeholders nothing resolved, and the pane it targets; the run
+    /// records who started it.
+    #[tokio::test]
+    async fn trail_records_sent_params_and_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let s = RecipeStep {
+            params: serde_json::json!({
+                "session_id": "w1", "key": "k", "value": "{{ nope }} {{ greeting }}",
+                "api_key": "sk-secret", "pane_id": "w1:p9"
+            }),
+            ..step("send", "var_set")
+        };
+        let req = StartRunRequest {
+            variables: HashMap::from([("greeting".into(), "hi".into())]),
+            ..adhoc(vec![s])
+        };
+        let (_, handle) = super::start_run(
+            &server,
+            req,
+            RunOrigin::Agent {
+                pane_id: Some("w1:p2".into()),
+            },
+        )
+        .await
+        .unwrap();
+        let done = handle.await.unwrap();
+        assert_eq!(
+            done.origin,
+            RunOrigin::Agent {
+                pane_id: Some("w1:p2".into())
+            }
+        );
+        let events = server
+            .persistence
+            .load_run_events(&done.id, 0)
+            .await
+            .unwrap();
+        let (params, unresolved, pane) = events
+            .iter()
+            .find_map(|e| match &e.kind {
+                RunEventKind::StepStarted {
+                    params,
+                    unresolved,
+                    pane,
+                    ..
+                } => Some((params.clone(), unresolved.clone(), pane.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(params["value"], "{{ nope }} hi");
+        assert_eq!(params["api_key"], "[redacted]");
+        assert_eq!(unresolved, ["{{ nope }}"]);
+        assert_eq!(pane.as_deref(), Some("w1:p9"));
+        // The header keeps the origin across a reload.
+        assert_eq!(
+            load(&server, done.id).await.unwrap().unwrap().origin,
+            done.origin
+        );
+    }
+
+    /// Retention: a collection's `keep_runs` keeps its newest finished
+    /// runs, `keep_days` drops older ones; with nothing set (the global
+    /// default) every run is kept.
+    #[tokio::test]
+    async fn retention_keeps_runs_per_collection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let store = &server.persistence;
+        async fn count(server: &HerdrMcpServer, recipe: Option<Uuid>) -> usize {
+            let runs = list(server).await.unwrap();
+            runs.iter().filter(|r| r.recipe_id == recipe).count()
+        }
+        for _ in 0..3 {
+            start_run(&server, adhoc(vec![step("a", "list_templates")]))
+                .await
+                .unwrap()
+                .1
+                .await
+                .unwrap();
+        }
+        assert_eq!(count(&server, None).await, 3, "the default keeps every run");
+
+        let id = save_recipe(&server, vec![step("a", "list_templates")], &[]).await;
+        let mut recipe = store.load_recipe(&id).await.unwrap().unwrap();
+        recipe.trail.keep_runs = Some(2);
+        store.save_recipe(&recipe).await.unwrap();
+        for _ in 0..3 {
+            run_recipe(&server, id).await;
+        }
+        assert_eq!(count(&server, Some(id)).await, 2);
+        assert_eq!(count(&server, None).await, 3, "other groups are left alone");
+
+        // An old run of a collection that keeps 5 days goes.
+        recipe.trail = RunTrail {
+            keep_days: Some(5),
+            ..Default::default()
+        };
+        store.save_recipe(&recipe).await.unwrap();
+        let old = RunHeader {
+            id: Uuid::new_v4(),
+            recipe_id: Some(id),
+            name: None,
+            session_id: "w1".into(),
+            steps: vec![],
+            origin: RunOrigin::Schedule,
+            gate: None,
+            seed: HashMap::new(),
+            started_at: Utc::now() - chrono::Duration::days(6),
+        };
+        store.save_run_header(&old).await.unwrap();
+        assert_eq!(count(&server, Some(id)).await, 3);
+        prune_all(&server).await;
+        assert_eq!(count(&server, Some(id)).await, 2);
+        assert!(load(&server, old.id).await.unwrap().is_none());
     }
 
     /// A fail rule fails the run with its message; no rule matching
@@ -894,7 +1207,7 @@ mod tests {
             .load_run_events(&done.id, 0)
             .await
             .unwrap();
-        assert!(gate_events(&events).is_empty());
+        assert_eq!(gate_events(&events), [None]);
     }
 
     /// An endless restart loop fails once the gate's `max_steps` requests
@@ -1267,6 +1580,7 @@ mod tests {
             category: None,
             triggers: Vec::new(),
             gate: None,
+            trail: Default::default(),
         };
         server.persistence.save_recipe(&recipe).await.unwrap();
 
@@ -1309,6 +1623,7 @@ mod tests {
             category: None,
             triggers: Vec::new(),
             gate: None,
+            trail: Default::default(),
         };
         server.persistence.save_recipe(&recipe).await.unwrap();
         let schedule = crate::variables::ScheduledRecipe {
@@ -1388,6 +1703,7 @@ mod tests {
             name: None,
             session_id: "w1".into(),
             steps: vec![],
+            origin: Default::default(),
             gate: None,
             pass: 1,
             status: RunStatus::Running,
@@ -1418,6 +1734,7 @@ mod tests {
             name: None,
             session_id: "w1".into(),
             steps: vec![],
+            origin: Default::default(),
             gate: None,
             seed: HashMap::new(),
             started_at: Utc::now(),

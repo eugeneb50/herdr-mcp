@@ -45,7 +45,10 @@ pub fn spawn(server: HerdrMcpServer, mut events: broadcast::Receiver<HerdrEvent>
                 let Some(req) = triggered_run(&recipe, &event) else {
                     continue;
                 };
-                match crate::runs::start_run(&server, req).await {
+                let origin = herdr_mcp_api::RunOrigin::Trigger {
+                    event: event.event.to_string(),
+                };
+                match crate::runs::start_run(&server, req, origin).await {
                     Ok((run, done)) => {
                         tracing::info!(
                             "{} triggered run {} of recipe {:?}",
@@ -107,6 +110,7 @@ mod tests {
             category: None,
             triggers,
             gate: None,
+            trail: Default::default(),
         }
     }
 
@@ -167,7 +171,9 @@ mod tests {
         }];
         let req = triggered_run(&r, &done_event()).unwrap();
         server.persistence.save_recipe(&r).await.unwrap();
-        let (_, done) = crate::runs::start_run(&server, req).await.unwrap();
+        let (_, done) = crate::runs::start_run(&server, req, herdr_mcp_api::RunOrigin::Api)
+            .await
+            .unwrap();
         let run = done.await.unwrap();
         assert_eq!(run.session_id, "w2");
         assert_eq!(run.variables["herdr"]["agent_status"], "done");

@@ -382,7 +382,7 @@ pub fn fresh_collection_name(recipes: &[Recipe]) -> String {
 /// A send's headline facts: its status, the HTTP status when the request
 /// was `http_request`, and how long the run took (`completed · 200 · 312 ms`).
 pub fn send_summary(run: &RunRecord, step_id: &str) -> String {
-    let mut out = vec![format!("{:?}", run.status).to_lowercase()];
+    let mut out = vec![run.status.as_str().to_string()];
     let http = run
         .steps
         .iter()
@@ -608,6 +608,16 @@ pub async fn add_request(
     });
     set_steps(client, id, recipe.steps).await?;
     Ok(step_id)
+}
+
+/// Focus `pane` in herdr (`herdr_api` `pane.focus`); what to tell the user.
+pub async fn focus_pane(client: &ApiClient, pane: &str) -> Result<String, String> {
+    let args = serde_json::json!({ "method": "pane.focus", "params": { "pane_id": pane } });
+    match client.call_tool(HERDR_API, &args).await {
+        Ok(r) if !crate::tool_is_error(&r) => Ok(format!("focused pane {pane} in herdr")),
+        Ok(r) => Err(crate::tool_text(&r)),
+        Err(e) => Err(format!("cannot focus {pane}: {e}")),
+    }
 }
 
 /// Remove request `step_id` from collection `id`.
@@ -1041,6 +1051,7 @@ mod tests {
                 tool: HTTP_REQUEST.into(),
                 ..Default::default()
             }],
+            origin: Default::default(),
             gate: None,
             pass: 1,
             status: crate::RunStatus::Completed,

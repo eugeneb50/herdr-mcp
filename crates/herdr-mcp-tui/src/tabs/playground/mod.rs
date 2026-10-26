@@ -11,6 +11,7 @@
 //! moves between them; Enter edits a field or presses a button row.
 
 mod events;
+pub mod runs;
 mod view;
 
 pub use events::EventsState;
@@ -20,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use herdr_mcp_api::gate::{DEFAULT_MAX_STEPS, parse_rule, rule_text};
 use herdr_mcp_api::playground::{
     BodyMode, CUSTOM_PROVIDER, HERDR_API, HTTP_METHODS, HTTP_REQUEST, KeyMode, LLM_CALL, Method,
     PROVIDERS, ToolInfo, add_request, delete_step, display_value, event_names, folders,
@@ -29,9 +31,10 @@ use herdr_mcp_api::playground::{
     tool_list, var_name, when_text, with_value,
 };
 use herdr_mcp_api::{
-    ApiClient, CreateRecipeRequest, Extract, InstantiateTemplateRequest, Recipe, RecipeStep,
-    RecipeTemplate, RecipeTrigger, ResolveRequest, RunRecord, RunStatus, StartRunRequest,
-    UpdateRecipeRequest, Uuid, VarScope,
+    ApiClient, Check, CreateRecipeRequest, Extract, Gate, GateAction, GateRule,
+    InstantiateTemplateRequest, Op, Recipe, RecipeStep, RecipeTemplate, RecipeTrigger,
+    ResolveRequest, RunRecord, RunStatus, RunTrail, StartRunRequest, UpdateRecipeRequest, Uuid,
+    VarScope,
 };
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
@@ -47,6 +50,8 @@ pub enum View {
     #[default]
     Collections,
     Events,
+    /// Every run and the picked run's trail.
+    Runs,
 }
 
 /// The panel with keyboard focus.
@@ -74,6 +79,8 @@ pub enum Pick {
 #[derive(Clone, PartialEq, Debug)]
 pub enum TreeRow {
     Globals,
+    /// Every run and its trail.
+    Runs,
     NewCollection,
     FromTemplate,
     Folder(String),
@@ -86,6 +93,7 @@ pub enum TreeRow {
 pub fn tree_rows(recipes: &[Recipe]) -> Vec<TreeRow> {
     let mut rows = vec![
         TreeRow::Globals,
+        TreeRow::Runs,
         TreeRow::NewCollection,
         TreeRow::FromTemplate,
     ];
@@ -101,8 +109,63 @@ pub fn tree_rows(recipes: &[Recipe]) -> Vec<TreeRow> {
     rows
 }
 
-/// A collection's own fields: name, folder, variables, triggers.
-type CollectionFields = (String, String, Vec<(String, String)>, Vec<RecipeTrigger>);
+/// A collection's own fields, saved with Save.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CollectionFields {
+    name: String,
+    folder: String,
+    vars: Vec<(String, String)>,
+    triggers: Vec<RecipeTrigger>,
+    gate: Vec<GateRule>,
+    max_steps: u32,
+    trail: RunTrail,
+}
+
+/// One of a collection's run-history settings (blank: the global one).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TrailField {
+    KeepRuns,
+    KeepDays,
+    SnapshotLines,
+}
+
+impl TrailField {
+    pub const ALL: [TrailField; 3] = [Self::KeepRuns, Self::KeepDays, Self::SnapshotLines];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::KeepRuns => "Keep last runs",
+            Self::KeepDays => "Keep days",
+            Self::SnapshotLines => "Snapshot lines",
+        }
+    }
+
+    /// The global setting a blank field uses.
+    pub fn setting(self) -> &'static str {
+        use herdr_mcp_api::settings::{KEEP_DAYS, KEEP_RUNS, SNAPSHOT_LINES};
+        match self {
+            Self::KeepRuns => KEEP_RUNS,
+            Self::KeepDays => KEEP_DAYS,
+            Self::SnapshotLines => SNAPSHOT_LINES,
+        }
+    }
+
+    pub fn get(self, t: &RunTrail) -> Option<u32> {
+        match self {
+            Self::KeepRuns => t.keep_runs,
+            Self::KeepDays => t.keep_days,
+            Self::SnapshotLines => t.snapshot_lines,
+        }
+    }
+
+    fn set(self, t: &mut RunTrail, v: Option<u32>) {
+        match self {
+            Self::KeepRuns => t.keep_runs = v,
+            Self::KeepDays => t.keep_days = v,
+            Self::SnapshotLines => t.snapshot_lines = v,
+        }
+    }
+}
 
 /// A collection being edited: its own fields, saved with Save. Requests
 /// are saved one by one (from the request editor, or on reorder/delete).
@@ -112,6 +175,10 @@ pub struct CollectionForm {
     pub folder: String,
     pub vars: Vec<(String, String)>,
     pub triggers: Vec<RecipeTrigger>,
+    /// The gate's rules, checked after the last request.
+    pub gate: Vec<GateRule>,
+    pub max_steps: u32,
+    pub trail: RunTrail,
     pub row: usize,
     /// The fields as last opened or saved.
     saved: CollectionFields,
@@ -128,6 +195,9 @@ impl CollectionForm {
             folder: r.category.clone().unwrap_or_default(),
             vars: sorted_vars(&r.variables),
             triggers: r.triggers.clone(),
+            gate: r.gate.as_ref().map(|g| g.rules.clone()).unwrap_or_default(),
+            max_steps: r.gate.as_ref().map_or(DEFAULT_MAX_STEPS, |g| g.max_steps),
+            trail: r.trail,
             row: 0,
             saved: Default::default(),
             confirm_delete: false,
@@ -138,12 +208,15 @@ impl CollectionForm {
     }
 
     fn fields(&self) -> CollectionFields {
-        (
-            self.name.clone(),
-            self.folder.clone(),
-            self.vars.clone(),
-            self.triggers.clone(),
-        )
+        CollectionFields {
+            name: self.name.clone(),
+            folder: self.folder.clone(),
+            vars: self.vars.clone(),
+            triggers: self.triggers.clone(),
+            gate: self.gate.clone(),
+            max_steps: self.max_steps,
+            trail: self.trail,
+        }
     }
 
     /// The fields differ from the saved collection.
@@ -154,11 +227,24 @@ impl CollectionForm {
     pub fn rows(&self, requests: usize) -> Vec<CRow> {
         let mut rows = vec![CRow::Name, CRow::Folder];
         rows.extend((0..requests).map(CRow::Request));
-        rows.extend([CRow::AddRequest, CRow::AddHttp, CRow::AddLlm, CRow::RunAll]);
+        rows.extend([
+            CRow::AddRequest,
+            CRow::AddHttp,
+            CRow::AddLlm,
+            CRow::RunAll,
+            CRow::Runs,
+        ]);
         rows.extend((0..self.vars.len()).map(CRow::Var));
         rows.push(CRow::AddVar);
+        rows.extend((0..self.gate.len()).map(CRow::Gate));
+        rows.push(CRow::AddGate);
+        if !self.gate.is_empty() {
+            rows.push(CRow::MaxSteps);
+        }
         rows.extend((0..self.triggers.len()).map(CRow::Trigger));
-        rows.extend([CRow::AddTrigger, CRow::Save, CRow::Delete]);
+        rows.push(CRow::AddTrigger);
+        rows.extend(TrailField::ALL.map(CRow::Trail));
+        rows.extend([CRow::Save, CRow::Delete]);
         rows
     }
 }
@@ -173,10 +259,16 @@ pub enum CRow {
     AddHttp,
     AddLlm,
     RunAll,
+    /// This collection's runs and their trails.
+    Runs,
     Var(usize),
     AddVar,
+    Gate(usize),
+    AddGate,
+    MaxSteps,
     Trigger(usize),
     AddTrigger,
+    Trail(TrailField),
     Save,
     Delete,
 }
@@ -503,6 +595,9 @@ pub enum Target {
     Folder,
     Var(usize),
     Trigger(usize),
+    Gate(usize),
+    MaxSteps,
+    Trail(TrailField),
     RequestId,
     Description,
     Param(String),
@@ -595,6 +690,7 @@ pub struct PlaygroundState {
     /// again with the same edits discards them.
     discard: Option<String>,
     pub events: EventsState,
+    pub runs: runs::RunsState,
     // Layout from the last draw, for the mouse.
     pub(crate) tree_list: ListState,
     pub(crate) main_list: ListState,
@@ -652,6 +748,12 @@ impl PlaygroundState {
                         Some((Target::Var(i), format!("{k} = {v}")))
                     }
                     CRow::Trigger(i) => Some((Target::Trigger(i), trigger_text(&c.triggers[i]))),
+                    CRow::Gate(i) => Some((Target::Gate(i), rule_text(&c.gate[i]))),
+                    CRow::MaxSteps => Some((Target::MaxSteps, c.max_steps.to_string())),
+                    CRow::Trail(f) => Some((
+                        Target::Trail(f),
+                        f.get(&c.trail).map(|n| n.to_string()).unwrap_or_default(),
+                    )),
                     _ => None,
                 }
             }
@@ -906,6 +1008,7 @@ async fn create_collection(app: &mut App, name: String, steps: Vec<RecipeStep>) 
         category: None,
         triggers: Vec::new(),
         gate: None,
+        trail: Default::default(),
     };
     match http.create_recipe(&req).await {
         Ok(r) => {
@@ -929,7 +1032,10 @@ async fn create_new_collection(app: &mut App) {
 async fn activate_tree(app: &mut App, i: usize) {
     let rows = tree_rows(app.recipes.as_deref().unwrap_or_default());
     let row = rows.get(i).cloned();
-    let leaves = !matches!(row, Some(TreeRow::Globals | TreeRow::Folder(_)) | None);
+    let leaves = !matches!(
+        row,
+        Some(TreeRow::Globals | TreeRow::Runs | TreeRow::Folder(_)) | None
+    );
     if leaves && !may_leave(app) {
         return;
     }
@@ -938,6 +1044,7 @@ async fn activate_tree(app: &mut App, i: usize) {
             app.tab = Tab::Variables;
             app.status_msg = "globals: every request and run sees them".into();
         }
+        Some(TreeRow::Runs) => runs::open(app, None).await,
         Some(TreeRow::NewCollection) => create_new_collection(app).await,
         Some(TreeRow::FromTemplate) => {
             app.playground.overlay = Some(Overlay::Templates { index: 0 });
@@ -963,7 +1070,7 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
     if ctrl && code == KeyCode::Char('e') {
         let pg = &mut app.playground;
         pg.view = match pg.view {
-            View::Collections => View::Events,
+            View::Collections | View::Runs => View::Events,
             View::Events => View::Collections,
         };
         if pg.view == View::Events {
@@ -973,6 +1080,9 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> Res
     }
     if app.playground.view == View::Events {
         return Ok(events::handle_key(&mut app.playground.events, code, mods));
+    }
+    if app.playground.view == View::Runs {
+        return Ok(runs::handle_key(app, code, mods).await);
     }
     match code {
         KeyCode::Tab => {
@@ -1164,6 +1274,12 @@ async fn handle_collection(app: &mut App, code: KeyCode, mods: KeyModifiers) -> 
                     c.triggers.remove(i);
                 }
             }
+            Some(CRow::Gate(i)) => {
+                if let Some(c) = app.playground.collection.as_mut() {
+                    c.gate.remove(i);
+                    c.row = c.row.min(c.rows(requests).len() - 1);
+                }
+            }
             _ => {}
         }
         return true;
@@ -1189,7 +1305,13 @@ async fn handle_collection(app: &mut App, code: KeyCode, mods: KeyModifiers) -> 
         return true;
     }
     match row {
-        CRow::Name | CRow::Folder | CRow::Var(_) | CRow::Trigger(_) => {
+        CRow::Name
+        | CRow::Folder
+        | CRow::Var(_)
+        | CRow::Trigger(_)
+        | CRow::Gate(_)
+        | CRow::MaxSteps
+        | CRow::Trail(_) => {
             if matches!(row, CRow::Trigger(_)) {
                 load_schema(app).await;
             }
@@ -1214,6 +1336,31 @@ async fn handle_collection(app: &mut App, code: KeyCode, mods: KeyModifiers) -> 
         }
         CRow::AddLlm => new_request(app, LLM_CALL, serde_json::json!({ "model": "" })).await,
         CRow::RunAll => run_collection(app),
+        CRow::Runs => runs::open(app, Some(Some(id))).await,
+        CRow::AddGate => {
+            let Some(c) = app.playground.collection.as_mut() else {
+                return true;
+            };
+            // An example to edit; Esc takes it out again.
+            let rule = GateRule {
+                checks: vec![Check {
+                    path: "run.pass".into(),
+                    op: Op::Lt,
+                    value: 3.into(),
+                }],
+                any: false,
+                then: GateAction::Restart { delay_ms: 1000 },
+            };
+            let example = rule_text(&rule);
+            c.gate.push(rule);
+            let i = c.gate.len() - 1;
+            c.row = c
+                .rows(requests)
+                .iter()
+                .position(|r| *r == CRow::Gate(i))
+                .unwrap_or(0);
+            app.playground.begin_add(Target::Gate(i), example);
+        }
         CRow::AddVar | CRow::AddTrigger => {
             if row == CRow::AddTrigger {
                 load_schema(app).await;
@@ -1663,6 +1810,11 @@ fn remove_added(app: &mut App, target: Target) {
                 c.triggers.remove(i);
             }
         }
+        Target::Gate(i) => {
+            if let Some(c) = pg.collection.as_mut() {
+                c.gate.remove(i);
+            }
+        }
         Target::Extract(i) => {
             if let Some(r) = pg.request.as_mut() {
                 r.extract.remove(i);
@@ -1691,6 +1843,36 @@ async fn commit(app: &mut App, target: Target, text: String) {
                 Target::Var(i) => c.vars[i] = parse_var(&text),
                 Target::Trigger(i) => c.triggers[i] = parse_trigger(&text),
                 _ => unreachable!(),
+            }
+        }
+        Target::Gate(_) | Target::MaxSteps | Target::Trail(_) => {
+            let Some(c) = pg.collection.as_mut() else {
+                return;
+            };
+            let text = text.trim();
+            let outcome = match target {
+                Target::Gate(i) => parse_rule(text).map(|rule| c.gate[i] = rule),
+                Target::MaxSteps => match text.parse::<u32>() {
+                    Ok(n) if n > 0 => {
+                        c.max_steps = n;
+                        Ok(())
+                    }
+                    _ => Err(format!("`{text}`: max requests is a whole number above 0")),
+                },
+                Target::Trail(f) if text.is_empty() => {
+                    f.set(&mut c.trail, None);
+                    Ok(())
+                }
+                Target::Trail(f) => text
+                    .parse::<u32>()
+                    .map(|n| f.set(&mut c.trail, Some(n)))
+                    .map_err(|_| {
+                        format!("`{text}`: a whole number, or blank for the global setting")
+                    }),
+                _ => unreachable!(),
+            };
+            if let Err(e) = outcome {
+                pg.err(e);
             }
         }
         Target::RequestId
@@ -2011,6 +2193,12 @@ async fn save_collection(app: &mut App) {
                 .cloned()
                 .collect(),
         ),
+        // No rules clears the gate.
+        gate: Some(Gate {
+            rules: c.gate.clone(),
+            max_steps: c.max_steps,
+        }),
+        trail: Some(c.trail),
         ..Default::default()
     };
     match http.update_recipe(id, &req).await {
@@ -2238,7 +2426,7 @@ pub(crate) async fn finish_job(app: &mut App, job: Job) {
             return;
         }
     };
-    let status = format!("{:?}", run.status).to_lowercase();
+    let status = run.status.as_str().to_string();
     match run.status {
         RunStatus::Completed => pg.ok(status),
         _ => pg.err(run.error.clone().unwrap_or(status)),
@@ -2359,8 +2547,7 @@ fn send_text(run: &RunRecord, step_id: &str, rules: &[Extract], width: usize) ->
 
 /// A collection run: status, then each step's result in step order.
 fn run_text(run: &RunRecord, order: &[String], width: usize) -> Vec<String> {
-    let status = format!("{:?}", run.status).to_lowercase();
-    let mut out = vec![format!("Run · {status}")];
+    let mut out = vec![format!("Run · {}", run.status.as_str())];
     // A failed step shows its own error below.
     let step_failed = run
         .failed_step
@@ -2431,6 +2618,9 @@ fn row_at(area: Rect, state: &ListState, m: &MouseEvent) -> usize {
 pub async fn handle_mouse(app: &mut App, m: MouseEvent) -> bool {
     if app.playground.view == View::Events {
         return events::handle_mouse(&mut app.playground.events, m);
+    }
+    if app.playground.view == View::Runs {
+        return runs::handle_mouse(app, m).await;
     }
     if app.playground.overlay.is_some() || app.playground.editing.is_some() {
         return false;
@@ -2560,6 +2750,7 @@ mod tests {
             rows,
             [
                 TreeRow::Globals,
+                TreeRow::Runs,
                 TreeRow::NewCollection,
                 TreeRow::FromTemplate,
                 TreeRow::Collection(a.id),
@@ -2684,7 +2875,7 @@ mod tests {
     fn a_failed_send_shows_its_error_once_wrapped() {
         let run: RunRecord = serde_json::from_value(serde_json::json!({
             "id": Uuid::nil(), "recipe_id": null, "name": null, "session_id": "w1",
-            "steps": [], "gate": null, "pass": 1, "status": "failed", "current_step": null,
+            "steps": [], "origin": { "kind": "api" }, "gate": null, "pass": 1, "status": "failed", "current_step": null,
             "results": { "get": { "error": "boom boom" } }, "variables": {},
             "failed_step": "get", "error": "boom boom",
             "started_at": "2026-10-24T00:00:00Z", "finished_at": null
@@ -2715,15 +2906,62 @@ mod tests {
         };
         let (a, b) = (mk("b"), mk("c"));
         let mut pg = PlaygroundState {
-            tree: 4,
+            tree: 5,
             ..Default::default()
         };
         // A collection sorting above the picked one arrives.
         pg.follow_tree(&[a.clone(), b.clone()], &[mk("a"), a.clone(), b.clone()]);
-        assert_eq!(pg.tree, 5);
+        assert_eq!(pg.tree, 6);
         // The picked one goes: the pick stays in range.
         pg.follow_tree(&[a.clone(), b.clone()], &[a]);
-        assert_eq!(pg.tree, 3);
+        assert_eq!(pg.tree, 4);
+    }
+
+    /// Gate rules and run-history fields edit as text rows: a rule in the
+    /// shared one-line form, a number or blank (the global setting); a bad
+    /// entry keeps the old value and says why.
+    #[tokio::test]
+    async fn gate_and_trail_rows_edit_as_text() {
+        let mut app = test_app();
+        let recipe: Recipe = serde_json::from_value(serde_json::json!({
+            "id": Uuid::nil(), "name": "c", "description": null, "steps": [],
+            "variables": {}, "created_at": "2026-10-24T00:00:00Z",
+            "updated_at": "2026-10-24T00:00:00Z", "is_template": false
+        }))
+        .unwrap();
+        app.playground.collection = Some(CollectionForm::new(&recipe));
+        app.playground.pick = Pick::Collection(Uuid::nil());
+        let form = app.playground.collection.as_mut().unwrap();
+        form.gate.push(parse_rule("always → end").unwrap());
+        assert!(form.rows(0).contains(&CRow::MaxSteps));
+        commit(
+            &mut app,
+            Target::Gate(0),
+            "read.text missing → restart 2000ms".into(),
+        )
+        .await;
+        commit(&mut app, Target::Trail(TrailField::KeepRuns), "25".into()).await;
+        commit(&mut app, Target::Trail(TrailField::KeepDays), " ".into()).await;
+        commit(&mut app, Target::MaxSteps, "50".into()).await;
+        let form = app.playground.collection.as_ref().unwrap();
+        assert_eq!(
+            rule_text(&form.gate[0]),
+            "read.text missing → restart 2000ms"
+        );
+        assert_eq!(form.trail.keep_runs, Some(25));
+        assert_eq!(form.trail.keep_days, None);
+        assert_eq!(form.max_steps, 50);
+        assert!(form.changed());
+
+        commit(&mut app, Target::Gate(0), "read.text around 3 → end".into()).await;
+        commit(&mut app, Target::Trail(TrailField::KeepRuns), "lots".into()).await;
+        let form = app.playground.collection.as_ref().unwrap();
+        assert_eq!(
+            rule_text(&form.gate[0]),
+            "read.text missing → restart 2000ms"
+        );
+        assert_eq!(form.trail.keep_runs, Some(25));
+        assert!(matches!(&app.playground.msg, Some(Err(m)) if m.contains("lots")));
     }
 
     #[test]

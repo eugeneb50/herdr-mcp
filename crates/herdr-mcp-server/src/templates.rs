@@ -507,6 +507,7 @@ pub fn instantiate(
         category: Some(template.category.clone()),
         triggers: Vec::new(),
         gate: None,
+        trail: Default::default(),
     })
 }
 

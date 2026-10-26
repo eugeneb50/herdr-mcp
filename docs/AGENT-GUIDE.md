@@ -76,7 +76,14 @@ run, fails it, or restarts it from step 1 (a loop until some condition):
 ```
 
 Ops: `eq`, `ne`, `lt`, `gt`, `contains`, `exists`, `missing`. `{{ run.pass }}`
-counts passes; `max_steps` caps the requests one run may execute. Run state is persisted: a run survives your session, and the user
+counts passes; `max_steps` caps the requests one run may execute.
+
+When a run fails, `run_get` with `trail: true` returns its trail as text:
+each step's params as sent, unresolved placeholders, results, variables set,
+which gate rule fired and the values its checks found, and the last lines of
+the pane the run touched last. A recipe's `trail` sets how long its runs are
+kept (`keep_runs`, `keep_days`) and how many pane lines a failure saves
+(`snapshot_lines`); unset fields use the global `runs.*` settings. Run state is persisted: a run survives your session, and the user
 sees it live in the TUI and web playground.
 
 ### Tools

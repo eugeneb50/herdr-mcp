@@ -1970,6 +1970,7 @@ dependencies = [
  "herdr-mcp-api",
  "serde_json",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
 ]
 

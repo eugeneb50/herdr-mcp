@@ -587,6 +587,9 @@ impl App {
             if let Ok(v) = http.list_templates().await {
                 self.templates = Some(v);
             }
+            if self.tab == Tab::Playground && self.playground.view == tabs::playground::View::Runs {
+                tabs::playground::runs::refresh(self).await;
+            }
             if self.config.is_none()
                 && let Ok(c) = http.config().await
             {

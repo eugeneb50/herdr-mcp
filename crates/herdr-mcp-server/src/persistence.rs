@@ -330,6 +330,12 @@ impl Persistence {
             .collect())
     }
 
+    /// Delete a run's header and log.
+    pub async fn delete_run(&self, id: &Uuid) -> anyhow::Result<()> {
+        fs::remove_dir_all(self.run_dir(id)).await?;
+        Ok(())
+    }
+
     /// Ids of every run with a header on disk.
     pub async fn list_run_ids(&self) -> anyhow::Result<Vec<Uuid>> {
         let dir = self.data_dir.join("runs");
@@ -454,6 +460,7 @@ mod tests {
             category: None,
             triggers: Vec::new(),
             gate: None,
+            trail: Default::default(),
         }
     }
 
