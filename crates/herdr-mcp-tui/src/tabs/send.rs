@@ -106,7 +106,7 @@ pub fn render(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let check = if app.send.enter { "[x]" } else { "[ ]" };
     let lines = vec![
         Line::from(vec![
-            Span::styled(format!("{check} press Enter after"), accent_style()),
+            Span::styled(format!("{check} run the command"), accent_style()),
             Span::styled("   Ctrl+t toggle", dim_style()),
         ]),
         Line::from(app.send.msg.clone()),

@@ -521,7 +521,7 @@ keys there. A binding must use Ctrl or Alt (or an F-key), so none of them
 type text or edit a field:
 | Tab | Content |
 |---|---|
-| Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "press Enter after" (`Ctrl+t`); addressed by pane id |
+| Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "run the command" (`Ctrl+t`); addressed by pane id |
 | Overview | Stats, pane table (tab/label/agent/status/cwd) for the shown session (`s` cycles sessions), and the picked pane's text below it: re-read every `intervals.tui-pane-ms` (screen, or scrollback with `r`), scrollable, mouse drag selects (reading pauses while a selection is up), Ctrl+C or right-click Copy copies the selection or the whole text, Esc clears; Tab moves focus between table and text |
 | Playground | Collections, as on the web: a tree of collections (saved recipes) and their requests; edit a request's tool or herdr method, params (resolved preview) and extract rules, Send it (Ctrl+G) or run the collection, pick a result path to extract it; collection variables and triggers; new from a template. HTTP and LLM requests get the endpoint builder and LLM wizard (Alt+Enter for a new line in a body or prompt). Ctrl+E shows herdr's live event stream |
 | Variables | Workspace-scoped variable editor |

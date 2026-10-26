@@ -189,7 +189,7 @@ pub fn Home() -> Element {
                         checked: enter(),
                         onchange: move |_| enter.toggle(),
                     }
-                    span { class: "muted", "press Enter after" }
+                    span { class: "muted", "run the command" }
                 }
                 label { class: "check-row",
                     input {
