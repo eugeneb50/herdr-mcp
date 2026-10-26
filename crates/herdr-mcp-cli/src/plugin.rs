@@ -406,6 +406,9 @@ async fn follow(api: &ApiClient, id: herdr_mcp_api::Uuid) -> Result<()> {
                     action: Some(GateAction::Restart { .. }),
                     ..
                 } => println!("↻ restart"),
+                RunEventKind::ChildStarted { child, name, .. } => {
+                    println!("⇢ {name} (run {child})");
+                }
                 RunEventKind::Error { error } => println!("✘ {error}"),
                 RunEventKind::Status { status } if status.is_finished() => {
                     println!("\n{status:?}");

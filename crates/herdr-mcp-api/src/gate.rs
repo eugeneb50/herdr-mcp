@@ -1,12 +1,15 @@
 //! A collection's end gate: what a run does after its last request.
 //!
 //! The gate is an ordered list of rules; the first whose checks hold decides
-//! (end, restart from the first request, or fail). No rule matching ends the
-//! run as completed. Rules also have a one-line text form ([`rule_text`],
+//! (end, restart from the first request, fail, or run another collection).
+//! No rule matching ends the run as completed. Rules also have a one-line text form ([`rule_text`],
 //! [`parse_rule`]) the UIs edit and the run trail prints.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::playground::display_value;
 
@@ -82,6 +85,14 @@ pub enum GateAction {
     Fail {
         #[serde(default)]
         message: String,
+    },
+    /// Hand off to another saved collection: it runs as a child run, in this
+    /// run's workspace, with its own variables and the globals plus `inputs`
+    /// (placeholders filled from this run). This run ends as the child ends.
+    Run {
+        collection: Uuid,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        inputs: BTreeMap<String, Value>,
     },
 }
 
@@ -233,10 +244,15 @@ impl Op {
     }
 }
 
+/// Saved collections as `(id, name)`: how a `run` action's collection is
+/// named in a rule's text (empty: by id).
+pub type Collections<'a> = &'a [(Uuid, String)];
+
 /// A rule as one line, the form the TUI edits:
 /// `read.text contains "error" or code gt 399 → fail agent errored`,
-/// `run.pass lt 5 → restart 2000ms`, `always → end`.
-pub fn rule_text(rule: &GateRule) -> String {
+/// `run.pass lt 5 → restart 2000ms`, `always → end`,
+/// `found.value exists → run Deploy pane={{list.panes[0].pane_id}}`.
+pub fn rule_text(rule: &GateRule, collections: Collections) -> String {
     let checks = if rule.checks.is_empty() {
         "always".to_string()
     } else {
@@ -252,26 +268,84 @@ pub fn rule_text(rule: &GateRule) -> String {
             .collect::<Vec<_>>()
             .join(if rule.any { " or " } else { " and " })
     };
-    format!("{checks} → {}", action_text(&rule.then))
+    format!("{checks} → {}", action_text(&rule.then, collections))
 }
 
-/// An action as words: `end`, `restart`, `restart 2000ms`, `fail`, `fail <message>`.
-pub fn action_text(action: &GateAction) -> String {
+/// An action as words: `end`, `restart`, `restart 2000ms`, `fail`,
+/// `fail <message>`, `run <collection> [key=value …]`.
+pub fn action_text(action: &GateAction, collections: Collections) -> String {
     match action {
         GateAction::End => "end".into(),
         GateAction::Restart { delay_ms: 0 } => "restart".into(),
         GateAction::Restart { delay_ms } => format!("restart {delay_ms}ms"),
         GateAction::Fail { message } if message.is_empty() => "fail".into(),
         GateAction::Fail { message } => format!("fail {message}"),
+        GateAction::Run { collection, inputs } => {
+            let name = collections
+                .iter()
+                .find(|(id, _)| id == collection)
+                .map_or_else(|| collection.to_string(), |(_, n)| word(n));
+            let inputs = inputs_text(inputs);
+            if inputs.is_empty() {
+                format!("run {name}")
+            } else {
+                format!("run {name} {inputs}")
+            }
+        }
     }
 }
 
+/// A `run`'s inputs as `key=value …`.
+pub fn inputs_text(inputs: &BTreeMap<String, Value>) -> String {
+    inputs
+        .iter()
+        .map(|(k, v)| match v {
+            Value::String(s) => format!("{k}={}", word(s)),
+            v => format!("{k}={v}"),
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The inverse of [`inputs_text`].
+pub fn parse_inputs(text: &str) -> Result<BTreeMap<String, Value>, String> {
+    tokens(text)?
+        .iter()
+        .map(|kv| {
+            let (k, v) = kv
+                .split_once('=')
+                .filter(|(k, _)| !k.is_empty())
+                .ok_or_else(|| format!("`{kv}`: an input is `key=value`"))?;
+            Ok((k.to_string(), word_value(v)))
+        })
+        .collect()
+}
+
+/// `s` as one word of a rule: bare, or a JSON string when it would split
+/// or parse as something else.
+fn word(s: &str) -> String {
+    let bare = !s.is_empty()
+        && !s.contains(|c: char| c.is_whitespace() || c == '"' || c == '→')
+        && serde_json::from_str::<Value>(s).is_err();
+    if bare {
+        s.to_string()
+    } else {
+        Value::from(s).to_string()
+    }
+}
+
+/// A word as a value: JSON when it parses (`3`, `true`, `"a b"`), else text.
+fn word_value(raw: &str) -> Value {
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_string()))
+}
+
 /// The inverse of [`rule_text`]. Values are JSON when they parse as JSON
-/// (`3`, `true`, `"a b"`), else the bare word.
-pub fn parse_rule(text: &str) -> Result<GateRule, String> {
+/// (`3`, `true`, `"a b"`), else the bare word. A `run` names its collection
+/// by name (one of `collections`) or id.
+pub fn parse_rule(text: &str, collections: Collections) -> Result<GateRule, String> {
     let (left, right) = split_arrow(text)
         .ok_or("a rule is `<checks> → <action>`, e.g. `count.value lt 3 → restart 500ms`")?;
-    let then = parse_action(right.trim())?;
+    let then = parse_action(right.trim(), collections)?;
     let words = tokens(left.trim())?;
     if words.is_empty() || matches!(words.as_slice(), [w] if w == "always" || w == "else") {
         return Ok(GateRule {
@@ -299,10 +373,7 @@ pub fn parse_rule(text: &str) -> Result<GateRule, String> {
             (false, []) => Value::Null,
             (false, _) => return Err(format!("`{}` takes no value", op.name())),
             (true, []) => return Err(format!("`{path} {}` needs a value", op.name())),
-            (true, words) => {
-                let raw = words.join(" ");
-                serde_json::from_str(&raw).unwrap_or(Value::String(raw))
-            }
+            (true, words) => word_value(&words.join(" ")),
         };
         checks.push(Check {
             path: path.clone(),
@@ -321,7 +392,7 @@ pub fn parse_rule(text: &str) -> Result<GateRule, String> {
     })
 }
 
-fn parse_action(text: &str) -> Result<GateAction, String> {
+fn parse_action(text: &str, collections: Collections) -> Result<GateAction, String> {
     let (word, rest) = text.split_once(' ').unwrap_or((text, ""));
     let rest = rest.trim();
     match word {
@@ -340,8 +411,38 @@ fn parse_action(text: &str) -> Result<GateAction, String> {
         "fail" => Ok(GateAction::Fail {
             message: rest.to_string(),
         }),
+        "run" => {
+            let (name, inputs) = rest.split_at(
+                tokens(rest)?
+                    .first()
+                    .ok_or("`run` takes a collection: `run Deploy [key=value …]`")?
+                    .len(),
+            );
+            let name = match word_value(name) {
+                Value::String(s) => s,
+                _ => name.to_string(),
+            };
+            let named: Vec<Uuid> = collections
+                .iter()
+                .filter(|(_, n)| *n == name)
+                .map(|(id, _)| *id)
+                .collect();
+            let collection = match (named.as_slice(), name.parse::<Uuid>()) {
+                ([id], _) => *id,
+                ([], Ok(id)) => id,
+                ([], Err(_)) => return Err(format!("no collection named `{name}`")),
+                (_, _) => {
+                    return Err(format!(
+                        "{} collections are named `{name}`; use its id",
+                        named.len()
+                    ));
+                }
+            };
+            let inputs = parse_inputs(inputs)?;
+            Ok(GateAction::Run { collection, inputs })
+        }
         _ => Err(format!(
-            "`{text}`: the action is `end`, `restart [500ms]` or `fail [message]`"
+            "`{text}`: the action is `end`, `restart [500ms]`, `fail [message]` or `run <collection>`"
         )),
     }
 }
@@ -496,13 +597,13 @@ mod tests {
             r#"read.text contains "an error" or code gt 399 → fail agent errored"#,
             r#"a eq "ok" and b ne true and c exists → end"#,
         ] {
-            let rule = parse_rule(text).unwrap_or_else(|e| panic!("{text}: {e}"));
-            assert_eq!(rule_text(&rule), text);
+            let rule = parse_rule(text, &[]).unwrap_or_else(|e| panic!("{text}: {e}"));
+            assert_eq!(rule_text(&rule, &[]), text);
         }
-        let rule = parse_rule("x == ok -> fail").unwrap();
+        let rule = parse_rule("x == ok -> fail", &[]).unwrap();
         assert_eq!(rule.checks[0].value, json!("ok"));
-        assert_eq!(rule_text(&rule), r#"x eq "ok" → fail"#);
-        assert_eq!(parse_rule("else -> end").unwrap().checks, vec![]);
+        assert_eq!(rule_text(&rule, &[]), r#"x eq "ok" → fail"#);
+        assert_eq!(parse_rule("else -> end", &[]).unwrap().checks, vec![]);
         for bad in [
             "x lt 3",
             "x around 3 → end",
@@ -512,7 +613,41 @@ mod tests {
             "x eq 1 → jump",
             r#"x eq "open → end"#,
         ] {
-            assert!(parse_rule(bad).is_err(), "{bad}");
+            assert!(parse_rule(bad, &[]).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn run_names_a_collection_by_name_or_id() {
+        let deploy = Uuid::from_u128(1);
+        let other = Uuid::from_u128(2);
+        let saved = [
+            (deploy, "Deploy it".to_string()),
+            (other, "dup".to_string()),
+            (Uuid::from_u128(3), "dup".to_string()),
+        ];
+        let text =
+            r#"found.value exists → run "Deploy it" msg="a b" n=3 pane={{list.panes[0].pane_id}}"#;
+        let rule = parse_rule(text, &saved).unwrap();
+        let GateAction::Run { collection, inputs } = &rule.then else {
+            panic!("{:?}", rule.then);
+        };
+        assert_eq!(*collection, deploy);
+        assert_eq!(inputs["n"], json!(3));
+        assert_eq!(inputs["pane"], json!("{{list.panes[0].pane_id}}"));
+        assert_eq!(inputs["msg"], json!("a b"));
+        assert_eq!(rule_text(&rule, &saved), text);
+        // Unknown to the lookup: shown and parsed by id.
+        let by_id = rule_text(&rule, &[]);
+        assert!(by_id.contains(&deploy.to_string()), "{by_id}");
+        assert_eq!(parse_rule(&by_id, &[]).unwrap(), rule);
+        for bad in [
+            "always → run",
+            "always → run nope",
+            "always → run dup",
+            "always → run Deploy x",
+        ] {
+            assert!(parse_rule(bad, &saved).is_err(), "{bad}");
         }
     }
 

@@ -65,23 +65,31 @@ the run. Steps refer to earlier results and variables with `{{ … }}`:
 A step can also `extract` part of its result into a variable for later
 runs. A recipe's optional `gate` decides what a full run does after its last
 step: rules are checked in order and the first whose `checks` hold ends the
-run, fails it, or restarts it from step 1 (a loop until some condition):
+run, fails it, restarts it from step 1 (a loop until some condition), or
+hands off to another saved recipe:
 
 ```json
 "gate": { "rules": [
   { "checks": [{ "path": "read.text", "op": "missing" }], "then": { "action": "restart", "delay_ms": 2000 } },
   { "checks": [{ "path": "read.text", "op": "contains", "value": "error" }], "then": { "action": "fail", "message": "agent errored" } },
+  { "checks": [{ "path": "read.text", "op": "contains", "value": "deploy" }], "then": { "action": "run", "collection": "<recipe id>", "inputs": { "pane": "{{ spawn.pane_id }}" } } },
   { "then": { "action": "end" } }
 ], "max_steps": 200 }
 ```
 
 Ops: `eq`, `ne`, `lt`, `gt`, `contains`, `exists`, `missing`. `{{ run.pass }}`
-counts passes; `max_steps` caps the requests one run may execute.
+counts passes; `max_steps` caps the requests one run may execute. `run`
+starts the other recipe as a child run in the same workspace: it sees its
+own variables, the globals and `inputs` (their `{{ }}` filled from this
+run), not this run's variables. This run ends as the child ends (a failed
+child fails it). Handing back to a recipe already up the chain fails; use
+`restart` to loop.
 
 When a run fails, `run_get` with `trail: true` returns its trail as text:
 each step's params as sent, unresolved placeholders, results, variables set,
-which gate rule fired and the values its checks found, and the last lines of
-the pane the run touched last. A recipe's `trail` sets how long its runs are
+which gate rule fired and the values its checks found, the last lines of
+the pane the run touched last, and, indented under it, the trail of the
+child run its gate handed off to. A recipe's `trail` sets how long its runs are
 kept (`keep_runs`, `keep_days`) and how many pane lines a failure saves
 (`snapshot_lines`); unset fields use the global `runs.*` settings. Run state is persisted: a run survives your session, and the user
 sees it live in the TUI and web playground.

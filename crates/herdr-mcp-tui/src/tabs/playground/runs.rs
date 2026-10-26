@@ -3,7 +3,7 @@
 //! of a failure), as in the web playground's Runs tab.
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
-use herdr_mcp_api::{RunAction, RunEvent, RunRecord, RunStatus, Uuid, trail_text};
+use herdr_mcp_api::{RunAction, RunEvent, RunRecord, RunStatus, Uuid};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -17,8 +17,10 @@ use crate::theme::{accent_style, dim_style, muted_style, panel_block, selected_s
 pub struct RunsState {
     /// Newest first.
     pub runs: Vec<RunRecord>,
-    /// The picked run's log, and whose it is.
+    /// The picked run's log and trail (with the trail of the child run its
+    /// gate handed off to), and whose they are.
     pub events: Vec<RunEvent>,
+    pub trail: String,
     events_of: Option<Uuid>,
     /// The picked run among the shown ones.
     pub index: usize,
@@ -121,12 +123,13 @@ async fn load_events(app: &mut App, http: &herdr_mcp_api::ApiClient) {
     if !stale {
         return;
     }
-    if let Ok(events) = http.run_events(id, 0).await {
+    if let (Ok(events), Ok(trail)) = (http.run_events(id, 0).await, http.run_trail(id).await) {
         let state = &mut app.playground.runs;
         if state.events_of != Some(id) {
             state.scroll = 0;
         }
         state.events = events;
+        state.trail = trail;
         state.events_of = Some(id);
     }
 }
@@ -188,15 +191,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let picked = state.picked().cloned();
     let (title, text) = match &picked {
         Some(run) => {
-            let events = if state.events_of == Some(run.id) {
-                state.events.as_slice()
+            let trail = if state.events_of == Some(run.id) {
+                state.trail.clone()
             } else {
-                &[]
+                String::new()
             };
-            (
-                format!(" {} · by {} ", run.summary(), run.origin),
-                trail_text(run, events),
-            )
+            (format!(" {} · by {} ", run.summary(), run.origin), trail)
         }
         None => (" Trail ".into(), String::new()),
     };
@@ -258,8 +258,11 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> boo
         }
         KeyCode::Char('y') => {
             let state = &app.playground.runs;
-            if let Some(run) = state.picked() {
-                let text = trail_text(run, &state.events);
+            if state
+                .picked()
+                .is_some_and(|r| state.events_of == Some(r.id))
+            {
+                let text = state.trail.clone();
                 app.set_clipboard(&text).await;
             }
         }

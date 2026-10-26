@@ -435,6 +435,12 @@ impl ApiClient {
         self.get(&["api", "runs", &id.to_string()]).await
     }
 
+    /// `GET /api/runs/{id}/trail` — the run's trail as text, with the trail
+    /// of the child run its gate handed off to indented under it.
+    pub async fn run_trail(&self, id: Uuid) -> Result<String, ApiError> {
+        Self::send(self.request(Method::GET, &["api", "runs", &id.to_string(), "trail"])).await
+    }
+
     /// `GET /api/runs/{id}/events?since=` — the run's events from `since`
     /// (inclusive). For live updates use the SSE stream `GET /api/events`.
     pub async fn run_events(&self, id: Uuid, since: u64) -> Result<Vec<RunEvent>, ApiError> {

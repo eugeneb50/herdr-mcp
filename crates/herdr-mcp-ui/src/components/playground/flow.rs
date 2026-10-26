@@ -1,11 +1,12 @@
-//! A collection's flow settings: the gate (end / restart / fail after the
-//! last request) and how long its runs are kept.
+//! A collection's flow settings: the gate (end / restart / fail / run
+//! another collection after the last request) and how long its runs are
+//! kept.
 
 use dioxus::prelude::*;
-use herdr_mcp_api::gate::rule_text;
+use herdr_mcp_api::gate::{inputs_text, parse_inputs, rule_text};
 use herdr_mcp_api::playground::{display_value, parse_value};
 use herdr_mcp_api::settings::{KEEP_DAYS, KEEP_RUNS, SNAPSHOT_LINES};
-use herdr_mcp_api::{Check, Gate, GateAction, GateRule, Op, RunTrail};
+use herdr_mcp_api::{Check, Gate, GateAction, GateRule, Op, RunTrail, Uuid};
 use serde_json::Value;
 
 use crate::client::use_api;
@@ -15,14 +16,20 @@ fn action_kind(a: &GateAction) -> &'static str {
         GateAction::End => "end",
         GateAction::Restart { .. } => "restart",
         GateAction::Fail { .. } => "fail",
+        GateAction::Run { .. } => "run",
     }
 }
 
 /// The gate's rules, checked in order after the last request; the first
-/// match ends, restarts or fails the run. `paths` are suggestions for a
-/// check's path (the requests' ids, `run.pass`).
+/// match ends, restarts, fails or hands the run off to one of the other
+/// `collections`. `paths` are suggestions for a check's path (the
+/// requests' ids, `run.pass`).
 #[component]
-pub fn GateEditor(gate: Signal<Gate>, paths: Vec<String>) -> Element {
+pub fn GateEditor(
+    gate: Signal<Gate>,
+    collections: Vec<(Uuid, String)>,
+    paths: Vec<String>,
+) -> Element {
     let rules = gate.read().rules.clone();
     let max_steps = gate.read().max_steps;
     rsx! {
@@ -47,7 +54,14 @@ pub fn GateEditor(gate: Signal<Gate>, paths: Vec<String>) -> Element {
                 }
             }
             for (i, rule) in rules.iter().cloned().enumerate() {
-                GateRuleRow { key: "{i}", gate, index: i, rule, last: i + 1 == rules.len() }
+                GateRuleRow {
+                    key: "{i}",
+                    gate,
+                    index: i,
+                    rule,
+                    last: i + 1 == rules.len(),
+                    collections: collections.clone(),
+                }
             }
             div { class: "btn-row",
                 button {
@@ -86,15 +100,24 @@ pub fn GateEditor(gate: Signal<Gate>, paths: Vec<String>) -> Element {
 }
 
 #[component]
-fn GateRuleRow(gate: Signal<Gate>, index: usize, rule: GateRule, last: bool) -> Element {
+fn GateRuleRow(
+    gate: Signal<Gate>,
+    index: usize,
+    rule: GateRule,
+    last: bool,
+    collections: Vec<(Uuid, String)>,
+) -> Element {
     let i = index;
     let kind = action_kind(&rule.then);
-    let param = match &rule.then {
-        GateAction::End => String::new(),
-        GateAction::Restart { delay_ms } => delay_ms.to_string(),
-        GateAction::Fail { message } => message.clone(),
+    let mut inputs_error = use_signal(|| None::<String>);
+    let (param, target) = match &rule.then {
+        GateAction::End => (String::new(), None),
+        GateAction::Restart { delay_ms } => (delay_ms.to_string(), None),
+        GateAction::Fail { message } => (message.clone(), None),
+        GateAction::Run { collection, inputs } => (inputs_text(inputs), Some(*collection)),
     };
-    let preview = rule_text(&rule);
+    let preview = rule_text(&rule, &collections);
+    let first = collections.first().map(|(id, _)| *id);
     rsx! {
         div { class: "gate-rule",
             div { class: "btn-row",
@@ -190,12 +213,23 @@ fn GateRuleRow(gate: Signal<Gate>, index: usize, rule: GateRule, last: bool) -> 
                         gate.write().rules[i].then = match e.value().as_str() {
                             "restart" => GateAction::Restart { delay_ms: 1000 },
                             "fail" => GateAction::Fail { message: String::new() },
+                            "run" => match first {
+                                Some(collection) => GateAction::Run { collection, inputs: Default::default() },
+                                None => return,
+                            },
                             _ => GateAction::End,
                         };
                     },
                     option { value: "end", selected: kind == "end", "end" }
                     option { value: "restart", selected: kind == "restart", "restart" }
                     option { value: "fail", selected: kind == "fail", "fail" }
+                    option {
+                        value: "run",
+                        selected: kind == "run",
+                        disabled: first.is_none(),
+                        title: "Hand off to another collection: it runs as a child run with its own variables, and this run ends as it ends",
+                        "run collection"
+                    }
                 }
                 match kind {
                     "restart" => rsx! {
@@ -221,8 +255,40 @@ fn GateRuleRow(gate: Signal<Gate>, index: usize, rule: GateRule, last: bool) -> 
                             oninput: move |e| gate.write().rules[i].then = GateAction::Fail { message: e.value() },
                         }
                     },
+                    "run" => rsx! {
+                        select {
+                            class: "input input-narrow",
+                            onchange: move |e| {
+                                if let (Ok(id), GateAction::Run { collection, .. }) = (e.value().parse::<Uuid>(), &mut gate.write().rules[i].then) {
+                                    *collection = id;
+                                }
+                            },
+                            for (id, name) in collections.iter() {
+                                option { value: "{id}", selected: target == Some(*id), "{name}" }
+                            }
+                        }
+                        input {
+                            class: "input mono",
+                            r#type: "text",
+                            placeholder: "inputs: key=value … ({{{{path}}}} reads this run)",
+                            title: "Variables the child run starts with, over its own and the globals; values may use {{{{placeholders}}}} from this run",
+                            value: "{param}",
+                            onchange: move |e| match parse_inputs(&e.value()) {
+                                Ok(parsed) => {
+                                    inputs_error.set(None);
+                                    if let GateAction::Run { inputs, .. } = &mut gate.write().rules[i].then {
+                                        *inputs = parsed;
+                                    }
+                                }
+                                Err(err) => inputs_error.set(Some(err)),
+                            },
+                        }
+                    },
                     _ => rsx! {},
                 }
+            }
+            if let Some(err) = inputs_error() {
+                p { class: "send-status send-error", "{err}" }
             }
             code { class: "mono muted gate-preview", "{preview}" }
         }

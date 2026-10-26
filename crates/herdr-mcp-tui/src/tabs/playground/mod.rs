@@ -668,6 +668,8 @@ impl Job {
 #[derive(Default)]
 pub struct PlaygroundState {
     pub view: View,
+    /// The saved collections as `(id, name)`, for a gate's `run`.
+    pub collections: Vec<(Uuid, String)>,
     pub focus: Focus,
     pub pick: Pick,
     /// Selected tree row.
@@ -712,10 +714,11 @@ impl PlaygroundState {
         self.msg = Some(Err(m.into()));
     }
 
-    /// Keep the tree selection on the same item as the collections change
-    /// from `before` to `after` (a gone item leaves it where it was, in
-    /// range).
+    /// The collections changed from `before` to `after`: keep the tree
+    /// selection on the same item (a gone item leaves it where it was, in
+    /// range) and the names a gate's `run` uses current.
     pub fn follow_tree(&mut self, before: &[Recipe], after: &[Recipe]) {
+        self.collections = herdr_mcp_api::playground::collections(after);
         let picked = tree_rows(before).get(self.tree).cloned();
         let rows = tree_rows(after);
         self.tree = picked
@@ -748,7 +751,9 @@ impl PlaygroundState {
                         Some((Target::Var(i), format!("{k} = {v}")))
                     }
                     CRow::Trigger(i) => Some((Target::Trigger(i), trigger_text(&c.triggers[i]))),
-                    CRow::Gate(i) => Some((Target::Gate(i), rule_text(&c.gate[i]))),
+                    CRow::Gate(i) => {
+                        Some((Target::Gate(i), rule_text(&c.gate[i], &self.collections)))
+                    }
                     CRow::MaxSteps => Some((Target::MaxSteps, c.max_steps.to_string())),
                     CRow::Trail(f) => Some((
                         Target::Trail(f),
@@ -1351,7 +1356,7 @@ async fn handle_collection(app: &mut App, code: KeyCode, mods: KeyModifiers) -> 
                 any: false,
                 then: GateAction::Restart { delay_ms: 1000 },
             };
-            let example = rule_text(&rule);
+            let example = rule_text(&rule, &[]);
             c.gate.push(rule);
             let i = c.gate.len() - 1;
             c.row = c
@@ -1867,7 +1872,7 @@ async fn commit(app: &mut App, target: Target, text: String) {
             };
             let text = text.trim();
             let outcome = match target {
-                Target::Gate(i) => parse_rule(text).map(|rule| c.gate[i] = rule),
+                Target::Gate(i) => parse_rule(text, &pg.collections).map(|rule| c.gate[i] = rule),
                 Target::MaxSteps => match text.parse::<u32>() {
                     Ok(n) if n > 0 => {
                         c.max_steps = n;
@@ -2944,7 +2949,7 @@ mod tests {
         app.playground.collection = Some(CollectionForm::new(&recipe));
         app.playground.pick = Pick::Collection(Uuid::nil());
         let form = app.playground.collection.as_mut().unwrap();
-        form.gate.push(parse_rule("always → end").unwrap());
+        form.gate.push(parse_rule("always → end", &[]).unwrap());
         assert!(form.rows(0).contains(&CRow::MaxSteps));
         commit(
             &mut app,
@@ -2957,7 +2962,7 @@ mod tests {
         commit(&mut app, Target::MaxSteps, "50".into()).await;
         let form = app.playground.collection.as_ref().unwrap();
         assert_eq!(
-            rule_text(&form.gate[0]),
+            rule_text(&form.gate[0], &[]),
             "read.text missing → restart 2000ms"
         );
         assert_eq!(form.trail.keep_runs, Some(25));
@@ -2969,11 +2974,30 @@ mod tests {
         commit(&mut app, Target::Trail(TrailField::KeepRuns), "lots".into()).await;
         let form = app.playground.collection.as_ref().unwrap();
         assert_eq!(
-            rule_text(&form.gate[0]),
+            rule_text(&form.gate[0], &[]),
             "read.text missing → restart 2000ms"
         );
         assert_eq!(form.trail.keep_runs, Some(25));
         assert!(matches!(&app.playground.msg, Some(Err(m)) if m.contains("lots")));
+
+        // A `run` names a collection the playground knows, as listed.
+        let mut deploy = recipe.clone();
+        deploy.id = Uuid::from_u128(7);
+        deploy.name = "Deploy".into();
+        app.playground.follow_tree(&[], &[recipe.clone(), deploy]);
+        commit(&mut app, Target::Gate(0), "always → run Deploy n=2".into()).await;
+        let form = app.playground.collection.as_ref().unwrap();
+        assert_eq!(
+            form.gate[0].then,
+            GateAction::Run {
+                collection: Uuid::from_u128(7),
+                inputs: [("n".to_string(), 2.into())].into(),
+            }
+        );
+        assert_eq!(
+            rule_text(&form.gate[0], &app.playground.collections),
+            "always → run Deploy n=2"
+        );
     }
 
     #[test]

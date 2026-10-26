@@ -453,8 +453,9 @@ pub struct RecipeSaveParams {
     /// Playground folder; "" clears it.
     pub category: Option<String>,
     /// What a full run does after the last step: rules checked in order,
-    /// the first match decides (end, restart from step 1, or fail). A gate
-    /// with no rules removes it.
+    /// the first match decides (end, restart from step 1, fail, or run
+    /// another recipe as a child run and end as it ends). A gate with no
+    /// rules removes it.
     pub gate: Option<herdr_mcp_api::Gate>,
     /// How long this recipe's runs are kept (`keep_runs` newest, or
     /// `keep_days`) and the pane lines a failed run saves
@@ -1942,7 +1943,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Recipes"),
-        description = "Save a recipe. Without recipe_id it creates one (name and steps required); with recipe_id the fields given replace the saved ones. Steps run in order and a failing step stops the run; a step's params may use {{ stepId.path }} (an earlier step's result) and {{ var }} (variables). An optional gate decides what a full run does after the last step: its rules are checked in order and the first whose checks hold ends the run, restarts it from step 1 (a loop; {{ run.pass }} counts passes), or fails it; max_steps caps the requests one run may execute. Returns the saved recipe."
+        description = "Save a recipe. Without recipe_id it creates one (name and steps required); with recipe_id the fields given replace the saved ones. Steps run in order and a failing step stops the run; a step's params may use {{ stepId.path }} (an earlier step's result) and {{ var }} (variables). An optional gate decides what a full run does after the last step: its rules are checked in order and the first whose checks hold ends the run, restarts it from step 1 (a loop; {{ run.pass }} counts passes), fails it, or hands off to another saved recipe (action run, with collection = its id and optional inputs whose {{ }} fill from this run): the other recipe runs as a child run with its own variables, and this run ends as the child ends; max_steps caps the requests one run may execute. Returns the saved recipe."
     )]
     async fn recipe_save(
         &self,
@@ -2051,7 +2052,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Recipes"),
-        description = "Get a run's record: status (running, paused, completed, failed, cancelled, interrupted), each step's state and result, and the error of a failed step. With trail: true, the run's trail as text instead: each event with its time, the params each step sent, why the gate chose its rule, and a snapshot of the pane a failed run last used."
+        description = "Get a run's record: status (running, paused, completed, failed, cancelled, interrupted), each step's state and result, and the error of a failed step. With trail: true, the run's trail as text instead: each event with its time, the params each step sent, why the gate chose its rule, a snapshot of the pane a failed run last used, and, indented under it, the trail of the child run the gate handed off to."
     )]
     async fn run_get(
         &self,
@@ -2063,14 +2064,11 @@ impl HerdrMcpServer {
             .map_err(to_mcp_err)?
             .ok_or_else(|| user_err(format!("no run {run_id}")))?;
         if trail {
-            let events = self
-                .persistence
-                .load_run_events(&id, 0)
+            let text = crate::runs::trail(self, id)
                 .await
-                .map_err(to_mcp_err)?;
-            return Ok(CallToolResult::success(vec![Content::text(
-                herdr_mcp_api::trail_text(&run, &events),
-            )]));
+                .map_err(to_mcp_err)?
+                .unwrap_or_default();
+            return Ok(CallToolResult::success(vec![Content::text(text)]));
         }
         Ok(CallToolResult::success(vec![
             Content::json(run).map_err(to_mcp_err)?,
@@ -2857,6 +2855,7 @@ fn http_router(server: HerdrMcpServer, web_dir: Option<&std::path::Path>, bind: 
         .route("/api/runs", get(list_runs_handler).post(start_run_handler))
         .route("/api/runs/{id}", get(get_run_handler))
         .route("/api/runs/{id}/events", get(run_events_handler))
+        .route("/api/runs/{id}/trail", get(run_trail_handler))
         .route("/api/runs/{id}/{action}", post(control_run_handler))
         .route("/api/events", get(events_handler))
         .route("/api/profiles", get(list_profiles_handler))
@@ -3189,16 +3188,12 @@ pub(crate) async fn dispatch_tool(
 /// registry for `session_id` so `{{pane_id.output}}` and `{{role.output}}`
 /// resolve to another agent's captured work product.
 fn start_error_to_http(e: crate::runs::StartError) -> (StatusCode, String) {
-    match e {
-        crate::runs::StartError::RecipeNotFound => {
-            (StatusCode::NOT_FOUND, "Recipe not found".to_string())
-        }
-        crate::runs::StartError::UnknownStep(id) => (
-            StatusCode::BAD_REQUEST,
-            format!("the recipe has no step `{id}`"),
-        ),
-        crate::runs::StartError::Persist(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    }
+    let code = match e {
+        crate::runs::StartError::RecipeNotFound => StatusCode::NOT_FOUND,
+        crate::runs::StartError::UnknownStep(_) => StatusCode::BAD_REQUEST,
+        crate::runs::StartError::Persist(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (code, e.to_string())
 }
 
 /// A `{{ path }}` placeholder.
@@ -3627,6 +3622,18 @@ async fn get_run_handler(
     Path(id): Path<uuid::Uuid>,
 ) -> Result<Json<herdr_mcp_api::RunRecord>, (StatusCode, String)> {
     load_run(&server, id).await.map(Json)
+}
+
+/// `GET /api/runs/{id}/trail` — the run's trail as text, the trail of the
+/// child run its gate handed off to indented under it.
+async fn run_trail_handler(
+    State(AppState { server, .. }): State<AppState>,
+    Path(id): Path<uuid::Uuid>,
+) -> Result<String, (StatusCode, String)> {
+    crate::runs::trail(&server, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")))?
+        .ok_or((StatusCode::NOT_FOUND, format!("no run {id}")))
 }
 
 /// `POST /api/runs/{id}/{pause|resume|cancel}` — 204; 404 unknown run;

@@ -136,6 +136,10 @@ pub enum RunOrigin {
     },
     /// A step of another run (`recipe_run`).
     Run,
+    /// The gate of run `run_id` handed off to this collection (`run`).
+    Gate {
+        run_id: Uuid,
+    },
     Schedule,
     /// A herdr event matched one of the recipe's triggers.
     Trigger {
@@ -150,6 +154,7 @@ impl std::fmt::Display for RunOrigin {
             Self::Agent { pane_id: Some(p) } => write!(f, "an agent in pane {p}"),
             Self::Agent { pane_id: None } => f.write_str("an agent"),
             Self::Run => f.write_str("another run"),
+            Self::Gate { run_id } => write!(f, "the gate of run {run_id}"),
             Self::Schedule => f.write_str("a schedule"),
             Self::Trigger { event } => write!(f, "herdr event {event}"),
         }
@@ -218,6 +223,8 @@ pub struct RunEvent {
     pub kind: RunEventKind,
 }
 
+/// What happened. [`RunEvent`] flattens it, so no variant may have a field
+/// named `run_id`, `seq`, `at` or `type` (the line would not read back).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RunEventKind {
@@ -257,8 +264,16 @@ pub enum RunEventKind {
         action: Option<GateAction>,
         checks: Vec<CheckResult>,
     },
-    /// The last lines of `pane` (as many as the trail's `snapshot_lines`) when the run failed (`step`: the
-    /// failed step; none for a gate failure).
+    /// The gate's `run` started run `child` of `collection` (`name`); this
+    /// run ends as that one ends. Its trail is its own run's.
+    ChildStarted {
+        child: Uuid,
+        collection: Uuid,
+        name: String,
+    },
+    /// The last lines of `pane` (as many as the trail's `snapshot_lines`)
+    /// when the run failed (`step`: the failed step; none for a gate
+    /// failure).
     PaneSnapshot {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         step: Option<String>,
@@ -311,6 +326,16 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
         run.origin,
         run.pass
     );
+    // A `run` action names its collection as the child run it started did.
+    let collections: Vec<(Uuid, String)> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            RunEventKind::ChildStarted {
+                collection, name, ..
+            } => Some((*collection, name.clone())),
+            _ => None,
+        })
+        .collect();
     let tool = |step: &str| {
         run.steps
             .iter()
@@ -395,7 +420,8 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
             } => {
                 let decided = match (rule, action) {
                     (Some(rule), Some(action)) => {
-                        format!("rule {} → {}", rule + 1, crate::gate::action_text(action))
+                        let action = crate::gate::action_text(action, &collections);
+                        format!("rule {} → {action}", rule + 1)
                     }
                     _ => "no rule matched → end".to_string(),
                 };
@@ -423,6 +449,9 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
                 }
             }
             RunEventKind::Error { error } => line(&mut out, "✘", error),
+            RunEventKind::ChildStarted { child, name, .. } => {
+                line(&mut out, "⇢", &format!("{name} · run {child}"));
+            }
             RunEventKind::PaneSnapshot { step, pane, text } => {
                 let of = step
                     .as_deref()
