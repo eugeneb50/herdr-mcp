@@ -3,7 +3,7 @@
 
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
-use herdr_mcp_api::{RunAction, RunEvent, RunRecord, RunStatus, Uuid, trail_text};
+use herdr_mcp_api::{RunAction, RunEvent, RunRecord, RunStatus, Uuid};
 
 use crate::client::use_api;
 
@@ -79,7 +79,7 @@ pub fn Runs() -> Element {
 
     rsx! {
         p { class: "field-desc",
-            "Every run of a collection, request send, schedule or trigger, newest first. Pick one to read its trail: what each request sent and got, why the gate chose its rule, errors, and the last lines of the pane a failed run used. How long runs are kept is set per collection (Run history) or in Settings › runs."
+            "Every run of a collection, request send, schedule or trigger, newest first. Pick one to read its trail: what each request sent and got, why the gate chose its rule, errors, the last lines of the pane a failed run used, and, indented under it, the trail of the collection its gate handed off to. How long runs are kept is set per collection (Run history) or in Settings › runs."
         }
         div { class: "btn-row",
             select {
@@ -134,15 +134,20 @@ fn RunDetail(run: RunRecord) -> Element {
     let client = use_api();
     let id = run.id;
     let mut events: Signal<Vec<RunEvent>> = use_signal(Vec::new);
+    // With the trail of the child run its gate handed off to.
+    let mut trail = use_signal(String::new);
     let mut msg: Signal<Option<Result<String, String>>> = use_signal(|| None);
 
     // Re-read the log until it ends (a finished run's log never changes).
     use_future(move || async move {
         let client = client();
         loop {
-            if let Ok(list) = client.run_events(id, 0).await {
+            if let (Ok(list), Ok(text)) =
+                (client.run_events(id, 0).await, client.run_trail(id).await)
+            {
                 let done = list.iter().any(|e| e.kind.is_terminal());
                 events.set(list);
+                trail.set(text);
                 if done {
                     break;
                 }
@@ -152,7 +157,7 @@ fn RunDetail(run: RunRecord) -> Element {
     });
 
     let list = events.read().clone();
-    let trail = trail_text(&run, &list);
+    let trail = trail();
     let pane = run.pane(&list);
     let live = !run.status.is_finished();
 

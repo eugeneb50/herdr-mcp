@@ -364,6 +364,15 @@ pub fn tool_label(step: &RecipeStep) -> String {
 
 const NEW_COLLECTION: &str = "New collection";
 
+/// The saved collections as `(id, name)`: what a gate's `run` names.
+pub fn collections(recipes: &[Recipe]) -> Vec<(Uuid, String)> {
+    recipes
+        .iter()
+        .filter(|r| !r.is_template)
+        .map(|r| (r.id, r.name.clone()))
+        .collect()
+}
+
 /// `New collection`, numbered past the collections already named so.
 pub fn fresh_collection_name(recipes: &[Recipe]) -> String {
     let taken = recipes

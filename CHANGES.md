@@ -4,6 +4,17 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Gates hand off to other collections.** A gate rule's new `run` action
+  starts another saved collection as a child run in the same workspace:
+  isolated (its own variables and the globals, plus `inputs` whose `{{ }}`
+  fill from the parent), with pause, resume and cancel passed down, and the
+  parent ending as the child ends. Chains stack like blocks (A → B → C);
+  handing back to a collection already up the chain fails (`restart` is
+  the loop). The trail shows the hand-off, the child's trail is nested
+  under the parent's in `run_get` trail, the new
+  `GET /api/runs/{id}/trail` and both Runs views, and the child says which
+  run started it. In the TUI: `found.value exists → run Deploy pane={{x}}`;
+  on the web: "run collection" in a rule's action.
 - **Runs view and flow editors.** The web playground has a Runs tab and the
   TUI's tree a Runs row: every run, newest first, filtered by collection or
   failed only, and the picked run's trail. Copy the trail, open the pane it

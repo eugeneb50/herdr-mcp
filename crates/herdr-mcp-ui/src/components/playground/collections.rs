@@ -16,10 +16,11 @@ use super::recipes::{RunResults, TemplateForm, TriggerEditor};
 use crate::client::use_api;
 use crate::components::variables::{GlobalsTable, user_entries};
 use herdr_mcp_api::playground::{
-    HERDR_API, HTTP_REQUEST, LLM_CALL, ToolInfo, add_request, delete_step, display_value, folders,
-    fresh_collection_name, method_groups, methods, parse_value, raw_values, request_method,
-    request_params, request_schema, request_values, result_paths, save_collection_var, save_step,
-    send_summary, set_steps, sorted_vars, tool_groups, tool_label, tool_list, var_name,
+    HERDR_API, HTTP_REQUEST, LLM_CALL, ToolInfo, add_request, collections, delete_step,
+    display_value, folders, fresh_collection_name, method_groups, methods, parse_value, raw_values,
+    request_method, request_params, request_schema, request_values, result_paths,
+    save_collection_var, save_step, send_summary, set_steps, sorted_vars, tool_groups, tool_label,
+    tool_list, var_name,
 };
 use herdr_mcp_api::{
     CreateRecipeRequest, Extract, Recipe, RecipeStep, RecipeTemplate, ResolveRequest, RunRecord,
@@ -78,7 +79,15 @@ pub fn Collections() -> Element {
                     },
                     Pick::Globals => rsx! { GlobalsView {} },
                     Pick::Collection(id) => match find(id) {
-                        Some(recipe) => rsx! { CollectionView { key: "{id}", recipe, pick, refresh } },
+                        Some(recipe) => rsx! {
+                            CollectionView {
+                                key: "{id}",
+                                recipe,
+                                collections: collections(&list).into_iter().filter(|(c, _)| *c != id).collect::<Vec<_>>(),
+                                pick,
+                                refresh,
+                            }
+                        },
                         None => rsx! { p { class: "muted", "That collection is gone." } },
                     },
                     Pick::Request(id, step) => match find(id) {
@@ -261,7 +270,12 @@ fn GlobalsView() -> Element {
 }
 
 #[component]
-fn CollectionView(recipe: Recipe, pick: Signal<Pick>, refresh: Signal<u32>) -> Element {
+fn CollectionView(
+    recipe: Recipe,
+    collections: Vec<(Uuid, String)>,
+    pick: Signal<Pick>,
+    refresh: Signal<u32>,
+) -> Element {
     let client = use_api();
     let id = recipe.id;
     let mut name = use_signal(|| recipe.name.clone());
@@ -510,6 +524,7 @@ fn CollectionView(recipe: Recipe, pick: Signal<Pick>, refresh: Signal<u32>) -> E
         }
         GateEditor {
             gate,
+            collections,
             paths: steps
                 .iter()
                 .map(|s| s.id.clone())

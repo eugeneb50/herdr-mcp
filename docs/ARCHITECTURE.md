@@ -300,6 +300,7 @@ Both go through `clipboard.rs` (see §14.6).
 | `GET` | `/api/herdr/sessions` | `herdr_sessions_handler` | `SessionsResponse`: every named herdr session, `current` = the bridge's |
 | `GET` | `/api/herdr/panes?session=&workspace_id=&tab_id=&agent_status=&focused=&label=` | `herdr_panes_handler` | `PanesResponse`, filtered like `list_panes`; 502 for an unknown or stopped session |
 | `POST` | `/api/runs` | `start_run_handler` | Start a run; `?wait=true` waits for the final record; `variables` add to the run's scope |
+| `GET` | `/api/runs/{id}/trail` | `run_trail_handler` | The run's trail as text, the trail of the child run its gate handed off to indented under it |
 | `GET` | `/api/herdr/events` | `herdr_events_handler` | SSE: herdr's live event stream (`HerdrEvent` per message) |
 
 ### 5.2 Recipe CRUD Routes
@@ -431,7 +432,8 @@ fails the step.
 4. After the last step, the recipe's gate (if any; skipped when only
    `step_ids` run) picks its first matching rule (gate_decided):
    end → completed, fail → `error` (its message, or the rule that failed)
-   + failed, restart → `pass` + 1 and back to 3 after `delay_ms`. No match completes the run.
+   + failed, restart → `pass` + 1 and back to 3 after `delay_ms`, run →
+   hand off (below). No match completes the run.
 5. The event log is the run; RunRecord is its fold
 ```
 
@@ -463,15 +465,31 @@ like a `{{ path }}` placeholder in the run's scope and compares it with
 number from 1. A gated run executes at most `max_steps` requests (default
 1000, every pass counted), then fails. Restart loops run in the one
 executor task: no recursion, and cancel interrupts a restart delay.
+
+**Hand-off** (`Executor::hand_off`): a `run` action starts the other saved
+collection as a child run (`start_with`, origin `gate` + this run's id) in
+this run's workspace, its scope built like any run's (its own variables,
+globals) plus `inputs` with their `{{ }}` filled from this run. The parent
+records `child_started`, forwards pause / resume / cancel to the child
+while it waits, and ends with the child's status (a failed child's error,
+prefixed with its name, becomes the parent's). Before starting it walks
+the `gate` origins up (`ancestors`): a collection already in the chain
+fails the run, so hand-offs can't nest forever (`restart` is the loop).
+`start_child` boxes the start as a `Send` future so the recursion has a
+type to stop at. `runs::trail` (`run_get` trail, `GET /api/runs/{id}/trail`)
+prints a run's trail with each child's indented under it.
 `gate::rule_text` / `parse_rule` give a rule a one-line form
 (`code gt 399 or read.text contains "error" → fail msg`, `always → end`):
 the web's gate editor previews it under each rule, the TUI edits rules as
-that text, and the trail prints decisions with it.
+that text, and the trail prints decisions with it. A `run` names its
+collection by name (`playground::collections` gives the UIs the list) or
+id, then `key=value` inputs (`inputs_text` / `parse_inputs`).
 
 **Runs view.** Both playgrounds have a Runs view (web: the Runs tab,
 `playground/runs.rs`; TUI: the tree's Runs row, `tabs/playground/runs.rs`):
 the run list, newest first, filtered by collection or failed only, and the
-picked run's `trail_text`, re-read until the run ends. From there: copy the
+picked run's trail (`/api/runs/{id}/trail`, so a hand-off's child trail is
+included), re-read until the run ends. From there: copy the
 trail, focus the pane it last used in herdr (`herdr_api` `pane.focus`), run
 it again (`RunRecord::rerun`) or cancel it. The collection editor has the
 gate (`playground/flow.rs` on the web) and the run history fields.

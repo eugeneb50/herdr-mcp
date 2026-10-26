@@ -9,7 +9,7 @@ description = "Wire contract for the herdr-mcp HTTP bridge: shared types + typed
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-schemars = { workspace = true }
+schemars = { workspace = true, features = ["uuid1"] }
 chrono = { version = "0.4", default-features = false, features = ["serde", "std"] }
 uuid = { version = "1", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json"] }

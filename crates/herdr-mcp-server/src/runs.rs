@@ -9,7 +9,7 @@
 //! and the broadcast that carries new events to `/api/events`; a log without
 //! a terminal event and without a live run reads as `interrupted`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
@@ -93,11 +93,17 @@ impl Runs {
     /// Pause takes effect at the next step boundary; cancel also aborts the
     /// step in flight.
     pub fn control(&self, id: Uuid, action: RunAction) -> bool {
-        let control = match action {
-            RunAction::Pause => Control::Pause,
-            RunAction::Resume => Control::Run,
-            RunAction::Cancel => Control::Cancel,
-        };
+        self.set(
+            id,
+            match action {
+                RunAction::Pause => Control::Pause,
+                RunAction::Resume => Control::Run,
+                RunAction::Cancel => Control::Cancel,
+            },
+        )
+    }
+
+    fn set(&self, id: Uuid, control: Control) -> bool {
         self.live().get(&id).is_some_and(|tx| {
             // Cancel is final: a later pause/resume must not undo it.
             tx.send_if_modified(|c| {
@@ -194,7 +200,7 @@ pub fn apply(run: &mut RunRecord, event: &RunEvent) {
             }
         }
         RunEventKind::Error { error } => run.error = Some(error.clone()),
-        RunEventKind::PaneSnapshot { .. } => {}
+        RunEventKind::PaneSnapshot { .. } | RunEventKind::ChildStarted { .. } => {}
     }
 }
 
@@ -294,6 +300,9 @@ pub fn event_stream(
     }
 }
 
+/// A started run's first record and the handle resolving to its last.
+type Started = Result<(RunRecord, JoinHandle<RunRecord>), StartError>;
+
 #[derive(Debug)]
 pub enum StartError {
     RecipeNotFound,
@@ -302,13 +311,23 @@ pub enum StartError {
     Persist(anyhow::Error),
 }
 
+impl std::fmt::Display for StartError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RecipeNotFound => f.write_str("Recipe not found"),
+            Self::UnknownStep(id) => write!(f, "the recipe has no step `{id}`"),
+            Self::Persist(e) => write!(f, "{e:#}"),
+        }
+    }
+}
+
 /// Start a run in the background. Returns its first record (already
 /// persisted) and a handle resolving to the final record.
 pub async fn start_run(
     server: &HerdrMcpServer,
     req: StartRunRequest,
     origin: RunOrigin,
-) -> Result<(RunRecord, JoinHandle<RunRecord>), StartError> {
+) -> Started {
     start_with(server, req, Control::Run, origin).await
 }
 
@@ -317,7 +336,7 @@ pub(crate) async fn start_with(
     req: StartRunRequest,
     initial: Control,
     origin: RunOrigin,
-) -> Result<(RunRecord, JoinHandle<RunRecord>), StartError> {
+) -> Started {
     let (recipe_id, name, mut steps, mut gate, trail, collection) = match req.recipe_id {
         Some(id) => {
             let recipe = server
@@ -397,6 +416,47 @@ pub(crate) async fn start_with(
     .await;
     let first = exec.run.clone();
     Ok((first, tokio::spawn(exec.execute())))
+}
+
+/// A run's trail ([`herdr_mcp_api::trail_text`]) with, indented under it,
+/// the trail of the child run its gate handed off to, and so on down.
+/// `None`: no such run.
+pub async fn trail(server: &HerdrMcpServer, id: Uuid) -> anyhow::Result<Option<String>> {
+    let mut out = String::new();
+    let mut next = Some(id);
+    let mut indent = String::new();
+    while let Some(id) = next.take() {
+        let Some(run) = load(server, id).await? else {
+            // ponytail: a pruned child just ends the chain.
+            break;
+        };
+        let events = server.persistence.load_run_events(&id, 0).await?;
+        next = events.iter().find_map(|e| match e.kind {
+            RunEventKind::ChildStarted { child, .. } => Some(child),
+            _ => None,
+        });
+        if !indent.is_empty() {
+            out.push('\n');
+        }
+        for line in herdr_mcp_api::trail_text(&run, &events).lines() {
+            out.push_str(&indent);
+            out.push_str(line);
+            out.push('\n');
+        }
+        indent.push_str("    ");
+    }
+    Ok((!out.is_empty()).then_some(out))
+}
+
+/// [`start_with`] behind a named `Send` future: a child's executor runs
+/// [`Executor::hand_off`] too, and the recursion needs a type to stop at.
+fn start_child(
+    server: HerdrMcpServer,
+    req: StartRunRequest,
+    initial: Control,
+    origin: RunOrigin,
+) -> std::pin::Pin<Box<dyn Future<Output = Started> + Send>> {
+    Box::pin(async move { start_with(&server, req, initial, origin).await })
 }
 
 /// The workspace a run is scoped to: the requested one, else a hint in the
@@ -657,8 +717,96 @@ impl Executor {
                         () = cancelled(&mut self.ctl) => return RunStatus::Cancelled,
                     }
                 }
+                Some(GateAction::Run { collection, inputs }) => {
+                    return self.hand_off(collection, inputs).await;
+                }
             }
         }
+    }
+
+    /// The gate's `run`: start `collection` as a child run with `inputs`
+    /// (placeholders filled from this run), pass pause / resume / cancel on
+    /// to it, and end as it ends.
+    async fn hand_off(&mut self, collection: Uuid, inputs: BTreeMap<String, Value>) -> RunStatus {
+        if self.ancestors().await.contains(&collection) {
+            let error = format!(
+                "the gate hands off to collection {collection}, which is already running this \
+                 chain of hand-offs; use `restart` to loop"
+            );
+            self.emit(RunEventKind::Error { error }).await;
+            return RunStatus::Failed;
+        }
+        let variables = inputs
+            .into_iter()
+            .map(|(k, mut v)| {
+                resolve_variables(&mut v, &self.run.variables);
+                (k, v)
+            })
+            .collect();
+        let req = StartRunRequest {
+            recipe_id: Some(collection),
+            session_id: Some(self.run.session_id.clone()),
+            variables,
+            ..Default::default()
+        };
+        let origin = RunOrigin::Gate {
+            run_id: self.run.id,
+        };
+        let initial = *self.ctl.borrow();
+        let (child, mut done) = match start_child(self.server.clone(), req, initial, origin).await {
+            Ok(started) => started,
+            Err(e) => {
+                let error = format!("cannot start collection {collection}: {e}");
+                self.emit(RunEventKind::Error { error }).await;
+                return RunStatus::Failed;
+            }
+        };
+        self.emit(RunEventKind::ChildStarted {
+            child: child.id,
+            collection,
+            name: child.title().to_string(),
+        })
+        .await;
+        let finished = loop {
+            tokio::select! {
+                r = &mut done => break r,
+                Ok(()) = self.ctl.changed() => {
+                    let control = *self.ctl.borrow_and_update();
+                    self.server.runs.set(child.id, control);
+                }
+            }
+        };
+        let (status, error) = match finished {
+            Ok(c) => (c.status, c.error),
+            Err(e) => (RunStatus::Failed, Some(e.to_string())),
+        };
+        if status == RunStatus::Failed {
+            let why = error.unwrap_or_else(|| "no error recorded".into());
+            let error = format!("{} (run {}) failed: {why}", child.title(), child.id);
+            self.emit(RunEventKind::Error { error }).await;
+        }
+        status
+    }
+
+    /// The collections of this run and of every run whose gate handed off
+    /// down to it.
+    async fn ancestors(&self) -> Vec<Uuid> {
+        let mut out: Vec<Uuid> = self.run.recipe_id.into_iter().collect();
+        let mut origin = self.run.origin.clone();
+        while let RunOrigin::Gate { run_id } = origin {
+            match self.server.persistence.load_run_header(&run_id).await {
+                Ok(Some(parent)) => {
+                    out.extend(parent.recipe_id);
+                    origin = parent.origin;
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!("run {}: reading parent run {run_id}: {e:#}", self.run.id);
+                    break;
+                }
+            }
+        }
+        out
     }
 
     /// One pass through the steps. `Some` when the run ends during it.
@@ -837,10 +985,7 @@ mod tests {
     use std::time::Duration;
 
     /// Tests start runs as the API would.
-    async fn start_run(
-        server: &HerdrMcpServer,
-        req: StartRunRequest,
-    ) -> Result<(RunRecord, JoinHandle<RunRecord>), StartError> {
+    async fn start_run(server: &HerdrMcpServer, req: StartRunRequest) -> Started {
         super::start_run(server, req, RunOrigin::Api).await
     }
 
@@ -848,7 +993,7 @@ mod tests {
         server: &HerdrMcpServer,
         req: StartRunRequest,
         initial: Control,
-    ) -> Result<(RunRecord, JoinHandle<RunRecord>), StartError> {
+    ) -> Started {
         super::start_with(server, req, initial, RunOrigin::Api).await
     }
 
@@ -1768,5 +1913,155 @@ mod tests {
         assert_eq!(workspace_for(Some(" ".into()), &scope), "w3");
         assert_eq!(workspace_for(Some("w9".into()), &scope), "w9");
         assert_eq!(workspace_for(None, &HashMap::new()), "w1");
+    }
+
+    fn hand_off(collection: Uuid, inputs: &[(&str, &str)]) -> GateAction {
+        GateAction::Run {
+            collection,
+            inputs: inputs
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect(),
+        }
+    }
+
+    async fn set_gate(server: &HerdrMcpServer, id: Uuid, then: GateAction) {
+        let mut recipe = server.persistence.load_recipe(&id).await.unwrap().unwrap();
+        recipe.gate = Some(Gate {
+            rules: vec![gate_rule(Vec::new(), then)],
+            max_steps: 10,
+        });
+        server.persistence.save_recipe(&recipe).await.unwrap();
+    }
+
+    fn child_of(events: &[RunEvent]) -> Uuid {
+        events
+            .iter()
+            .find_map(|e| match e.kind {
+                RunEventKind::ChildStarted { child, .. } => Some(child),
+                _ => None,
+            })
+            .expect("a child run")
+    }
+
+    /// The gate's `run` starts the other collection as a child run that
+    /// sees its inputs but not the parent's variables; the parent ends as
+    /// the child ends, and the parent's trail carries the child's.
+    #[tokio::test]
+    async fn gate_hands_off_to_an_isolated_child_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let child = save_recipe(&server, vec![var_set("b", "{{who}}", Vec::new())], &[]).await;
+        let parent = save_recipe(
+            &server,
+            vec![var_set("a", "x", Vec::new())],
+            &[("secret", "s")],
+        )
+        .await;
+        set_gate(
+            &server,
+            parent,
+            hand_off(child, &[("who", "pass {{run.pass}}")]),
+        )
+        .await;
+
+        let done = run_recipe(&server, parent).await;
+        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+        let events = server
+            .persistence
+            .load_run_events(&done.id, 0)
+            .await
+            .unwrap();
+        let kid = load(&server, child_of(&events)).await.unwrap().unwrap();
+        assert_eq!(kid.status, RunStatus::Completed);
+        assert_eq!(kid.recipe_id, Some(child));
+        assert_eq!(kid.origin, RunOrigin::Gate { run_id: done.id });
+        assert_eq!(kid.session_id, done.session_id);
+        assert_eq!(kid.variables["who"], "pass 1");
+        assert!(
+            !kid.variables.contains_key("secret"),
+            "the child's scope is its own"
+        );
+        assert!(!kid.variables.contains_key("a"));
+
+        let text = trail(&server, done.id).await.unwrap().unwrap();
+        assert!(
+            text.contains(&format!("⇢ collection · run {}", kid.id)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("\n    collection · run {} · completed", kid.id)),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("by the gate of run {}", done.id)),
+            "{text}"
+        );
+    }
+
+    /// A child's failure fails the parent with the child's error; handing
+    /// back to a collection already up the chain fails instead of nesting
+    /// forever.
+    #[tokio::test]
+    async fn gate_hand_off_fails_up_and_stops_cycles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let a = save_recipe(&server, vec![var_set("a", "x", Vec::new())], &[]).await;
+        let b = save_recipe(&server, vec![var_set("b", "y", Vec::new())], &[]).await;
+        set_gate(&server, a, hand_off(b, &[])).await;
+        set_gate(&server, b, hand_off(a, &[])).await;
+
+        let done = run_recipe(&server, a).await;
+        assert_eq!(done.status, RunStatus::Failed);
+        let error = done.error.unwrap();
+        assert!(
+            error.contains("failed: the gate hands off to collection"),
+            "{error}"
+        );
+        assert!(error.contains("use `restart` to loop"), "{error}");
+    }
+
+    /// Cancelling the parent while its child runs cancels the child too.
+    #[tokio::test]
+    async fn cancelling_the_parent_cancels_its_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let child = save_recipe(&server, vec![var_set("b", "y", Vec::new())], &[]).await;
+        set_gate(&server, child, GateAction::Restart { delay_ms: 60_000 }).await;
+        let parent = save_recipe(&server, vec![var_set("a", "x", Vec::new())], &[]).await;
+        set_gate(&server, parent, hand_off(child, &[])).await;
+
+        let req = StartRunRequest {
+            recipe_id: Some(parent),
+            ..Default::default()
+        };
+        let (first, handle) = start_run(&server, req).await.unwrap();
+        wait_record(&server, first.id, |_| true).await;
+        let mut kid = None;
+        for _ in 0..200 {
+            let events = server
+                .persistence
+                .load_run_events(&first.id, 0)
+                .await
+                .unwrap();
+            if events
+                .iter()
+                .any(|e| matches!(e.kind, RunEventKind::ChildStarted { .. }))
+            {
+                kid = Some(child_of(&events));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let kid = kid.expect("the parent hands off");
+        wait_record(&server, kid, |r| r.pass == 2).await;
+        assert!(server.runs.control(first.id, RunAction::Cancel));
+        let done = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("the cancel reaches the child")
+            .unwrap();
+        assert_eq!(done.status, RunStatus::Cancelled);
+        let kid = load(&server, kid).await.unwrap().unwrap();
+        assert_eq!(kid.status, RunStatus::Cancelled);
     }
 }
