@@ -300,6 +300,7 @@ Both go through `clipboard.rs` (see §14.6).
 | `GET` | `/api/herdr/sessions` | `herdr_sessions_handler` | `SessionsResponse`: every named herdr session, `current` = the bridge's |
 | `GET` | `/api/herdr/panes?session=&workspace_id=&tab_id=&agent_status=&focused=&label=` | `herdr_panes_handler` | `PanesResponse`, filtered like `list_panes`; 502 for an unknown or stopped session |
 | `POST` | `/api/runs` | `start_run_handler` | Start a run; `?wait=true` waits for the final record; `variables` add to the run's scope |
+| `GET` | `/api/runs?limit=` | `list_runs_handler` | The newest `limit` runs (all without it), newest first; sorted on the headers, so only those runs' logs are read |
 | `GET` | `/api/runs/{id}/trail` | `run_trail_handler` | The run's trail as text, the trail of the child run its gate handed off to indented under it |
 | `GET` | `/api/herdr/events` | `herdr_events_handler` | SSE: herdr's live event stream (`HerdrEvent` per message) |
 
@@ -441,7 +442,9 @@ fails the step.
 carries the params as sent (placeholders filled, secret-named fields
 redacted as in the security audit log), the `{{ }}` nothing resolved, and
 the pane the step targets; the header records who started the run
-(`origin`: api, agent + its pane, run, schedule, trigger + event);
+(`origin`: api, agent + its pane, run + the run whose step called
+`recipe_run`, gate + the run that handed off, schedule, trigger + event;
+`RunOrigin::parent` gives the parent run);
 `gate_decided` lists every check evaluated with what its path resolved to.
 When a run fails (a step, a gate `fail`, `max_steps`), `pane_snapshot` saves
 the last `snapshot_lines` lines of the pane it touched last (a step's
@@ -471,7 +474,7 @@ collection as a child run (`start_with`, origin `gate` + this run's id) in
 this run's workspace, its scope built like any run's (its own variables,
 globals) plus `inputs` with their `{{ }}` filled from this run. The parent
 records `child_started`, forwards pause / resume / cancel to the child
-while it waits, and ends with the child's status (a failed child's error,
+while it waits (reading as paused itself while it forwards a pause), and ends with the child's status (a failed child's error,
 prefixed with its name, becomes the parent's). Before starting it walks
 the `gate` origins up (`ancestors`): a collection already in the chain
 fails the run, so hand-offs can't nest forever (`restart` is the loop).
@@ -489,10 +492,20 @@ id, then `key=value` inputs (`inputs_text` / `parse_inputs`).
 `playground/runs.rs`; TUI: the tree's Runs row, `tabs/playground/runs.rs`):
 the run list, newest first, filtered by collection or failed only, and the
 picked run's trail (`/api/runs/{id}/trail`, so a hand-off's child trail is
-included), re-read until the run ends. From there: copy the
+included). The list is the newest `playground::RUNS_SHOWN` runs. The web
+re-reads the list, and a live run's trail, when `GET /api/events` (SSE)
+streams a run event, at most every 300 ms. From there: copy the
 trail, focus the pane it last used in herdr (`herdr_api` `pane.focus`), run
-it again (`RunRecord::rerun`) or cancel it. The collection editor has the
-gate (`playground/flow.rs` on the web) and the run history fields.
+it again (`RunRecord::rerun`), cancel it, or open its parent run or the
+runs it started (TUI: `p` / `d`). The collection editor has the
+gate (`playground/flow.rs` on the web) and the run history fields; both
+flag a `run` whose collection no longer exists (`missing_collection`).
+
+**Tracing.** Each run's task runs in a `run` span (`run_id`, `collection`),
+and each step's tool call in a `step` span (`step`, `tool`). So every log
+line the run causes, down to herdr calls, names its run. A hand-off's child
+span nests under its parent's; other runs are root spans. The executor logs
+the start (with origin), the finish (status, passes) and failed steps.
 
 ### 6.3 Bundled Templates
 

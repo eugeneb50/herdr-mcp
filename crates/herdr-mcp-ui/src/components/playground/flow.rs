@@ -263,8 +263,17 @@ fn GateRuleRow(
                                     *collection = id;
                                 }
                             },
+                            if let Some(id) = rule.then.missing_collection(&collections) {
+                                option { value: "{id}", selected: true, "missing collection" }
+                            }
                             for (id, name) in collections.iter() {
                                 option { value: "{id}", selected: target == Some(*id), "{name}" }
+                            }
+                        }
+                        if rule.then.missing_collection(&collections).is_some() {
+                            span {
+                                class: "send-status send-error",
+                                "No other saved collection has this id (deleted?): pick one, or the run fails here."
                             }
                         }
                         input {

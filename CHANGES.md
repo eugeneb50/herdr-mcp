@@ -4,6 +4,16 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Runs, completed.** The web Runs tab updates live from the run event
+  stream instead of re-reading every 2 s, and both Runs views list the
+  newest 200 runs (`GET /api/runs?limit=`, which only reads those runs'
+  logs). A run opens its parent run and the runs it started (TUI: `p` /
+  `d`); a run that a `recipe_run` step started now records that run as its
+  parent. A parent reads as paused while it forwards a pause to its
+  child. The gate editors flag a `run` whose collection was deleted. Every
+  log line a run causes carries its `run_id` (tracing spans per run and per
+  step, a child nested under its parent). **(breaking)** `ApiClient::list_runs`
+  takes a limit.
 - **Gates hand off to other collections.** A gate rule's new `run` action
   starts another saved collection as a child run in the same workspace:
   isolated (its own variables and the globals, plus `inputs` whose `{{ }}`

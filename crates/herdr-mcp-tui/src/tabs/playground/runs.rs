@@ -50,6 +50,32 @@ impl RunsState {
         self.shown().get(self.index).copied()
     }
 
+    /// Pick run `id`, clearing the filters if they hide it. False when it is
+    /// not among the runs listed.
+    fn pick(&mut self, id: Uuid) -> bool {
+        if !self.runs.iter().any(|r| r.id == id) {
+            return false;
+        }
+        if !self.shown().iter().any(|r| r.id == id) {
+            self.filter = None;
+            self.failed_only = false;
+        }
+        self.index = self.shown().iter().position(|r| r.id == id).unwrap_or(0);
+        self.scroll = 0;
+        true
+    }
+
+    /// The first run the picked one started (its gate's hand-off, a
+    /// `recipe_run` step).
+    fn child(&self) -> Option<Uuid> {
+        let id = self.picked()?.id;
+        self.runs
+            .iter()
+            .rev()
+            .find(|r| r.origin.parent() == Some(id))
+            .map(|r| r.id)
+    }
+
     /// The filter's name for the list title.
     fn filter_name(&self) -> String {
         match self.filter {
@@ -100,7 +126,7 @@ pub async fn refresh(app: &mut App) {
         return;
     };
     let picked = app.playground.runs.picked().map(|r| r.id);
-    if let Ok(list) = http.list_runs().await {
+    if let Ok(list) = http.list_runs(herdr_mcp_api::playground::RUNS_SHOWN).await {
         let state = &mut app.playground.runs;
         state.runs = list;
         // Stay on the same run as new ones arrive above it.
@@ -208,7 +234,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     if picked.is_some() {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
-            "PgUp/PgDn scroll  y copy  o open pane  r run again  x cancel",
+            "PgUp/PgDn scroll  y copy  o open pane  p parent  d child  r run again  x cancel",
             dim_style(),
         ));
     }
@@ -267,6 +293,26 @@ pub async fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) -> boo
             }
         }
         KeyCode::Char('o') => open_pane(app).await,
+        KeyCode::Char(c @ ('p' | 'd')) => {
+            let state = &mut app.playground.runs;
+            let target = if c == 'p' {
+                state.picked().and_then(|r| r.origin.parent())
+            } else {
+                state.child()
+            };
+            match target {
+                Some(id) if state.pick(id) => {
+                    if let Some(http) = app.http.clone() {
+                        load_events(app, &http).await;
+                    }
+                }
+                Some(id) => app
+                    .playground
+                    .err(format!("run {id} is not among the runs listed")),
+                None if c == 'p' => app.playground.err("no run started this one"),
+                None => app.playground.err("this run started no other run"),
+            }
+        }
         KeyCode::Char('r') => {
             let Some(req) = app.playground.runs.picked().map(RunRecord::rerun) else {
                 return true;
@@ -390,5 +436,25 @@ mod tests {
         assert_eq!((s.filter, s.shown().len()), (Some(None), 1));
         s.cycle_filter();
         assert_eq!(s.filter, None);
+    }
+
+    /// `d` finds the run the picked one started and `p` comes back, even
+    /// through a filter that hides it.
+    #[test]
+    fn parent_and_child_navigation() {
+        let parent = run(Some(Uuid::new_v4()), RunStatus::Completed);
+        let mut child = run(None, RunStatus::Failed);
+        child.origin = herdr_mcp_api::RunOrigin::Gate { run_id: parent.id };
+        let mut s = RunsState {
+            runs: vec![child.clone(), parent.clone()],
+            failed_only: true,
+            ..Default::default()
+        };
+        assert!(s.pick(parent.id));
+        assert!(!s.failed_only, "the filter hid the parent");
+        assert_eq!(s.child(), Some(child.id));
+        assert!(s.pick(child.id));
+        assert_eq!(s.picked().map(|r| r.id), Some(child.id));
+        assert!(!s.pick(Uuid::new_v4()));
     }
 }
