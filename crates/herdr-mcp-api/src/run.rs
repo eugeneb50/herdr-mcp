@@ -479,3 +479,97 @@ fn clip(s: &str, max: usize) -> String {
         format!("{}…", s.chars().take(max).collect::<String>())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Op;
+    use serde_json::json;
+
+    /// Every variant, every optional field set: a field that collides with
+    /// [`RunEvent`]'s own (or a serde attribute that drops one) fails here
+    /// instead of silently skipping the line on read.
+    #[test]
+    fn every_event_kind_round_trips() {
+        let id = Uuid::from_u128(1);
+        let kinds = [
+            RunEventKind::Status {
+                status: RunStatus::Paused,
+            },
+            RunEventKind::StepStarted {
+                step: "s".into(),
+                params: json!({"text": "hi"}),
+                unresolved: vec!["{{x}}".into()],
+                pane: Some("p1".into()),
+            },
+            RunEventKind::StepFinished {
+                step: "s".into(),
+                result: json!({"ok": true}),
+            },
+            RunEventKind::StepFailed {
+                step: "s".into(),
+                error: "boom".into(),
+                status_code: 502,
+            },
+            RunEventKind::StepCancelled { step: "s".into() },
+            RunEventKind::GateDecided {
+                rule: Some(0),
+                action: Some(GateAction::Run {
+                    collection: id,
+                    inputs: [("k".to_string(), json!("v"))].into(),
+                }),
+                checks: vec![CheckResult {
+                    rule: 0,
+                    path: "s.status".into(),
+                    op: Op::Eq,
+                    value: json!(200),
+                    found: Some(json!(200)),
+                    held: true,
+                }],
+            },
+            RunEventKind::ChildStarted {
+                child: Uuid::from_u128(2),
+                collection: id,
+                name: "next".into(),
+            },
+            RunEventKind::PaneSnapshot {
+                step: Some("s".into()),
+                pane: "p1".into(),
+                text: "$ ls".into(),
+            },
+            RunEventKind::Error {
+                error: "max_steps".into(),
+            },
+            RunEventKind::VariableSet {
+                step: "s".into(),
+                var: "v".into(),
+                scope: VarScope::Collection,
+                value: json!(1),
+            },
+        ];
+        for (seq, kind) in kinds.into_iter().enumerate() {
+            // No wildcard: a new variant fails to compile until it is listed above.
+            match &kind {
+                RunEventKind::Status { .. }
+                | RunEventKind::StepStarted { .. }
+                | RunEventKind::StepFinished { .. }
+                | RunEventKind::StepFailed { .. }
+                | RunEventKind::StepCancelled { .. }
+                | RunEventKind::GateDecided { .. }
+                | RunEventKind::ChildStarted { .. }
+                | RunEventKind::PaneSnapshot { .. }
+                | RunEventKind::Error { .. }
+                | RunEventKind::VariableSet { .. } => {}
+            }
+            let event = RunEvent {
+                run_id: id,
+                seq: seq as u64,
+                at: DateTime::UNIX_EPOCH,
+                kind,
+            };
+            let line = serde_json::to_string(&event).expect("serializes");
+            let back: RunEvent = serde_json::from_str(&line).expect(&line);
+            assert_eq!(back, event, "{line}");
+        }
+    }
+}
