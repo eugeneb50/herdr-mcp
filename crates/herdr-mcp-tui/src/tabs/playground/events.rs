@@ -1,7 +1,8 @@
-//! herdr's live event stream (`GET /api/herdr/events`, SSE): what
-//! collection triggers fire on, newest first. The stream is read by its own
-//! task, which reconnects when the bridge goes away; the main loop drains
-//! what it got with [`EventsState::drain`].
+//! herdr's event stream (`GET /api/herdr/events`, SSE: the server's last
+//! 200 events, then live ones): what collection triggers fire on, newest
+//! first. The stream is read by its own task, which reconnects when the
+//! bridge goes away; the main loop drains what it got with
+//! [`EventsState::drain`].
 
 use std::path::Path;
 use std::time::Duration;
@@ -23,7 +24,9 @@ pub struct EventsState {
     pub filter: String,
     /// The picked event among the shown ones.
     pub index: usize,
-    rx: Option<mpsc::UnboundedReceiver<HerdrEvent>>,
+    /// From the stream task: an event, or `None` when it (re)connects and
+    /// the server's recent events follow.
+    rx: Option<mpsc::UnboundedReceiver<Option<HerdrEvent>>>,
     pub(crate) list: ListState,
     pub(crate) list_inner: Rect,
 }
@@ -43,13 +46,16 @@ impl EventsState {
         tokio::spawn(async move {
             loop {
                 if let Ok(mut resp) = client.herdr_events().await {
+                    if tx.send(None).is_err() {
+                        return;
+                    }
                     let mut buf: Vec<u8> = Vec::new();
                     while let Ok(Some(chunk)) = resp.chunk().await {
                         buf.extend_from_slice(&chunk);
                         while let Some(end) = buf.iter().position(|b| *b == b'\n') {
                             let line: Vec<u8> = buf.drain(..=end).collect();
                             if let Some(ev) = parse_line(&String::from_utf8_lossy(&line))
-                                && tx.send(ev).is_err()
+                                && tx.send(Some(ev)).is_err()
                             {
                                 return;
                             }
@@ -70,11 +76,23 @@ impl EventsState {
             return false;
         };
         let mut new = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            new.push(ev);
+        let mut reset = false;
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                Some(ev) => new.push(ev),
+                // A new connection replays what this list already has.
+                None => {
+                    reset = true;
+                    new.clear();
+                }
+            }
+        }
+        if reset {
+            self.events.clear();
+            self.index = 0;
         }
         if new.is_empty() {
-            return false;
+            return reset;
         }
         // Keep the picked event picked as new ones arrive above it (the
         // top stays the top: it follows the newest).
@@ -184,13 +202,13 @@ mod tests {
             event: name.into(),
             data: serde_json::Value::Null,
         };
-        tx.send(mk("pane.created")).unwrap();
-        tx.send(mk("tab.created")).unwrap();
+        tx.send(Some(mk("pane.created"))).unwrap();
+        tx.send(Some(mk("tab.created"))).unwrap();
         assert!(ev.drain());
         assert_eq!(ev.events[0].event, "tab.created");
         ev.index = 1;
-        tx.send(mk("pane.closed")).unwrap();
-        tx.send(mk("tab.closed")).unwrap();
+        tx.send(Some(mk("pane.closed"))).unwrap();
+        tx.send(Some(mk("tab.closed"))).unwrap();
         ev.drain();
         assert_eq!(ev.events[ev.index].event, "pane.created");
         assert_eq!(ev.events[0].event, "tab.closed");
@@ -200,9 +218,16 @@ mod tests {
         assert!(!ev.drain());
         // Filtered: only events that pass move the pick.
         ev.index = 1;
-        tx.send(mk("tab.created")).unwrap();
-        tx.send(mk("pane.focused")).unwrap();
+        tx.send(Some(mk("tab.created"))).unwrap();
+        tx.send(Some(mk("pane.focused"))).unwrap();
         ev.drain();
         assert_eq!(ev.shown()[ev.index].event, "pane.created");
+
+        // A reconnect replays the server's recent events: the list restarts.
+        tx.send(None).unwrap();
+        tx.send(Some(mk("pane.created"))).unwrap();
+        assert!(ev.drain());
+        assert_eq!(ev.events.len(), 1);
+        assert_eq!(ev.index, 0);
     }
 }

@@ -3810,17 +3810,23 @@ async fn events_handler(
 }
 
 /// `GET /api/herdr/events` — Server-Sent Events: herdr's own event stream
-/// (`HerdrEvent` JSON per message) as the subscriber receives it, from now
-/// on. Without a herdr subscriber attached the stream stays empty.
+/// (`HerdrEvent` JSON per message): the last 200 the subscriber received,
+/// oldest first, then each new one. Without a herdr subscriber attached the
+/// stream stays empty.
 async fn herdr_events_handler(
     State(AppState { server, .. }): State<AppState>,
 ) -> axum::response::sse::Sse<
     impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
 > {
     use axum::response::sse::{Event, KeepAlive, Sse};
-    let rx = server.herdr_client.get().map(|c| c.events());
+    let feed = server.herdr_client.get().map(|c| c.recent_and_live());
     let stream = async_stream::stream! {
-        let Some(mut rx) = rx else { return };
+        let Some((recent, mut rx)) = feed else { return };
+        for event in recent {
+            yield Ok(Event::default()
+                .json_data(&event)
+                .unwrap_or_else(|_| Event::default().comment("unencodable event")));
+        }
         loop {
             match rx.recv().await {
                 Ok(event) => yield Ok(Event::default()
