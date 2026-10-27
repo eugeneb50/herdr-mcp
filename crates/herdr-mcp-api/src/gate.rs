@@ -96,6 +96,19 @@ pub enum GateAction {
     },
 }
 
+impl GateAction {
+    /// The collection a `run` hands off to when it is not among
+    /// `collections`: deleted since, or this run's own.
+    pub fn missing_collection(&self, collections: Collections) -> Option<Uuid> {
+        match self {
+            Self::Run { collection, .. } if !collections.iter().any(|(id, _)| id == collection) => {
+                Some(*collection)
+            }
+            _ => None,
+        }
+    }
+}
+
 fn is_zero(n: &u64) -> bool {
     *n == 0
 }

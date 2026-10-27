@@ -2034,7 +2034,14 @@ impl HerdrMcpServer {
             Origin::Mcp => herdr_mcp_api::RunOrigin::Agent {
                 pane_id: herdr_mcp_core::session_context::pane_id(),
             },
-            Origin::Run => herdr_mcp_api::RunOrigin::Run,
+            Origin::Run => herdr_mcp_api::RunOrigin::Run {
+                run_id: context
+                    .meta
+                    .0
+                    .get(crate::runs::STEP_OF_KEY)
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|id| id.parse().ok()),
+            },
             Origin::Api => herdr_mcp_api::RunOrigin::Api,
         };
         let (run, done) = crate::runs::start_run(self, req, origin)
@@ -3171,6 +3178,10 @@ pub(crate) async fn dispatch_tool(
     let mut meta = rmcp::model::Meta::new();
     meta.0
         .insert(Origin::META_KEY.into(), origin.as_str().into());
+    if let Ok(run) = crate::runs::STEP_OF.try_with(|id| *id) {
+        meta.0
+            .insert(crate::runs::STEP_OF_KEY.into(), run.to_string().into());
+    }
     params.meta = Some(meta);
     session.call_tool(params).await.map_err(|e| match e {
         ServiceError::McpError(e) if e.code == ErrorCode::INVALID_PARAMS => bad_request(e.message),
@@ -3448,11 +3459,17 @@ async fn start_run_handler(
     Ok((StatusCode::OK, Json(run)))
 }
 
-/// `GET /api/runs` — every run, newest first.
+#[derive(Debug, Deserialize)]
+struct ListRunsQuery {
+    limit: Option<usize>,
+}
+
+/// `GET /api/runs?limit=` — the newest runs (every one without `limit`).
 async fn list_runs_handler(
     State(AppState { server, .. }): State<AppState>,
+    Query(q): Query<ListRunsQuery>,
 ) -> Result<Json<Vec<herdr_mcp_api::RunRecord>>, (StatusCode, String)> {
-    crate::runs::list(&server)
+    crate::runs::list(&server, q.limit)
         .await
         .map(Json)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
@@ -4829,7 +4846,7 @@ esac
         }
         assert!(body.contains("id: 4") && body.contains("id: 5") && !body.contains("id: 3"));
         assert!(
-            api.list_runs()
+            api.list_runs(10)
                 .await
                 .unwrap()
                 .iter()

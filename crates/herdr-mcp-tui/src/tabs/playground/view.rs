@@ -536,13 +536,18 @@ fn render_collection(frame: &mut Frame, area: Rect, app: &mut App) {
             CRow::AddLlm => button("+ LLM", on),
             CRow::RunAll => button(if busy { "Running…" } else { "Run collection" }, on),
             CRow::Runs => button("Runs ›", on),
-            CRow::Gate(n) => item(
-                vec![
+            CRow::Gate(n) => {
+                let rule = &c.gate[*n];
+                let collections = &app.playground.collections;
+                let mut spans = vec![
                     Span::styled(format!("{}. ", n + 1), dim_style()),
-                    Span::raw(rule_text(&c.gate[*n], &app.playground.collections)),
-                ],
-                on,
-            ),
+                    Span::raw(rule_text(rule, collections)),
+                ];
+                if rule.then.missing_collection(collections).is_some() {
+                    spans.push(Span::styled("  no such collection", warn_style()));
+                }
+                item(spans, on)
+            }
             CRow::AddGate => button("+ Gate rule", on),
             CRow::MaxSteps => field("Max requests", c.max_steps.to_string(), on),
             CRow::Trail(f) => {

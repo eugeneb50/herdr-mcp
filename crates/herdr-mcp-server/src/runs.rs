@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use crate::server::{
@@ -244,17 +245,36 @@ pub async fn load(server: &HerdrMcpServer, id: Uuid) -> anyhow::Result<Option<Ru
     Ok(Some(Runs::observe(fold(header, &events), was_live)))
 }
 
-/// Every run's record, newest first.
-pub async fn list(server: &HerdrMcpServer) -> anyhow::Result<Vec<RunRecord>> {
-    let mut runs = Vec::new();
-    for id in server.persistence.list_run_ids().await? {
+/// The newest `limit` runs' records (all without one), newest first. Sorts
+/// on the headers so only the runs returned have their logs read.
+pub async fn list(server: &HerdrMcpServer, limit: Option<usize>) -> anyhow::Result<Vec<RunRecord>> {
+    let store = &server.persistence;
+    let mut newest = Vec::new();
+    for id in store.list_run_ids().await? {
+        if let Some(header) = store.load_run_header(&id).await? {
+            newest.push((header.started_at, id));
+        }
+    }
+    newest.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
+    newest.truncate(limit.unwrap_or(usize::MAX));
+    let mut runs = Vec::with_capacity(newest.len());
+    for (_, id) in newest {
         if let Some(run) = load(server, id).await? {
             runs.push(run);
         }
     }
-    runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     Ok(runs)
 }
+
+tokio::task_local! {
+    /// The run whose step is being dispatched. `dispatch_tool` passes it to
+    /// the tool in the call's meta ([`STEP_OF_KEY`]), so a `recipe_run` step
+    /// records it as the new run's parent.
+    pub(crate) static STEP_OF: Uuid;
+}
+
+/// The meta key carrying [`STEP_OF`] into the in-process tool session.
+pub(crate) const STEP_OF_KEY: &str = "herdr-mcp/step-of";
 
 /// New events as a stream. With `run`, only that run's events: first its
 /// logged events from `since` (if given), then live ones, without gaps or
@@ -415,7 +435,20 @@ pub(crate) async fn start_with(
     })
     .await;
     let first = exec.run.clone();
-    Ok((first, tokio::spawn(exec.execute())))
+    // Every log line of the run's task carries its id. A gate's child nests
+    // under its parent's span (start_child runs inside it); any other run
+    // is a root, not a child of the request that started it.
+    let parent = match first.origin {
+        RunOrigin::Gate { .. } => tracing::Span::current().id(),
+        _ => None,
+    };
+    let span = tracing::info_span!(
+        parent: parent,
+        "run",
+        run_id = %first.id,
+        collection = first.title(),
+    );
+    Ok((first, tokio::spawn(exec.execute().instrument(span))))
 }
 
 /// A run's trail ([`herdr_mcp_api::trail_text`]) with, indented under it,
@@ -623,14 +656,20 @@ impl Executor {
         self.next_seq += 1;
         apply(&mut self.run, &event);
         if let Err(e) = self.server.persistence.append_run_event(&event).await {
-            tracing::warn!("run {}: failed to append event: {e}", self.run.id);
+            tracing::warn!("failed to append event: {e}");
         }
         // No subscribers is fine.
         let _ = self.server.runs.events.send(event);
     }
 
     async fn execute(mut self) -> RunRecord {
+        tracing::info!(origin = %self.run.origin, "run started");
         let status = self.execute_steps().await;
+        tracing::info!(
+            status = status.as_str(),
+            passes = self.run.pass,
+            "run finished"
+        );
         self.emit(RunEventKind::Status { status }).await;
         self.server.runs.live().remove(&self.run.id);
         prune(&self.server, self.run.recipe_id).await;
@@ -668,13 +707,10 @@ impl Executor {
             Ok(result) => {
                 let result = serde_json::to_value(&result).unwrap_or_default();
                 let error = herdr_mcp_api::tool_text(&result);
-                tracing::warn!("run {}: cannot snapshot pane {pane}: {error}", self.run.id);
+                tracing::warn!("cannot snapshot pane {pane}: {error}");
             }
             Err((code, error)) => {
-                tracing::warn!(
-                    "run {}: cannot snapshot pane {pane}: {code} {error}",
-                    self.run.id
-                );
+                tracing::warn!("cannot snapshot pane {pane}: {code} {error}");
             }
         }
     }
@@ -773,6 +809,15 @@ impl Executor {
                 Ok(()) = self.ctl.changed() => {
                     let control = *self.ctl.borrow_and_update();
                     self.server.runs.set(child.id, control);
+                    // The parent reads as its child does while it waits.
+                    let status = match control {
+                        Control::Pause => RunStatus::Paused,
+                        Control::Run => RunStatus::Running,
+                        Control::Cancel => continue,
+                    };
+                    if self.run.status != status {
+                        self.emit(RunEventKind::Status { status }).await;
+                    }
                 }
             }
         };
@@ -801,7 +846,7 @@ impl Executor {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    tracing::warn!("run {}: reading parent run {run_id}: {e:#}", self.run.id);
+                    tracing::warn!("reading parent run {run_id}: {e:#}");
                     break;
                 }
             }
@@ -845,8 +890,17 @@ impl Executor {
                 pane,
             })
             .await;
+            let span = tracing::info_span!("step", step = %step.id, tool = %step.tool);
+            let call = dispatch_tool(
+                &self.server,
+                &step.tool,
+                params,
+                crate::security::Origin::Run,
+            )
+            .instrument(span);
+            let call = STEP_OF.scope(self.run.id, call);
             let outcome = tokio::select! {
-                r = dispatch_tool(&self.server, &step.tool, params, crate::security::Origin::Run) => Some(r),
+                r = call => Some(r),
                 () = cancelled(&mut self.ctl) => None,
             };
             let def = step;
@@ -875,6 +929,7 @@ impl Executor {
                     }
                 }
                 Some(Err((code, error))) => {
+                    tracing::warn!(step, %code, "step failed: {error}");
                     self.emit(RunEventKind::StepFailed {
                         step: step.clone(),
                         error,
@@ -1265,7 +1320,7 @@ mod tests {
         let server = test_server(tmp.path());
         let store = &server.persistence;
         async fn count(server: &HerdrMcpServer, recipe: Option<Uuid>) -> usize {
-            let runs = list(server).await.unwrap();
+            let runs = list(server, None).await.unwrap();
             runs.iter().filter(|r| r.recipe_id == recipe).count()
         }
         for _ in 0..3 {
@@ -1790,7 +1845,7 @@ mod tests {
         let mut found = None;
         for _ in 0..30 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            let runs = list(&server).await.unwrap();
+            let runs = list(&server, None).await.unwrap();
             found = runs.into_iter().find(|r| r.recipe_id == Some(recipe.id));
             if found.is_some() {
                 break;
@@ -2023,7 +2078,7 @@ mod tests {
 
     /// Cancelling the parent while its child runs cancels the child too.
     #[tokio::test]
-    async fn cancelling_the_parent_cancels_its_child() {
+    async fn pause_and_cancel_reach_the_child() {
         let tmp = tempfile::tempdir().unwrap();
         let server = test_server(tmp.path());
         let child = save_recipe(&server, vec![var_set("b", "y", Vec::new())], &[]).await;
@@ -2055,6 +2110,12 @@ mod tests {
         }
         let kid = kid.expect("the parent hands off");
         wait_record(&server, kid, |r| r.pass == 2).await;
+        // The parent reads as paused while its child is.
+        assert!(server.runs.control(first.id, RunAction::Pause));
+        // (The child, sleeping out its restart delay, pauses at its next step.)
+        wait_record(&server, first.id, |r| r.status == RunStatus::Paused).await;
+        assert!(server.runs.control(first.id, RunAction::Resume));
+        wait_record(&server, first.id, |r| r.status == RunStatus::Running).await;
         assert!(server.runs.control(first.id, RunAction::Cancel));
         let done = tokio::time::timeout(Duration::from_secs(5), handle)
             .await
@@ -2063,5 +2124,32 @@ mod tests {
         assert_eq!(done.status, RunStatus::Cancelled);
         let kid = load(&server, kid).await.unwrap().unwrap();
         assert_eq!(kid.status, RunStatus::Cancelled);
+    }
+
+    /// A run that a step's `recipe_run` starts names that step's run as its
+    /// parent.
+    #[tokio::test]
+    async fn recipe_run_step_records_its_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let child = save_recipe(&server, vec![var_set("b", "y", Vec::new())], &[]).await;
+        let call = RecipeStep {
+            params: serde_json::json!({ "recipe_id": child.to_string(), "wait": true }),
+            ..step("call", "recipe_run")
+        };
+        let parent = save_recipe(&server, vec![call], &[]).await;
+        let req = StartRunRequest {
+            recipe_id: Some(parent),
+            ..Default::default()
+        };
+        let (first, handle) = start_run(&server, req).await.unwrap();
+        let done = handle.await.unwrap();
+        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+        let runs = list(&server, None).await.unwrap();
+        let kid = runs
+            .iter()
+            .find(|r| r.recipe_id == Some(child))
+            .expect("the step started the child");
+        assert_eq!(kid.origin.parent(), Some(first.id));
     }
 }

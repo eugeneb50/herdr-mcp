@@ -8,6 +8,34 @@ use wasm_bindgen::{JsCast, closure::Closure};
 /// Events kept on screen.
 const KEEP: usize = 200;
 
+/// An `EventSource` on the bridge's `path`, calling `on_message` with each
+/// message's data and `on_open` on every (re)connect. Close it on drop.
+pub fn sse(
+    path: &str,
+    mut on_message: impl FnMut(String) + 'static,
+    on_open: impl FnMut() + 'static,
+) -> Option<web_sys::EventSource> {
+    // EventSource can't send headers: the token goes in the query.
+    let url = match crate::client::token() {
+        Some(t) => format!("{path}?token={t}"),
+        None => path.to_string(),
+    };
+    let es = web_sys::EventSource::new(&url).ok()?;
+    let on_message =
+        Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |msg: web_sys::MessageEvent| {
+            if let Some(text) = msg.data().as_string() {
+                on_message(text);
+            }
+        });
+    let on_open = Closure::<dyn FnMut()>::new(on_open);
+    es.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    es.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+    // They live as long as the page's EventSource.
+    on_message.forget();
+    on_open.forget();
+    Some(es)
+}
+
 #[component]
 pub fn HerdrEvents() -> Element {
     let mut events: Signal<Vec<HerdrEvent>> = use_signal(Vec::new);
@@ -15,29 +43,18 @@ pub fn HerdrEvents() -> Element {
     let mut source: Signal<Option<web_sys::EventSource>> = use_signal(|| None);
 
     use_hook(move || {
-        // EventSource can't send headers: the token goes in the query.
-        let url = match crate::client::token() {
-            Some(t) => format!("/api/herdr/events?token={t}"),
-            None => "/api/herdr/events".to_string(),
-        };
-        let Ok(es) = web_sys::EventSource::new(&url) else {
-            return;
-        };
-        let on_message =
-            Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |msg: web_sys::MessageEvent| {
-                let Some(text) = msg.data().as_string() else {
-                    return;
-                };
+        let es = sse(
+            "/api/herdr/events",
+            move |text| {
                 if let Ok(ev) = serde_json::from_str::<HerdrEvent>(&text) {
                     let mut w = events.write();
                     w.insert(0, ev);
                     w.truncate(KEEP);
                 }
-            });
-        es.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-        // Lives as long as the page's EventSource.
-        on_message.forget();
-        source.set(Some(es));
+            },
+            || {},
+        );
+        source.set(es);
     });
     use_drop(move || {
         if let Some(es) = source.peek().as_ref() {

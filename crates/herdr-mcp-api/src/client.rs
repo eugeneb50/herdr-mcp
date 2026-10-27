@@ -425,9 +425,13 @@ impl ApiClient {
         .await
     }
 
-    /// `GET /api/runs` — every run, newest first.
-    pub async fn list_runs(&self) -> Result<Vec<RunRecord>, ApiError> {
-        self.get(&["api", "runs"]).await
+    /// `GET /api/runs?limit=` — the newest `limit` runs, newest first.
+    pub async fn list_runs(&self, limit: usize) -> Result<Vec<RunRecord>, ApiError> {
+        Self::json(
+            self.request(Method::GET, &["api", "runs"])
+                .query(&[("limit", limit)]),
+        )
+        .await
     }
 
     /// `GET /api/runs/{id}`.

@@ -134,8 +134,12 @@ pub enum RunOrigin {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane_id: Option<String>,
     },
-    /// A step of another run (`recipe_run`).
-    Run,
+    /// A step of run `run_id` (`recipe_run`); none when the step's run is
+    /// unknown.
+    Run {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<Uuid>,
+    },
     /// The gate of run `run_id` handed off to this collection (`run`).
     Gate {
         run_id: Uuid,
@@ -147,13 +151,26 @@ pub enum RunOrigin {
     },
 }
 
+impl RunOrigin {
+    /// The run that started this one: whose gate handed off to it, or whose
+    /// step called `recipe_run`.
+    pub fn parent(&self) -> Option<Uuid> {
+        match self {
+            Self::Gate { run_id } => Some(*run_id),
+            Self::Run { run_id } => *run_id,
+            _ => None,
+        }
+    }
+}
+
 impl std::fmt::Display for RunOrigin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Api => f.write_str("the web UI, TUI or API"),
             Self::Agent { pane_id: Some(p) } => write!(f, "an agent in pane {p}"),
             Self::Agent { pane_id: None } => f.write_str("an agent"),
-            Self::Run => f.write_str("another run"),
+            Self::Run { run_id: Some(id) } => write!(f, "a step of run {id}"),
+            Self::Run { run_id: None } => f.write_str("another run"),
             Self::Gate { run_id } => write!(f, "the gate of run {run_id}"),
             Self::Schedule => f.write_str("a schedule"),
             Self::Trigger { event } => write!(f, "herdr event {event}"),

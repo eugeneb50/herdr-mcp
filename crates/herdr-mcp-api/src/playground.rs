@@ -388,6 +388,9 @@ pub fn fresh_collection_name(recipes: &[Recipe]) -> String {
     }
 }
 
+/// How many of the newest runs the Runs views list.
+pub const RUNS_SHOWN: usize = 200;
+
 /// A send's headline facts: its status, the HTTP status when the request
 /// was `http_request`, and how long the run took (`completed · 200 · 312 ms`).
 pub fn send_summary(run: &RunRecord, step_id: &str) -> String {

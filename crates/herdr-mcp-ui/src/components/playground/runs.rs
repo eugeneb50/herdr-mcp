@@ -7,8 +7,47 @@ use herdr_mcp_api::{RunAction, RunEvent, RunRecord, RunStatus, Uuid};
 
 use crate::client::use_api;
 
-/// How often the list (and a live run's trail) is re-read.
-const POLL_MS: u32 = 2_000;
+/// The fastest the list (and a live run's trail) is re-read while run
+/// events stream in.
+const THROTTLE_MS: u32 = 300;
+
+/// Counts the run events the bridge streams (`GET /api/events`), and each
+/// (re)connect, when some may have been missed: what the list and a live
+/// run's trail re-read on.
+#[derive(Clone, Copy)]
+struct Seen(Signal<u64>);
+
+fn use_run_events() -> Seen {
+    let mut seen = use_signal(|| 0u64);
+    let mut source: Signal<Option<web_sys::EventSource>> = use_signal(|| None);
+    use_hook(move || {
+        let es = super::events::sse(
+            "/api/events",
+            move |_| *seen.write() += 1,
+            move || *seen.write() += 1,
+        );
+        source.set(es);
+    });
+    use_drop(move || {
+        if let Some(es) = source.peek().as_ref() {
+            es.close();
+        }
+    });
+    Seen(seen)
+}
+
+/// Waits until `seen` moves past `read` (at most every [`THROTTLE_MS`]),
+/// then records it.
+async fn changed(seen: Seen, read: &mut Option<u64>) {
+    loop {
+        let now = *seen.0.peek();
+        if *read != Some(now) {
+            *read = Some(now);
+            return;
+        }
+        TimeoutFuture::new(THROTTLE_MS).await;
+    }
+}
 
 fn status_class(s: RunStatus) -> &'static str {
     match s {
@@ -38,18 +77,24 @@ pub fn Runs() -> Element {
     let mut pick: Signal<Option<Uuid>> = use_signal(|| None);
     let mut failed_only = use_signal(|| false);
     let mut collection = use_signal(String::new);
+    let seen = use_run_events();
+    use_context_provider(|| seen);
 
     use_future(move || async move {
         let client = client();
+        let mut read = None;
         loop {
-            match client.list_runs().await {
+            changed(seen, &mut read).await;
+            match client
+                .list_runs(herdr_mcp_api::playground::RUNS_SHOWN)
+                .await
+            {
                 Ok(list) => {
                     runs.set(list);
                     error.set(None);
                 }
                 Err(e) => error.set(Some(format!("cannot list runs: {e}"))),
             }
-            TimeoutFuture::new(POLL_MS).await;
         }
     });
 
@@ -76,6 +121,15 @@ pub fn Runs() -> Element {
         .cloned()
         .collect();
     let picked = pick().and_then(|id| all.iter().find(|r| r.id == id).cloned());
+    let child_runs: Vec<(Uuid, String)> = picked
+        .as_ref()
+        .map(|p| {
+            all.iter()
+                .filter(|r| r.origin.parent() == Some(p.id))
+                .map(|r| (r.id, r.title().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
 
     rsx! {
         p { class: "field-desc",
@@ -120,7 +174,14 @@ pub fn Runs() -> Element {
                 }
             }
             match picked {
-                Some(run) => rsx! { RunDetail { key: "{run.id}", run } },
+                Some(run) => rsx! {
+                    RunDetail {
+                        key: "{run.id}",
+                        run,
+                        child_runs,
+                        on_open: move |id| pick.set(Some(id)),
+                    }
+                },
                 None => rsx! {
                     div { class: "card", p { class: "muted", "Pick a run to see its trail." } }
                 },
@@ -129,9 +190,16 @@ pub fn Runs() -> Element {
     }
 }
 
+/// `child_runs`: the runs this one started (its gate's hand-off, `recipe_run`
+/// steps); `on_open` picks one, or the parent.
 #[component]
-fn RunDetail(run: RunRecord) -> Element {
+fn RunDetail(
+    run: RunRecord,
+    child_runs: Vec<(Uuid, String)>,
+    on_open: EventHandler<Uuid>,
+) -> Element {
     let client = use_api();
+    let seen: Seen = use_context();
     let id = run.id;
     let mut events: Signal<Vec<RunEvent>> = use_signal(Vec::new);
     // With the trail of the child run its gate handed off to.
@@ -141,7 +209,9 @@ fn RunDetail(run: RunRecord) -> Element {
     // Re-read the log until it ends (a finished run's log never changes).
     use_future(move || async move {
         let client = client();
+        let mut read = None;
         loop {
+            changed(seen, &mut read).await;
             if let (Ok(list), Ok(text)) =
                 (client.run_events(id, 0).await, client.run_trail(id).await)
             {
@@ -152,7 +222,6 @@ fn RunDetail(run: RunRecord) -> Element {
                     break;
                 }
             }
-            TimeoutFuture::new(POLL_MS).await;
         }
     });
 
@@ -229,6 +298,23 @@ fn RunDetail(run: RunRecord) -> Element {
                         title: "Focus this pane in herdr: agents keep their sessions, so its scrollback shows what happened",
                         onclick: open_pane,
                         "Open pane {p}"
+                    }
+                }
+                if let Some(parent) = run.origin.parent() {
+                    button {
+                        class: "btn",
+                        title: "The run whose gate or step started this one",
+                        onclick: move |_| on_open.call(parent),
+                        "Open parent run"
+                    }
+                }
+                for (child, name) in child_runs.into_iter() {
+                    button {
+                        key: "{child}",
+                        class: "btn",
+                        title: "A run this one started",
+                        onclick: move |_| on_open.call(child),
+                        "Open {name}"
                     }
                 }
                 button { class: "btn", onclick: rerun, "Run again" }
