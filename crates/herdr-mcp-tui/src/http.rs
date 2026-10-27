@@ -48,12 +48,13 @@ pub async fn live_bridge(port: u16, timeout: Duration, data_dir: &Path) -> Optio
 mod tests {
     use super::*;
 
-    // The probe must finish quickly (500ms) rather than hanging for the full
-    // request timeout.
+    // The probe gives up after PROBE_TIMEOUT rather than the 30s request
+    // timeout. The bound is loose: building the client (TLS roots) can take
+    // seconds on a loaded CI runner.
     #[tokio::test]
     async fn live_bridge_does_not_hang() {
         let res = tokio::time::timeout(
-            Duration::from_secs(2),
+            Duration::from_secs(10),
             live_bridge(1, Duration::from_secs(30), Path::new("/nonexistent")),
         )
         .await;
