@@ -34,6 +34,17 @@ one (`data_dir` in `~/.config/herdr-mcp/config.toml`).
   tools (`agent_*`) take a `target`: a role, label or pane id.
 - `list_panes` shows each pane's agent and its status (`idle`, `working`,
   `blocked`, `done`).
+- **Your own pane is the default.** When your MCP client runs inside a
+  herdr pane, `split_pane` with no pane, and `agent_spawn` with no
+  workspace or tab, split *your* pane: right if it is wide, down if it is
+  tall. Focus stays where it is (`no_focus` defaults to true). Pass a pane,
+  workspace or tab to put work elsewhere.
+- Not every tool is listed. Recipe authoring, schedules, templates,
+  variables, HTTP, LLM and clipboard tools are off the list unless the user
+  adds them under `[mcp] tools`. Recipes and the UIs can still use them.
+  With `[mcp] recipes = "bridge"` the recipe tools are off it too: call
+  them through the bridge, `POST /api/tools/<name>` with the tool's
+  arguments (skills/herdr-mcp-recipes/SKILL.md).
 
 ## Waiting: pick the right tool
 

@@ -81,15 +81,16 @@ pub struct CreateTabParams {
 #[must_use]
 #[serde(deny_unknown_fields)]
 pub struct SplitPaneParams {
-    /// Pane ID to split (alternative to label).
+    /// Pane ID to split (or label). Neither: the caller's own pane, when
+    /// the MCP client runs inside herdr.
     pub pane_id: Option<String>,
     /// Pane label (alternative to pane_id).
     pub label: Option<String>,
-    /// Direction to split: "right" or "down".
+    /// "right" or "down"; default right for a wide pane, down for a tall one.
     pub direction: Option<String>,
     /// Working directory for the new pane.
     pub cwd: Option<String>,
-    /// Whether to skip focusing the new pane.
+    /// Leave focus where it is (default true).
     pub no_focus: Option<bool>,
 }
 
@@ -248,8 +249,12 @@ pub struct AgentSpawnParams {
     #[serde(default)]
     pub args: Vec<String>,
     pub cwd: Option<String>,
+    /// Split the first pane of this workspace (or of `tab_id`). Neither: an
+    /// MCP client inside herdr splits its own pane, anything else the
+    /// session's first pane.
     pub workspace_id: Option<String>,
     pub tab_id: Option<String>,
+    /// `right` or `down`; default right for a wide pane, down for a tall one.
     pub split: Option<String>,
     /// Targets (role or pane id) that must be idle before this agent starts.
     #[serde(default)]
@@ -633,6 +638,10 @@ pub struct HerdrMcpServer {
     pub tool_session: ToolSession,
     /// `[security]`: the tool policy, outbound guard, audit log and token.
     pub security: std::sync::Arc<crate::security::Security>,
+    /// `[mcp] tools`: what MCP clients list.
+    listed: std::sync::Arc<Vec<String>>,
+    /// `[mcp] recipes`: whether agents run recipes over the bridge.
+    recipes: herdr_mcp_core::RecipeAccess,
     /// Whether this is the copy serving [`ToolSession`], whose calls say
     /// where they came from ([`Origin::META_KEY`]); any other caller is an
     /// MCP client.
@@ -642,6 +651,90 @@ pub struct HerdrMcpServer {
 /// See [`HerdrMcpServer::tool_session`].
 pub type ToolSession =
     std::sync::Arc<tokio::sync::OnceCell<rmcp::service::RunningService<rmcp::RoleClient, ()>>>;
+
+/// The tools `[mcp] tools = ["core"]` lists: finding and laying out panes,
+/// driving agents and commands, waiting on them, and running saved recipes
+/// ([`CORE_RECIPE_TOOLS`]). Authoring recipes, schedules, templates,
+/// variables, HTTP, LLM and clipboard tools are for the UIs and recipes,
+/// or listed on request.
+const CORE_TOOLS: &[&str] = &[
+    "list_workspaces",
+    "list_tabs",
+    "list_panes",
+    "create_workspace",
+    "create_tab",
+    "split_pane",
+    "close_pane",
+    "read_pane",
+    "send_text",
+    "send_keys",
+    "run_command",
+    "pane_exec",
+    "herdr_api",
+    "wait_output",
+    "pane_watch",
+    "agent_spawn",
+    "agent_prompt",
+    "agent_message",
+    "agent_wait",
+    "agent_read",
+    "agent_interrupt",
+    "agent_list",
+    "recipe_list",
+    "recipe_run",
+    "run_get",
+    "run_control",
+];
+
+/// The recipe tools in [`CORE_TOOLS`], which `[mcp] recipes = "bridge"`
+/// leaves out of `core`: agents call them through the bridge instead
+/// (`skills/herdr-mcp-recipes`).
+const CORE_RECIPE_TOOLS: &[&str] = &["recipe_list", "recipe_run", "run_get", "run_control"];
+
+/// Whether `[mcp] tools` entry `entry` lists `tool`; with `recipes` on the
+/// bridge, `core` leaves out [`CORE_RECIPE_TOOLS`].
+fn lists(entry: &str, tool: &rmcp::model::Tool, recipes: herdr_mcp_core::RecipeAccess) -> bool {
+    let category = tool
+        .meta
+        .as_ref()
+        .and_then(|m| m.0.get("category"))
+        .and_then(serde_json::Value::as_str);
+    match entry {
+        "all" => true,
+        "core" => {
+            let name = tool.name.as_ref();
+            CORE_TOOLS.contains(&name)
+                && !(recipes == herdr_mcp_core::RecipeAccess::Bridge
+                    && CORE_RECIPE_TOOLS.contains(&name))
+        }
+        _ => entry == tool.name || category.is_some_and(|c| c.eq_ignore_ascii_case(entry)),
+    }
+}
+
+/// Shrink an input schema for an MCP client's context: an optional field's
+/// `"type": ["string", "null"]` becomes `"string"` (leaving it out already
+/// means null). The UIs read the full schemas from `/api/tools`.
+fn slim_schema(schema: &mut serde_json::Map<String, serde_json::Value>) {
+    use serde_json::Value;
+    if let Some(Value::Array(types)) = schema.get("type")
+        && let [a, b] = types.as_slice()
+        && (a == "null" || b == "null")
+    {
+        let kept = if a == "null" { b.clone() } else { a.clone() };
+        schema.insert("type".into(), kept);
+    }
+    for value in schema.values_mut() {
+        match value {
+            Value::Object(map) => slim_schema(map),
+            Value::Array(items) => items.iter_mut().for_each(|v| {
+                if let Value::Object(map) = v {
+                    slim_schema(map);
+                }
+            }),
+            _ => {}
+        }
+    }
+}
 
 /// A tool's `_meta.category`: the group the web and TUI playgrounds list it
 /// under (read back from `GET /api/tools`).
@@ -818,11 +911,19 @@ impl HerdrMcpServer {
             runs: crate::runs::Runs::default(),
             tool_session: ToolSession::default(),
             security: std::sync::Arc::new(crate::security::Security::new(config)),
+            listed: std::sync::Arc::new(config.mcp.tools.clone()),
+            recipes: config.mcp.recipes,
             in_process: false,
         };
         for tool in &config.security.disabled_tools {
             if !Self::tool_router().has_route(tool) {
                 tracing::warn!("[security] disabled-tools: no tool named {tool:?}");
+            }
+        }
+        let tools = Self::tool_router().list_all();
+        for entry in &config.mcp.tools {
+            if !tools.iter().any(|t| lists(entry, t, config.mcp.recipes)) {
+                tracing::warn!("[mcp] tools: {entry:?} is not core, all, a category or a tool");
             }
         }
         // Scheduled recipes run through the run engine like any other run.
@@ -1022,16 +1123,21 @@ impl HerdrMcpServer {
             cwd,
             no_focus,
         }): Parameters<SplitPaneParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let pid = resolve_pane_id(pane_id, label).await?;
-        let mut args = vec!["pane", "split", &pid];
-        if let Some(ref dir) = direction {
-            args.extend(["--direction", dir]);
-        }
+        let pid = match (pane_id, label, self.caller_pane(&context.meta)) {
+            (None, None, Some(caller)) => caller,
+            (pane_id, label, _) => resolve_pane_id(pane_id, label).await?,
+        };
+        let direction = match direction {
+            Some(d) => d,
+            None => crate::agents::split_direction(&pid).await.to_string(),
+        };
+        let mut args = vec!["pane", "split", &pid, "--direction", &direction];
         if let Some(ref path) = cwd {
             args.extend(["--cwd", path]);
         }
-        if no_focus.unwrap_or(false) {
+        if no_focus.unwrap_or(true) {
             args.push("--no-focus");
         }
         run_herdr_json(&args).await
@@ -1346,6 +1452,7 @@ impl HerdrMcpServer {
             label,
             in_pane,
         }): Parameters<AgentSpawnParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         if in_pane.is_some() && (cwd.is_some() || split.is_some() || tab_id.is_some()) {
             return Err(user_err(
@@ -1390,6 +1497,7 @@ impl HerdrMcpServer {
             crate::agents::Placement {
                 workspace: workspace_id.as_deref(),
                 tab: tab_id.as_deref(),
+                caller: self.caller_pane(&context.meta).as_deref(),
                 direction: split.as_deref(),
                 cwd: cwd.as_deref(),
                 pane: in_pane.as_deref(),
@@ -1483,7 +1591,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("A2A"),
-        description = "Prompt an agent and wait for its turn to finish; returns its reply. `target` may be a role, label or pane id. Works for any agent profile: herdr-native agents via `agent prompt --wait`, others by typing the prompt and waiting for herdr-mcp's idle detection. Returns {pane_id, role, agent, reply}; the reply is also stored as the agent's output ({{role.output}})."
+        description = "Prompt an agent and wait for its turn to finish; returns its reply. `target` may be a role, label or pane id. Works for any agent profile: herdr-native agents via `agent prompt --wait`, others by typing the prompt and waiting for herdr-mcp's idle detection. Returns {pane_id, role, agent, output}: output is the reply, also stored as the agent's output ({{role.output}})."
     )]
     async fn agent_prompt(
         &self,
@@ -1510,7 +1618,6 @@ impl HerdrMcpServer {
                 "pane_id": pane,
                 "role": role,
                 "agent": profile.id,
-                "reply": reply,
                 "output": reply,
             }))
             .map_err(to_mcp_err)?,
@@ -2232,21 +2339,7 @@ impl HerdrMcpServer {
     }
 }
 
-#[tool_handler(
-    name = "herdr-mcp",
-    instructions = "Control herdr — a terminal-native agent multiplexer. \
-                    Manage workspaces, tabs, and panes; spawn agents; \
-                    read output; send text, keys, and commands; \
-                    wait for output or agent status changes. \
-                    Recipes chain tool calls into saved, persisted runs: \
-                    recipe_list / recipe_save, then recipe_run and follow it \
-                    with run_get. pane_watch fires on NEW text in a pane, so \
-                    a recipe step can wait for an agent's reply before the \
-                    next one sends more. Needs herdr installed (https://herdr.dev). \
-                    IDs are session-local and may compact when items are closed — \
-                    re-read IDs from list commands after structural changes; \
-                    prefer labels. Guide: docs/AGENT-GUIDE.md in the herdr-mcp repo."
-)]
+#[tool_handler]
 impl ServerHandler for HerdrMcpServer {
     /// Every tool call, from any caller: refused if `[security]` says no,
     /// else routed; audited either way.
@@ -2277,19 +2370,120 @@ impl ServerHandler for HerdrMcpServer {
         result
     }
 
-    /// The tools `[security] disabled-tools` leaves.
+    /// The enabled tools `[mcp] tools` lists (the in-process session, which
+    /// the bridge and recipes call through, sees every one).
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<rmcp::model::ListToolsResult, McpError> {
+        let mut tools = self.enabled_tools();
+        if !self.in_process {
+            tools.retain(|t| self.listed.iter().any(|e| lists(e, t, self.recipes)));
+            for tool in &mut tools {
+                let mut schema = (*tool.input_schema).clone();
+                schema.remove("$schema");
+                slim_schema(&mut schema);
+                tool.input_schema = std::sync::Arc::new(schema);
+            }
+        }
         Ok(rmcp::model::ListToolsResult {
-            tools: self.enabled_tools(),
+            tools,
             meta: None,
             next_cursor: None,
         })
     }
+
+    fn get_info(&self) -> rmcp::model::ServerInfo {
+        rmcp::model::ServerInfo::new(
+            rmcp::model::ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
+        )
+        .with_server_info(rmcp::model::Implementation::new(
+            "herdr-mcp",
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_instructions(format!(
+            "{INSTRUCTIONS}\n{}",
+            match self.recipes {
+                herdr_mcp_core::RecipeAccess::Tools => RECIPES_BY_TOOL,
+                herdr_mcp_core::RecipeAccess::Bridge => RECIPES_BY_BRIDGE,
+            }
+        ))
+    }
+
+    /// The agent guide, for clients that read resources.
+    async fn list_resources(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListResourcesResult, McpError> {
+        use rmcp::model::AnnotateAble;
+        let mut guide = rmcp::model::RawResource::new(GUIDE_URI, "agent-guide");
+        guide.description = Some(
+            "How to drive herdr with these tools: finding panes, waiting, agents, recipes".into(),
+        );
+        guide.mime_type = Some("text/markdown".into());
+        Ok(rmcp::model::ListResourcesResult {
+            resources: vec![guide.no_annotation()],
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: rmcp::model::ReadResourceRequestParams,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ReadResourceResult, McpError> {
+        if request.uri != GUIDE_URI {
+            return Err(McpError::resource_not_found(
+                format!("no resource {}", request.uri),
+                None,
+            ));
+        }
+        Ok(rmcp::model::ReadResourceResult::new(vec![
+            rmcp::model::ResourceContents::text(GUIDE, GUIDE_URI),
+        ]))
+    }
 }
+
+const GUIDE_URI: &str = "herdr-mcp://agent-guide";
+const GUIDE: &str = include_str!("../../../docs/AGENT-GUIDE.md");
+
+/// Sent to every MCP client at connect: what herdr-mcp is for, and the
+/// rules herdr's own agent skill teaches, said in these tools' terms.
+const INSTRUCTIONS: &str = "\
+Control herdr, the terminal multiplexer for coding agents: workspaces → tabs → panes \
+(ids like w1, w1:t1, w1:p2; prefer labels, and re-read ids with list_panes after \
+closing or moving panes; never guess them).
+- Placement: from inside a herdr pane, split_pane and agent_spawn split YOUR pane by \
+default (right if it is wide, down if tall) and leave focus where it is. Don't create \
+workspaces or tabs unless asked.
+- Delegate: agent_spawn, then agent_prompt (sends, waits for the turn to end, returns the \
+reply). agent_message only sends. Commands: pane_exec waits and returns exit code and \
+output; run_command only queues the line.
+- Agent states: idle/done = ready for input; working = busy; blocked = an approval or \
+question is on screen: read it (agent_read) and ask the user before answering; unknown \
+does not mean finished.
+- A timeout does not mean the prompt was lost: read the pane before sending it again.
+- Close only panes and tabs you created, unless the user asks.
+- If the user can't copy text out of an agent's TUI, point them to the bridge's web page \
+(http://localhost:7676 by default): it sends to and reads any pane as plain browser text.
+- herdr_api calls any herdr socket method (worktree.*, pane.move, layout, notifications) \
+when no tool covers it.
+Not every tool is listed (recipe authoring, schedules, templates, variables, HTTP, LLM, \
+clipboard): the user can list them under [mcp] tools in herdr-mcp's config. More: the \
+herdr-mcp://agent-guide resource.";
+
+/// The recipes rule [`INSTRUCTIONS`] ends with, per `[mcp] recipes`.
+const RECIPES_BY_TOOL: &str =
+    "- Recipes: recipe_list, recipe_run, then run_get (trail: true explains a failure).";
+const RECIPES_BY_BRIDGE: &str = "\
+- Recipes (saved tool-call sequences) run through herdr-mcp's HTTP bridge, not MCP tools: \
+use the herdr-mcp-recipes skill.";
 
 /// Error code of a call `[security]` refuses (the bridge answers 403).
 const FORBIDDEN: rmcp::model::ErrorCode = rmcp::model::ErrorCode(-32001);
@@ -2310,6 +2504,15 @@ impl HerdrMcpServer {
             .and_then(serde_json::Value::as_str)
             .and_then(Origin::parse)
             .unwrap_or(Origin::Api)
+    }
+
+    /// The herdr pane an MCP client runs in: this stdio server inherits its
+    /// environment. None for the bridge and recipes (the env is the
+    /// bridge's own) and outside herdr.
+    fn caller_pane(&self, meta: &rmcp::model::Meta) -> Option<String> {
+        (self.origin(meta) == Origin::Mcp)
+            .then(herdr_mcp_core::session_context::pane_id)
+            .flatten()
     }
 
     /// Every tool not in `[security] disabled-tools`.
@@ -3868,6 +4071,71 @@ async fn delete_variable_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use herdr_mcp_core::RecipeAccess;
+
+    /// Every core tool exists (a rename would silently unlist it), the
+    /// defaults list exactly those, and a category or name lists more.
+    #[test]
+    fn mcp_tools_list_core_by_default() {
+        let tools = HerdrMcpServer::tool_router().list_all();
+        let listed = |entries: &[&str]| -> Vec<String> {
+            tools
+                .iter()
+                .filter(|t| entries.iter().any(|e| lists(e, t, RecipeAccess::Tools)))
+                .map(|t| t.name.to_string())
+                .collect()
+        };
+        let defaults = herdr_mcp_core::McpConfig::default().tools;
+        let entries: Vec<&str> = defaults.iter().map(String::as_str).collect();
+        let core = listed(&entries);
+        assert_eq!(core.len(), CORE_TOOLS.len(), "{core:?}");
+        let extra = listed(&["core", "scheduler", "llm_call"]);
+        assert_eq!(extra.len(), CORE_TOOLS.len() + 5, "{extra:?}");
+        assert_eq!(listed(&["all"]).len(), tools.len());
+    }
+
+    /// `[mcp] recipes = "bridge"` drops the recipe tools from `core` only.
+    #[test]
+    fn bridge_recipes_leave_core() {
+        let tools = HerdrMcpServer::tool_router().list_all();
+        let listed = |entry: &str| -> Vec<String> {
+            tools
+                .iter()
+                .filter(|t| lists(entry, t, RecipeAccess::Bridge))
+                .map(|t| t.name.to_string())
+                .collect()
+        };
+        let core = listed("core");
+        assert_eq!(core.len(), CORE_TOOLS.len() - CORE_RECIPE_TOOLS.len());
+        assert!(!core.iter().any(|t| t == "recipe_run"), "{core:?}");
+        assert_eq!(listed("recipe_run"), ["recipe_run"]);
+    }
+
+    #[test]
+    fn slim_schema_drops_null_from_optional_types() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "label": { "type": ["string", "null"], "description": "d" },
+                "type": { "type": "string" },
+                "steps": { "type": ["array", "null"], "items": { "type": ["integer", "null"] } },
+            },
+            "anyOf": [{ "type": ["null", "boolean"] }],
+        });
+        slim_schema(schema.as_object_mut().unwrap());
+        assert_eq!(
+            schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "d" },
+                    "type": { "type": "string" },
+                    "steps": { "type": "array", "items": { "type": "integer" } },
+                },
+                "anyOf": [{ "type": "boolean" }],
+            })
+        );
+    }
     use crate::variables::RecipeStep;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -4118,15 +4386,11 @@ mod tests {
     #[tokio::test]
     async fn agent_spawn_fails_on_unknown_need_before_spawning() {
         let server = clipboard_test_server();
-        let params: AgentSpawnParams =
-            serde_json::from_value(serde_json::json!({"agent": "shell", "needs": ["ghost"]}))
-                .unwrap();
-        let err = server.agent_spawn(Parameters(params)).await.unwrap_err();
-        assert!(
-            err.message.contains("needs: no agent 'ghost'"),
-            "{}",
-            err.message
-        );
+        let args = serde_json::json!({"agent": "shell", "needs": ["ghost"]});
+        let (_, err) = dispatch_tool(&server, "agent_spawn", args, Origin::Api)
+            .await
+            .unwrap_err();
+        assert!(err.contains("needs: no agent 'ghost'"), "{err}");
     }
 
     /// Two saves at once (two rows, or the web UI and the TUI) both land,

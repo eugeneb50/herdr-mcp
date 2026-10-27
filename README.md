@@ -251,6 +251,43 @@ need Ctrl or Alt (or are F1–F12), may not take a chord a tab already uses
 (`ctrl+s`, `ctrl+k`, …) and may not be bound twice; the Settings page refuses
 them and says why. Reset (one setting or all) goes back to the defaults.
 
+### What MCP clients see
+
+Every tool an MCP client lists costs the agent context on every turn, so
+`tools/list` shows a core set by default: about half the schema of all 46.
+Unlisted tools still run in recipes and from the web UI and TUI.
+
+```toml
+[mcp]
+# "core" (default), "all", a category ("Scheduler", "Templates", "LLM",
+# "HTTP", "Variables", "Clipboard", "Recipes", …) or a tool name.
+tools = ["core", "Scheduler", "recipe_save"]
+```
+
+The core set: `list_workspaces`, `list_tabs`, `list_panes`,
+`create_workspace`, `create_tab`, `split_pane`, `close_pane`, `read_pane`,
+`send_text`, `send_keys`, `run_command`, `pane_exec`, `herdr_api`,
+`wait_output`, `pane_watch`, the `agent_*` tools, `recipe_list`,
+`recipe_run`, `run_get` and `run_control`. Tool schemas go out without
+`$schema` and with optional fields typed plainly (`"string"`, not
+`["string", "null"]`); `/api/tools` keeps the full ones.
+
+Local yolo mode, `recipes = "bridge"` under `[mcp]`, drops the four recipe
+tools from `core` (about 4.5 KB of schema) and tells agents to run recipes
+through the HTTP bridge with curl, as
+[skills/herdr-mcp-recipes](skills/herdr-mcp-recipes/SKILL.md) shows. Copy
+that folder into your agent's skills directory (Claude Code:
+`~/.claude/skills/`). It needs a bridge on loopback without a token, and
+the bridge counts as the user, so `[security] agent-triggers` doesn't hold
+there: use it only on a machine where you trust your agents.
+
+At connect the server sends agents short usage rules: herdr's own
+skill, said in these tools' terms. It also serves
+[docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md) as the resource
+`herdr-mcp://agent-guide`. An MCP client running inside a herdr pane gets
+that pane as its default: `split_pane` and `agent_spawn` split it (right
+when it's wide, down when it's tall) without moving focus.
+
 ### Security
 
 `[security]` limits what callers may do. It is read from the config file at

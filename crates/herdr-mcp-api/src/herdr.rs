@@ -67,13 +67,14 @@ impl RecipeTrigger {
 }
 
 /// One pane as herdr's `pane list` reports it. herdr owns this data; the
-/// bridge only relays it (fields herdr adds later are ignored).
+/// bridge only relays it, minus what costs agents context and nobody reads
+/// (`terminal_title`, fields herdr adds later).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct HerdrPane {
     pub pane_id: String,
     pub workspace_id: String,
     pub tab_id: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub focused: bool,
     /// `idle`, `working`, `blocked`, `done` or `unknown`.
     #[serde(default)]
@@ -88,8 +89,6 @@ pub struct HerdrPane {
     /// cwd of the pane's foreground process, when it differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub foreground_cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub terminal_title: Option<String>,
 }
 
 /// One named herdr session (`herdr session list --json`).

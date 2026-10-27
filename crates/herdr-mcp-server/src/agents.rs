@@ -105,11 +105,44 @@ async fn anchor_pane(workspace: Option<&str>, tab: Option<&str>) -> Result<Strin
         .ok_or_else(|| to_mcp_err("no pane to split for the new agent (is herdr running?)"))
 }
 
+/// `right` for a pane wider than it is tall on screen (a cell is about
+/// twice as tall as it is wide), else `down`: herdr's rule, so repeated
+/// splits don't leave slivers. `right` when herdr can't say.
+pub async fn split_direction(pane: &str) -> &'static str {
+    match herdr(&["pane".into(), "layout".into(), "--pane".into(), pane.into()]).await {
+        Ok(layout) => direction_in(&layout, pane),
+        Err(_) => "right",
+    }
+}
+
+/// [`split_direction`] of `pane` in `herdr pane layout` output.
+fn direction_in(layout: &str, pane: &str) -> &'static str {
+    let rect = serde_json::from_str::<serde_json::Value>(layout)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/result/layout/panes")?
+                .as_array()?
+                .iter()
+                .find(|p| p.get("pane_id").and_then(serde_json::Value::as_str) == Some(pane))?
+                .get("rect")
+                .cloned()
+        });
+    let side = |k| rect.as_ref().and_then(|r| r.get(k)?.as_u64()).unwrap_or(0);
+    if side("width") >= 2 * side("height") {
+        "right"
+    } else {
+        "down"
+    }
+}
+
 /// Where a new agent goes.
 pub struct Placement<'a> {
     pub workspace: Option<&'a str>,
     pub tab: Option<&'a str>,
-    /// `right` (default) or `down`.
+    /// The caller's own pane: split when neither `workspace` nor `tab` is
+    /// given.
+    pub caller: Option<&'a str>,
+    /// `right` or `down`; default [`split_direction`] of the pane split.
     pub direction: Option<&'a str>,
     pub cwd: Option<&'a str>,
     /// An existing pane to start in instead of splitting a new one.
@@ -129,13 +162,18 @@ pub async fn spawn(
     let pane = match at.pane {
         Some(pane) => pane.to_string(),
         None => {
-            let anchor = anchor_pane(at.workspace, at.tab).await?;
-            let split = herdr(&split_args(
-                &anchor,
-                at.direction.unwrap_or("right"),
-                at.cwd,
-            ))
-            .await?;
+            let anchor = match at
+                .caller
+                .filter(|_| at.workspace.is_none() && at.tab.is_none())
+            {
+                Some(pane) => pane.to_string(),
+                None => anchor_pane(at.workspace, at.tab).await?,
+            };
+            let direction = match at.direction {
+                Some(d) => d,
+                None => split_direction(&anchor).await,
+            };
+            let split = herdr(&split_args(&anchor, direction, at.cwd)).await?;
             let json: serde_json::Value = serde_json::from_str(&split).map_err(to_mcp_err)?;
             extract_pane_id(&json).ok_or_else(|| to_mcp_err("pane split returned no pane id"))?
         }
@@ -370,6 +408,18 @@ pub(crate) fn extract_reply(output: &str, prompt: &str, fallback: usize) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wide panes split right, tall ones down; a pane herdr didn't list
+    /// splits right.
+    #[test]
+    fn split_direction_follows_the_pane_shape() {
+        let layout = r#"{"result":{"layout":{"panes":[
+            {"pane_id":"w1:p1","rect":{"width":207,"height":51}},
+            {"pane_id":"w1:p2","rect":{"width":80,"height":51}}]}}}"#;
+        assert_eq!(direction_in(layout, "w1:p1"), "right");
+        assert_eq!(direction_in(layout, "w1:p2"), "down");
+        assert_eq!(direction_in(layout, "w1:p9"), "right");
+    }
 
     #[test]
     fn quotes_only_what_needs_it() {

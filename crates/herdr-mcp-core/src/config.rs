@@ -31,6 +31,10 @@ pub struct Config {
     /// changed over the API.
     #[serde(default)]
     pub security: SecurityConfig,
+
+    /// `[mcp]`: what MCP clients are shown.
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 /// `[security]`: limits on what MCP clients, recipe runs and the bridge may
@@ -166,6 +170,43 @@ impl Default for Config {
             clipboard: Default::default(),
             settings: BTreeMap::new(),
             security: Default::default(),
+            mcp: Default::default(),
+        }
+    }
+}
+
+/// `[mcp]`: what MCP clients are shown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
+pub struct McpConfig {
+    /// The tools MCP clients list: `core` (panes, agents, waits, running
+    /// saved recipes), `all`, a category (`Scheduler`, `Templates`, `LLM`,
+    /// …) or a tool name. Each listed tool's schema costs the agent context
+    /// on every turn. Unlisted tools still run in recipes and from the web
+    /// UI and TUI; `[security] disabled-tools` turns a tool off everywhere.
+    pub tools: Vec<String>,
+    /// How agents run recipes. `tools` (default): through the MCP recipe
+    /// tools in `core`. `bridge`: local yolo mode — `core` leaves them out
+    /// and agents call them through the HTTP bridge with curl (the
+    /// herdr-mcp-recipes skill). The bridge counts as the user, so
+    /// `[security] agent-triggers` doesn't hold there.
+    pub recipes: RecipeAccess,
+}
+
+/// `[mcp] recipes`: see [`McpConfig::recipes`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecipeAccess {
+    #[default]
+    Tools,
+    Bridge,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            tools: vec!["core".into()],
+            recipes: RecipeAccess::Tools,
         }
     }
 }
@@ -241,6 +282,7 @@ impl Config {
             clipboard: other.clipboard,
             settings: other.settings,
             security: other.security,
+            mcp: other.mcp,
         }
     }
 
