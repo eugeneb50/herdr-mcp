@@ -640,6 +640,8 @@ pub struct HerdrMcpServer {
     pub security: std::sync::Arc<crate::security::Security>,
     /// `[mcp] tools`: what MCP clients list.
     listed: std::sync::Arc<Vec<String>>,
+    /// `[mcp] recipes`: whether agents run recipes over the bridge.
+    recipes: herdr_mcp_core::RecipeAccess,
     /// Whether this is the copy serving [`ToolSession`], whose calls say
     /// where they came from ([`Origin::META_KEY`]); any other caller is an
     /// MCP client.
@@ -651,9 +653,10 @@ pub type ToolSession =
     std::sync::Arc<tokio::sync::OnceCell<rmcp::service::RunningService<rmcp::RoleClient, ()>>>;
 
 /// The tools `[mcp] tools = ["core"]` lists: finding and laying out panes,
-/// driving agents and commands, waiting on them, and running saved recipes.
-/// Authoring recipes, schedules, templates, variables, HTTP, LLM and
-/// clipboard tools are for the UIs and recipes, or listed on request.
+/// driving agents and commands, waiting on them, and running saved recipes
+/// ([`CORE_RECIPE_TOOLS`]). Authoring recipes, schedules, templates,
+/// variables, HTTP, LLM and clipboard tools are for the UIs and recipes,
+/// or listed on request.
 const CORE_TOOLS: &[&str] = &[
     "list_workspaces",
     "list_tabs",
@@ -683,8 +686,14 @@ const CORE_TOOLS: &[&str] = &[
     "run_control",
 ];
 
-/// Whether `[mcp] tools` entry `entry` lists `tool`.
-fn lists(entry: &str, tool: &rmcp::model::Tool) -> bool {
+/// The recipe tools in [`CORE_TOOLS`], which `[mcp] recipes = "bridge"`
+/// leaves out of `core`: agents call them through the bridge instead
+/// (`skills/herdr-mcp-recipes`).
+const CORE_RECIPE_TOOLS: &[&str] = &["recipe_list", "recipe_run", "run_get", "run_control"];
+
+/// Whether `[mcp] tools` entry `entry` lists `tool`; with `recipes` on the
+/// bridge, `core` leaves out [`CORE_RECIPE_TOOLS`].
+fn lists(entry: &str, tool: &rmcp::model::Tool, recipes: herdr_mcp_core::RecipeAccess) -> bool {
     let category = tool
         .meta
         .as_ref()
@@ -692,8 +701,38 @@ fn lists(entry: &str, tool: &rmcp::model::Tool) -> bool {
         .and_then(serde_json::Value::as_str);
     match entry {
         "all" => true,
-        "core" => CORE_TOOLS.contains(&tool.name.as_ref()),
+        "core" => {
+            let name = tool.name.as_ref();
+            CORE_TOOLS.contains(&name)
+                && !(recipes == herdr_mcp_core::RecipeAccess::Bridge
+                    && CORE_RECIPE_TOOLS.contains(&name))
+        }
         _ => entry == tool.name || category.is_some_and(|c| c.eq_ignore_ascii_case(entry)),
+    }
+}
+
+/// Shrink an input schema for an MCP client's context: an optional field's
+/// `"type": ["string", "null"]` becomes `"string"` (leaving it out already
+/// means null). The UIs read the full schemas from `/api/tools`.
+fn slim_schema(schema: &mut serde_json::Map<String, serde_json::Value>) {
+    use serde_json::Value;
+    if let Some(Value::Array(types)) = schema.get("type")
+        && let [a, b] = types.as_slice()
+        && (a == "null" || b == "null")
+    {
+        let kept = if a == "null" { b.clone() } else { a.clone() };
+        schema.insert("type".into(), kept);
+    }
+    for value in schema.values_mut() {
+        match value {
+            Value::Object(map) => slim_schema(map),
+            Value::Array(items) => items.iter_mut().for_each(|v| {
+                if let Value::Object(map) = v {
+                    slim_schema(map);
+                }
+            }),
+            _ => {}
+        }
     }
 }
 
@@ -873,6 +912,7 @@ impl HerdrMcpServer {
             tool_session: ToolSession::default(),
             security: std::sync::Arc::new(crate::security::Security::new(config)),
             listed: std::sync::Arc::new(config.mcp.tools.clone()),
+            recipes: config.mcp.recipes,
             in_process: false,
         };
         for tool in &config.security.disabled_tools {
@@ -882,7 +922,7 @@ impl HerdrMcpServer {
         }
         let tools = Self::tool_router().list_all();
         for entry in &config.mcp.tools {
-            if !tools.iter().any(|t| lists(entry, t)) {
+            if !tools.iter().any(|t| lists(entry, t, config.mcp.recipes)) {
                 tracing::warn!("[mcp] tools: {entry:?} is not core, all, a category or a tool");
             }
         }
@@ -1551,7 +1591,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("A2A"),
-        description = "Prompt an agent and wait for its turn to finish; returns its reply. `target` may be a role, label or pane id. Works for any agent profile: herdr-native agents via `agent prompt --wait`, others by typing the prompt and waiting for herdr-mcp's idle detection. Returns {pane_id, role, agent, reply}; the reply is also stored as the agent's output ({{role.output}})."
+        description = "Prompt an agent and wait for its turn to finish; returns its reply. `target` may be a role, label or pane id. Works for any agent profile: herdr-native agents via `agent prompt --wait`, others by typing the prompt and waiting for herdr-mcp's idle detection. Returns {pane_id, role, agent, output}: output is the reply, also stored as the agent's output ({{role.output}})."
     )]
     async fn agent_prompt(
         &self,
@@ -1578,7 +1618,6 @@ impl HerdrMcpServer {
                 "pane_id": pane,
                 "role": role,
                 "agent": profile.id,
-                "reply": reply,
                 "output": reply,
             }))
             .map_err(to_mcp_err)?,
@@ -2340,7 +2379,13 @@ impl ServerHandler for HerdrMcpServer {
     ) -> Result<rmcp::model::ListToolsResult, McpError> {
         let mut tools = self.enabled_tools();
         if !self.in_process {
-            tools.retain(|t| self.listed.iter().any(|e| lists(e, t)));
+            tools.retain(|t| self.listed.iter().any(|e| lists(e, t, self.recipes)));
+            for tool in &mut tools {
+                let mut schema = (*tool.input_schema).clone();
+                schema.remove("$schema");
+                slim_schema(&mut schema);
+                tool.input_schema = std::sync::Arc::new(schema);
+            }
         }
         Ok(rmcp::model::ListToolsResult {
             tools,
@@ -2360,7 +2405,13 @@ impl ServerHandler for HerdrMcpServer {
             "herdr-mcp",
             env!("CARGO_PKG_VERSION"),
         ))
-        .with_instructions(INSTRUCTIONS.to_string())
+        .with_instructions(format!(
+            "{INSTRUCTIONS}\n{}",
+            match self.recipes {
+                herdr_mcp_core::RecipeAccess::Tools => RECIPES_BY_TOOL,
+                herdr_mcp_core::RecipeAccess::Bridge => RECIPES_BY_BRIDGE,
+            }
+        ))
     }
 
     /// The agent guide, for clients that read resources.
@@ -2423,10 +2474,16 @@ does not mean finished.
 (http://localhost:7676 by default): it sends to and reads any pane as plain browser text.
 - herdr_api calls any herdr socket method (worktree.*, pane.move, layout, notifications) \
 when no tool covers it.
-- Recipes: recipe_list, recipe_run, then run_get (trail: true explains a failure).
 Not every tool is listed (recipe authoring, schedules, templates, variables, HTTP, LLM, \
 clipboard): the user can list them under [mcp] tools in herdr-mcp's config. More: the \
 herdr-mcp://agent-guide resource.";
+
+/// The recipes rule [`INSTRUCTIONS`] ends with, per `[mcp] recipes`.
+const RECIPES_BY_TOOL: &str =
+    "- Recipes: recipe_list, recipe_run, then run_get (trail: true explains a failure).";
+const RECIPES_BY_BRIDGE: &str = "\
+- Recipes (saved tool-call sequences) run through herdr-mcp's HTTP bridge, not MCP tools: \
+use the herdr-mcp-recipes skill.";
 
 /// Error code of a call `[security]` refuses (the bridge answers 403).
 const FORBIDDEN: rmcp::model::ErrorCode = rmcp::model::ErrorCode(-32001);
@@ -4014,6 +4071,7 @@ async fn delete_variable_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use herdr_mcp_core::RecipeAccess;
 
     /// Every core tool exists (a rename would silently unlist it), the
     /// defaults list exactly those, and a category or name lists more.
@@ -4023,7 +4081,7 @@ mod tests {
         let listed = |entries: &[&str]| -> Vec<String> {
             tools
                 .iter()
-                .filter(|t| entries.iter().any(|e| lists(e, t)))
+                .filter(|t| entries.iter().any(|e| lists(e, t, RecipeAccess::Tools)))
                 .map(|t| t.name.to_string())
                 .collect()
         };
@@ -4034,6 +4092,49 @@ mod tests {
         let extra = listed(&["core", "scheduler", "llm_call"]);
         assert_eq!(extra.len(), CORE_TOOLS.len() + 5, "{extra:?}");
         assert_eq!(listed(&["all"]).len(), tools.len());
+    }
+
+    /// `[mcp] recipes = "bridge"` drops the recipe tools from `core` only.
+    #[test]
+    fn bridge_recipes_leave_core() {
+        let tools = HerdrMcpServer::tool_router().list_all();
+        let listed = |entry: &str| -> Vec<String> {
+            tools
+                .iter()
+                .filter(|t| lists(entry, t, RecipeAccess::Bridge))
+                .map(|t| t.name.to_string())
+                .collect()
+        };
+        let core = listed("core");
+        assert_eq!(core.len(), CORE_TOOLS.len() - CORE_RECIPE_TOOLS.len());
+        assert!(!core.iter().any(|t| t == "recipe_run"), "{core:?}");
+        assert_eq!(listed("recipe_run"), ["recipe_run"]);
+    }
+
+    #[test]
+    fn slim_schema_drops_null_from_optional_types() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "label": { "type": ["string", "null"], "description": "d" },
+                "type": { "type": "string" },
+                "steps": { "type": ["array", "null"], "items": { "type": ["integer", "null"] } },
+            },
+            "anyOf": [{ "type": ["null", "boolean"] }],
+        });
+        slim_schema(schema.as_object_mut().unwrap());
+        assert_eq!(
+            schema,
+            json!({
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "description": "d" },
+                    "type": { "type": "string" },
+                    "steps": { "type": "array", "items": { "type": "integer" } },
+                },
+                "anyOf": [{ "type": "boolean" }],
+            })
+        );
     }
     use crate::variables::RecipeStep;
     use pretty_assertions::assert_eq;

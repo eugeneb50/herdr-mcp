@@ -268,7 +268,18 @@ The core set: `list_workspaces`, `list_tabs`, `list_panes`,
 `create_workspace`, `create_tab`, `split_pane`, `close_pane`, `read_pane`,
 `send_text`, `send_keys`, `run_command`, `pane_exec`, `herdr_api`,
 `wait_output`, `pane_watch`, the `agent_*` tools, `recipe_list`,
-`recipe_run`, `run_get` and `run_control`.
+`recipe_run`, `run_get` and `run_control`. Tool schemas go out without
+`$schema` and with optional fields typed plainly (`"string"`, not
+`["string", "null"]`); `/api/tools` keeps the full ones.
+
+Local yolo mode, `recipes = "bridge"` under `[mcp]`, drops the four recipe
+tools from `core` (about 4.5 KB of schema) and tells agents to run recipes
+through the HTTP bridge with curl, as
+[skills/herdr-mcp-recipes](skills/herdr-mcp-recipes/SKILL.md) shows. Copy
+that folder into your agent's skills directory (Claude Code:
+`~/.claude/skills/`). It needs a bridge on loopback without a token, and
+the bridge counts as the user, so `[security] agent-triggers` doesn't hold
+there: use it only on a machine where you trust your agents.
 
 At connect the server sends agents short usage rules: herdr's own
 skill, said in these tools' terms. It also serves

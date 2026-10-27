@@ -360,9 +360,12 @@ appends to the audit log after:
 - **Policy:** `disabled-tools` are refused (and hidden from both tool
   lists). `[mcp] tools` only narrows what external MCP clients list
   (`CORE_TOOLS` by default; `lists` matches core, all, a category or a
-  name). The in-process session and `/api/tools` see every enabled tool.
-  `get_info` sends `INSTRUCTIONS` (herdr's skill rules, said in these
-  tools' terms) and enables resources, so `herdr-mcp://agent-guide` serves
+  name; `[mcp] recipes = "bridge"` takes `CORE_RECIPE_TOOLS` out of core)
+  and gets schemas through `slim_schema` (no `$schema`, no `null` in
+  optional types). The in-process session and `/api/tools` see every
+  enabled tool, schemas whole. `get_info` sends `INSTRUCTIONS` (herdr's
+  skill rules, said in these tools' terms, ending with the recipes rule for
+  the `[mcp] recipes` mode) and enables resources, so `herdr-mcp://agent-guide` serves
   AGENT-GUIDE.md. `caller_pane` is the client's `HERDR_PANE_ID`, inherited
   by this stdio process, and `mcp` calls only: `split_pane` and
   `agent_spawn` split it by default (`agents::split_direction`: right if

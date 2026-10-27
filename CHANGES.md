@@ -15,6 +15,13 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   down when it's tall. **(breaking)** `split_pane` leaves focus where it is
   unless `no_focus: false`; `agent_spawn` with no workspace or tab splits
   the caller's pane instead of the session's first one.
+- **Less context per call.** `agent_prompt` returns the reply once, as
+  `output` **(breaking: no `reply`)**. `list_panes` drops `terminal_title`,
+  `focused: false` and a `foreground_cwd` equal to `cwd` (about 60% smaller
+  on a 38-pane session). MCP clients get schemas without `$schema` and
+  without `null` in optional fields' types. `[mcp] recipes = "bridge"`
+  (local yolo mode) takes the recipe tools off `core`; agents run recipes
+  over the bridge with the new `skills/herdr-mcp-recipes` skill.
 - **Runs, completed.** The web Runs tab updates live from the run event
   stream instead of re-reading every 2 s, and both Runs views list the
   newest 200 runs (`GET /api/runs?limit=`, which only reads those runs'

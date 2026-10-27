@@ -73,15 +73,23 @@ pub async fn panes(filter: &PaneFilter) -> Result<Vec<HerdrPane>, McpError> {
     Ok(panes.into_iter().filter(|p| filter.matches(p)).collect())
 }
 
-/// `herdr pane list` stdout → panes (`{"result": {"panes": [...]}}`).
+/// `herdr pane list` stdout → panes (`{"result": {"panes": [...]}}`),
+/// `foreground_cwd` kept only where it differs from `cwd` (herdr always
+/// sends it).
 fn parse_panes(raw: &str) -> Result<Vec<HerdrPane>, String> {
     #[derive(Deserialize)]
     struct Envelope {
         result: PanesResponse,
     }
-    serde_json::from_str::<Envelope>(raw)
+    let mut panes = serde_json::from_str::<Envelope>(raw)
         .map(|e| e.result.panes)
-        .map_err(|e| format!("herdr pane list: {e}"))
+        .map_err(|e| format!("herdr pane list: {e}"))?;
+    for p in &mut panes {
+        if p.foreground_cwd == p.cwd {
+            p.foreground_cwd = None;
+        }
+    }
+    Ok(panes)
 }
 
 #[cfg(test)]
@@ -92,13 +100,25 @@ mod tests {
     fn parses_herdr_pane_list() {
         let raw = r#"{"id":"cli:pane:list","result":{"panes":[
             {"pane_id":"w1:p1","workspace_id":"w1","tab_id":"w1:t1","focused":true,
-             "agent_status":"unknown","terminal_id":"t","revision":5,"label":null},
+             "agent_status":"unknown","terminal_id":"t","revision":5,"label":null,
+             "cwd":"/a","foreground_cwd":"/a","terminal_title":"me@host:/a"},
             {"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t2","focused":false,
-             "agent_status":"idle","agent":"claude","revision":1}]}}"#;
+             "agent_status":"idle","agent":"claude","revision":1,
+             "cwd":"/a","foreground_cwd":"/a/b"}]}}"#;
         let panes = parse_panes(raw).unwrap();
         assert_eq!(panes.len(), 2);
         assert_eq!(panes[0].label, None);
+        assert_eq!(panes[0].foreground_cwd, None);
+        assert_eq!(panes[1].foreground_cwd.as_deref(), Some("/a/b"));
         assert_eq!(panes[1].agent.as_deref(), Some("claude"));
+        // Only what agents read goes out: no title, no `focused: false`.
+        let out = serde_json::to_value(&panes).unwrap();
+        assert_eq!(
+            out[1],
+            serde_json::json!({"pane_id":"w1:p2","workspace_id":"w1","tab_id":"w1:t2",
+                "agent_status":"idle","agent":"claude","cwd":"/a","foreground_cwd":"/a/b"})
+        );
+        assert_eq!(out[0]["focused"], true);
         assert!(parse_panes(r#"{"error":{"code":"x"}}"#).is_err());
     }
 

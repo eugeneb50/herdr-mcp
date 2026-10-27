@@ -185,12 +185,28 @@ pub struct McpConfig {
     /// on every turn. Unlisted tools still run in recipes and from the web
     /// UI and TUI; `[security] disabled-tools` turns a tool off everywhere.
     pub tools: Vec<String>,
+    /// How agents run recipes. `tools` (default): through the MCP recipe
+    /// tools in `core`. `bridge`: local yolo mode — `core` leaves them out
+    /// and agents call them through the HTTP bridge with curl (the
+    /// herdr-mcp-recipes skill). The bridge counts as the user, so
+    /// `[security] agent-triggers` doesn't hold there.
+    pub recipes: RecipeAccess,
+}
+
+/// `[mcp] recipes`: see [`McpConfig::recipes`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecipeAccess {
+    #[default]
+    Tools,
+    Bridge,
 }
 
 impl Default for McpConfig {
     fn default() -> Self {
         Self {
             tools: vec!["core".into()],
+            recipes: RecipeAccess::Tools,
         }
     }
 }

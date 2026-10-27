@@ -42,6 +42,9 @@ one (`data_dir` in `~/.config/herdr-mcp/config.toml`).
 - Not every tool is listed. Recipe authoring, schedules, templates,
   variables, HTTP, LLM and clipboard tools are off the list unless the user
   adds them under `[mcp] tools`. Recipes and the UIs can still use them.
+  With `[mcp] recipes = "bridge"` the recipe tools are off it too: call
+  them through the bridge, `POST /api/tools/<name>` with the tool's
+  arguments (skills/herdr-mcp-recipes/SKILL.md).
 
 ## Waiting: pick the right tool
 
