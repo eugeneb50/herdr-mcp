@@ -264,10 +264,16 @@ pub struct HerdrClient {
     subscriber_state: SubscriberState,
     /// Relays herdr's event stream to in-process listeners (triggers, SSE).
     events: broadcast::Sender<HerdrEvent>,
+    /// The last [`RECENT_EVENTS`] events, oldest first: what a new
+    /// `/api/herdr/events` stream starts with.
+    recent: Arc<std::sync::Mutex<std::collections::VecDeque<HerdrEvent>>>,
 }
 
 /// herdr events buffered per listener before it lags (and skips ahead).
 const EVENT_BUFFER: usize = 256;
+
+/// herdr events kept for streams that start later.
+const RECENT_EVENTS: usize = 200;
 
 impl HerdrClient {
     pub fn new(
@@ -283,12 +289,31 @@ impl HerdrClient {
             reconnect_backoff_ms,
             subscriber_state: SubscriberState::new(),
             events: broadcast::channel(EVENT_BUFFER).0,
+            recent: Arc::default(),
         }
     }
 
     /// herdr's events from now on, as the subscriber receives them.
     pub fn events(&self) -> broadcast::Receiver<HerdrEvent> {
         self.events.subscribe()
+    }
+
+    /// The last [`RECENT_EVENTS`] events (oldest first), and the ones after
+    /// them as they come: no event is missed or repeated between the two.
+    pub fn recent_and_live(&self) -> (Vec<HerdrEvent>, broadcast::Receiver<HerdrEvent>) {
+        let recent = crate::lock(&self.recent);
+        (recent.iter().cloned().collect(), self.events.subscribe())
+    }
+
+    /// Keep `event` among the recent ones and send it to every listener.
+    fn publish(&self, event: HerdrEvent) {
+        let mut recent = crate::lock(&self.recent);
+        if recent.len() == RECENT_EVENTS {
+            recent.pop_front();
+        }
+        recent.push_back(event.clone());
+        // No listeners is fine.
+        let _ = self.events.send(event);
     }
 
     /// The herdr API socket this client talks to.
@@ -479,8 +504,7 @@ impl HerdrClient {
                         continue;
                     };
                     panes_changed = matches!(event.event.as_str(), "pane.created" | "pane.closed");
-                    // No listeners is fine.
-                    let _ = self.events.send(event.clone());
+                    self.publish(event.clone());
                     let client = self.clone();
                     tokio::spawn(async move { client.handle_event(event).await });
                     if panes_changed {
@@ -627,6 +651,25 @@ mod tests {
             vec!["workspace.created".to_string(), "pane.created".to_string()]
         );
         assert!(global_subscriptions(&serde_json::json!({})).is_empty());
+    }
+
+    /// A stream that starts late gets the last 200 events, then live ones.
+    #[test]
+    fn recent_events_replay_the_last_200() {
+        let client = HerdrClient::new(make_persistence(), "/nonexistent".into(), 0, 0);
+        let ev = |n: usize| HerdrEvent {
+            event: "pane.created".into(),
+            data: serde_json::json!({ "n": n }),
+        };
+        for n in 0..250 {
+            client.publish(ev(n));
+        }
+        let (recent, mut live) = client.recent_and_live();
+        assert_eq!(recent.len(), 200);
+        assert_eq!(recent[0], ev(50));
+        assert_eq!(recent[199], ev(249));
+        client.publish(ev(250));
+        assert_eq!(live.try_recv().unwrap(), ev(250));
     }
 
     fn make_persistence() -> Arc<Persistence> {

@@ -1,5 +1,6 @@
-//! herdr's live event stream (`GET /api/herdr/events`, SSE): what recipe
-//! triggers can fire on, newest first.
+//! herdr's event stream (`GET /api/herdr/events`, SSE: the server's last
+//! 200 events, then live ones): what recipe triggers can fire on, newest
+//! first.
 
 use dioxus::prelude::*;
 use herdr_mcp_api::HerdrEvent;
@@ -52,7 +53,8 @@ pub fn HerdrEvents() -> Element {
                     w.truncate(KEEP);
                 }
             },
-            || {},
+            // Every (re)connect starts with the server's recent events.
+            move || events.write().clear(),
         );
         source.set(es);
     });
@@ -72,7 +74,7 @@ pub fn HerdrEvents() -> Element {
 
     rsx! {
         p { class: "field-desc",
-            "Live events from herdr. A recipe trigger fires on the event name, optionally filtered by values in its data (e.g. "
+            "herdr's last 200 events, then live ones. A recipe trigger fires on the event name, optionally filtered by values in its data (e.g. "
             code { "agent_status=done" }
             "); the run gets the data as "
             code { "{{{{herdr.…}}}}" }

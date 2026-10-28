@@ -32,6 +32,11 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   log line a run causes carries its `run_id` (tracing spans per run and per
   step, a child nested under its parent). **(breaking)** `ApiClient::list_runs`
   takes a limit.
+- **herdr events start with history.** `/api/herdr/events` opens with the
+  server's last 200 herdr events, then streams live ones, so the web and
+  TUI herdr Events tabs aren't empty until something happens. Both clear
+  their list on reconnect instead of doubling it. Triggers still see only
+  new events.
 - **Gates hand off to other collections.** A gate rule's new `run` action
   starts another saved collection as a child run in the same workspace:
   isolated (its own variables and the globals, plus `inputs` whose `{{ }}`
