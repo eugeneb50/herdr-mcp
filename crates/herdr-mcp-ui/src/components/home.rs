@@ -4,6 +4,8 @@
 //! and names the auto variables hold (`GET /api/variables/auto`), which also
 //! fill the pane list. The sent text stays in the box for re-sending; with
 //! highlighting on, a `<pre>` drawn under the transparent textarea colors it.
+//! The box is bounded so a huge paste can't hang the tab: the browser cuts a
+//! paste at [`MAX_SEND`], and highlighting stops past [`MAX_HIGHLIGHT`].
 
 use dioxus::prelude::*;
 use herdr_mcp_api::HerdrPane;
@@ -21,6 +23,39 @@ const LAST_LABEL: &str = "herdr-mcp.send.label";
 const HIGHLIGHT: &str = "herdr-mcp.send.highlight";
 /// The highlight layer, scrolled along with the textarea.
 const HIGHLIGHT_ID: &str = "send-highlight";
+/// The most text one send carries, in bytes. herdr gets the text as one
+/// argument, and Linux caps an argument at 128 KiB including its NUL.
+const MAX_SEND: usize = 128 * 1024 - 1;
+/// Past this many bytes the box drops highlighting: every token is a DOM
+/// node, redrawn on each keystroke.
+const MAX_HIGHLIGHT: usize = 16 * 1024;
+
+/// Why `text` can't be sent as is, when it is over [`MAX_SEND`] bytes (the
+/// textarea's `maxlength` counts UTF-16 units, so wide text can slip past it).
+fn too_big(text: &str) -> Option<String> {
+    (text.len() > MAX_SEND).then(|| {
+        format!(
+            "{} KiB is over the {} KiB herdr takes in one send",
+            text.len().div_ceil(1024),
+            (MAX_SEND + 1) / 1024
+        )
+    })
+}
+
+/// The size line under a long text: how much of [`MAX_SEND`] it uses, and
+/// whether highlighting is off for its length.
+fn size_note(len: usize, highlight: bool) -> Option<String> {
+    (len > MAX_HIGHLIGHT).then(|| {
+        let kib = len.div_ceil(1024);
+        let max = (MAX_SEND + 1) / 1024;
+        let hl = if highlight {
+            " · highlighting off"
+        } else {
+            ""
+        };
+        format!("{kib} / {max} KiB{hl}")
+    })
+}
 
 /// A field as a tool parameter: trimmed, absent when blank.
 fn param(s: &str) -> Option<&str> {
@@ -67,6 +102,10 @@ pub fn Home() -> Element {
         if body.is_empty() || busy() {
             return;
         }
+        if let Some(msg) = too_big(&body) {
+            status.set(Some(Err(msg)));
+            return;
+        }
         if param(&id).is_none() && param(&lbl).is_none() {
             status.set(Some(Err("set a pane_id or label first".into())));
             return;
@@ -97,6 +136,9 @@ pub fn Home() -> Element {
     };
 
     let dash = |s: &Option<String>| s.clone().unwrap_or_else(|| "—".into());
+    let len = text.read().len();
+    let hl = highlight() && len <= MAX_HIGHLIGHT;
+    let note = size_note(len, highlight());
 
     rsx! {
         section { class: "page-head",
@@ -147,8 +189,8 @@ pub fn Home() -> Element {
                     }
                 }
             }
-            div { class: if highlight() { "editor editor-hl" } else { "editor" },
-                if highlight() {
+            div { class: if hl { "editor editor-hl" } else { "editor" },
+                if hl {
                     pre { id: HIGHLIGHT_ID, class: "input textarea hl-layer", "aria-hidden": "true",
                         for (kind , run) in tokens(&text.read()) {
                             span { class: kind.class(), "{run}" }
@@ -160,7 +202,8 @@ pub fn Home() -> Element {
             textarea {
                 class: "input textarea",
                 rows: "3",
-                spellcheck: !highlight(),
+                spellcheck: !hl,
+                maxlength: "{MAX_SEND}",
                 autofocus: true,
                 placeholder: "run the tests again",
                 value: "{text}",
@@ -201,6 +244,9 @@ pub fn Home() -> Element {
                         },
                     }
                     span { class: "muted", "highlight code" }
+                }
+                if let Some(note) = note {
+                    span { class: "send-status", "{note}" }
                 }
                 match &*status.read() {
                     Some(Ok(msg)) => rsx! { span { class: "send-status", "{msg}" } },
@@ -298,5 +344,22 @@ mod tests {
         assert!(!targeted(&builder, "w1:p1", "builder"));
         assert!(!targeted(&unlabeled, "", ""));
         assert_eq!(param("  "), None);
+    }
+
+    #[test]
+    fn send_bounds() {
+        assert_eq!(too_big(&"a".repeat(MAX_SEND)), None);
+        assert_eq!(
+            too_big(&"a".repeat(MAX_SEND + 1)).as_deref(),
+            Some("128 KiB is over the 128 KiB herdr takes in one send")
+        );
+        // Under the char cap, over the byte cap: 3 bytes a char.
+        assert!(too_big(&"✓".repeat(MAX_SEND / 2)).is_some());
+        assert_eq!(size_note(MAX_HIGHLIGHT, true), None);
+        assert_eq!(
+            size_note(MAX_HIGHLIGHT + 1, true).as_deref(),
+            Some("17 / 128 KiB · highlighting off")
+        );
+        assert_eq!(size_note(MAX_SEND, false).as_deref(), Some("128 / 128 KiB"));
     }
 }
