@@ -225,7 +225,8 @@ impl AgentRegistry {
     }
 }
 
-/// Subscriber connection phase — reported by the `status` tool.
+/// Subscriber connection phase — reported by the `status` tool. `Stopped`:
+/// no herdr client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SubscriberPhase {
     #[default]
@@ -236,24 +237,6 @@ pub enum SubscriberPhase {
     Stopped,
 }
 
-/// Thread-safe holder for the subscriber phase.
-#[derive(Clone, Default)]
-pub struct SubscriberState(Arc<tokio::sync::RwLock<SubscriberPhase>>);
-
-impl SubscriberState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub async fn get(&self) -> SubscriberPhase {
-        *self.0.read().await
-    }
-
-    pub async fn set(&self, phase: SubscriberPhase) {
-        *self.0.write().await = phase;
-    }
-}
-
 /// Thin client that owns the registry and runs the event subscriber.
 #[derive(Clone)]
 pub struct HerdrClient {
@@ -261,7 +244,7 @@ pub struct HerdrClient {
     socket_path: std::path::PathBuf,
     reconnect_attempts: u32,
     reconnect_backoff_ms: u64,
-    subscriber_state: SubscriberState,
+    subscriber_state: Arc<std::sync::Mutex<SubscriberPhase>>,
     /// Relays herdr's event stream to in-process listeners (triggers, SSE).
     events: broadcast::Sender<HerdrEvent>,
     /// The last [`RECENT_EVENTS`] events, oldest first: what a new
@@ -287,7 +270,7 @@ impl HerdrClient {
             socket_path,
             reconnect_attempts,
             reconnect_backoff_ms,
-            subscriber_state: SubscriberState::new(),
+            subscriber_state: Arc::default(),
             events: broadcast::channel(EVENT_BUFFER).0,
             recent: Arc::default(),
         }
@@ -345,9 +328,12 @@ impl HerdrClient {
         Ok(serde_json::from_str(&line)?)
     }
 
-    /// Get the current subscriber phase.
-    pub async fn subscriber_state(&self) -> SubscriberPhase {
-        self.subscriber_state.get().await
+    pub fn subscriber_state(&self) -> SubscriberPhase {
+        *crate::lock(&self.subscriber_state)
+    }
+
+    fn set_phase(&self, phase: SubscriberPhase) {
+        *crate::lock(&self.subscriber_state) = phase;
     }
 
     /// Returns true if a herdr server is listening at our socket.
@@ -357,22 +343,15 @@ impl HerdrClient {
     /// Returns false for stale sockets (file exists but nobody listening) and
     /// for missing sockets.
     pub async fn is_socket_active(&self) -> bool {
-        #[cfg(unix)]
-        {
-            if !self.socket_path.exists() {
-                return false;
-            }
-            match tokio::net::UnixStream::connect(&self.socket_path).await {
-                Ok(_) => true,
-                Err(e) => !matches!(
-                    e.kind(),
-                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
-                ),
-            }
+        if !self.socket_path.exists() {
+            return false;
         }
-        #[cfg(not(unix))]
-        {
-            false
+        match tokio::net::UnixStream::connect(&self.socket_path).await {
+            Ok(_) => true,
+            Err(e) => !matches!(
+                e.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ),
         }
     }
 
@@ -399,131 +378,97 @@ impl HerdrClient {
     /// - After `reconnect_attempts` are exhausted, continue indefinitely at
     ///   `reconnect_backoff_ms` cadence — never fully gives up.
     pub fn spawn_subscriber(self: &Arc<Self>) {
-        // Initial state before spawning
         let client = self.clone();
-        // Use a oneshot to set initial state synchronously
-        let _ = client
-            .subscriber_state
-            .0
-            .try_write()
-            .map(|mut w| *w = SubscriberPhase::Starting);
         tokio::spawn(async move {
             let mut failures: u32 = 0;
             let mut was_connected = false;
             loop {
-                // Update state before attempting connection
-                if was_connected {
-                    client
-                        .subscriber_state
-                        .set(SubscriberPhase::Reconnecting)
-                        .await;
+                client.set_phase(if was_connected {
+                    SubscriberPhase::Reconnecting
                 } else {
-                    client
-                        .subscriber_state
-                        .set(SubscriberPhase::WaitingForSocket)
-                        .await;
+                    SubscriberPhase::WaitingForSocket
+                });
+                let Err(e) = client.run_subscribe_loop().await;
+                let missing = Self::socket_missing(&e);
+                let inside = herdr_mcp_core::session_context::inside_herdr();
+
+                if missing && !inside && failures == 0 {
+                    // OUTSIDE herdr, socket absent — EXPECTED, not an error.
+                    tracing::info!(
+                        socket = %client.socket_path.display(),
+                        "herdr socket not found (herdr not running here); watching for it"
+                    );
+                } else if failures < client.reconnect_attempts {
+                    if missing && inside {
+                        tracing::warn!(
+                            socket = %client.socket_path.display(),
+                            "herdr socket missing while running inside herdr — herdr server may have stopped: {e}"
+                        );
+                    } else if !missing {
+                        tracing::warn!("herdr event subscriber disconnected: {e}");
+                    }
+                    // missing && !inside after first: DEBUG (quiet)
+                } else {
+                    tracing::debug!("herdr event subscriber waiting for socket: {e}");
                 }
 
-                match client.run_subscribe_loop().await {
-                    Ok(()) => {
-                        // Clean shutdown / unsupported platform
-                        client.subscriber_state.set(SubscriberPhase::Stopped).await;
-                        break;
-                    }
-                    Err(e) => {
-                        let missing = Self::socket_missing(&e);
-                        let inside = herdr_mcp_core::session_context::inside_herdr();
-
-                        if missing && !inside && failures == 0 {
-                            // OUTSIDE herdr, socket absent — EXPECTED, not an error.
-                            tracing::info!(
-                                socket = %client.socket_path.display(),
-                                "herdr socket not found (herdr not running here); watching for it"
-                            );
-                        } else if failures < client.reconnect_attempts {
-                            if missing && inside {
-                                tracing::warn!(
-                                    socket = %client.socket_path.display(),
-                                    "herdr socket missing while running inside herdr — herdr server may have stopped: {e}"
-                                );
-                            } else if !missing {
-                                tracing::warn!("herdr event subscriber disconnected: {e}");
-                            }
-                            // missing && !inside after first: DEBUG (quiet)
-                        } else {
-                            tracing::debug!("herdr event subscriber waiting for socket: {e}");
-                        }
-
-                        // Reset failure counter if we had a real connection that dropped
-                        // (non-connect-phase error), so we warn again on next connection.
-                        if was_connected && !missing {
-                            failures = 0;
-                        }
-                        was_connected = !missing;
-                        failures = failures.saturating_add(1);
-
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            client.reconnect_backoff_ms,
-                        ))
-                        .await;
-                    }
+                // Reset failure counter if we had a real connection that dropped
+                // (non-connect-phase error), so we warn again on next connection.
+                if was_connected && !missing {
+                    failures = 0;
                 }
+                was_connected = !missing;
+                failures = failures.saturating_add(1);
+
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    client.reconnect_backoff_ms,
+                ))
+                .await;
             }
         });
     }
 
     /// One subscription per pane set: herdr reads nothing more on a
     /// connection once it streams, so a new or closed pane (whose status
-    /// events need their own subscription) means reconnecting.
-    async fn run_subscribe_loop(&self) -> anyhow::Result<()> {
-        #[cfg(unix)]
-        {
-            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    /// events need their own subscription) means reconnecting. Returns only
+    /// when the connection fails.
+    async fn run_subscribe_loop(&self) -> anyhow::Result<std::convert::Infallible> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-            loop {
-                let request = self.build_subscribe_request().await;
-                let stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
-                let (read_half, mut write_half) = stream.into_split();
-                write_half
-                    .write_all(format!("{request}\n").as_bytes())
-                    .await?;
+        loop {
+            let request = self.build_subscribe_request().await;
+            let stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
+            let (read_half, mut write_half) = stream.into_split();
+            write_half
+                .write_all(format!("{request}\n").as_bytes())
+                .await?;
 
-                let mut lines = BufReader::new(read_half).lines();
-                // First line is the subscribe ack.
-                if let Some(line) = lines.next_line().await?
-                    && let Ok(ack) = serde_json::from_str::<serde_json::Value>(&line)
-                    && ack.get("error").is_some()
-                {
-                    anyhow::bail!("events.subscribe rejected: {line}");
-                }
-                self.subscriber_state.set(SubscriberPhase::Connected).await;
+            let mut lines = BufReader::new(read_half).lines();
+            // First line is the subscribe ack.
+            if let Some(line) = lines.next_line().await?
+                && let Ok(ack) = serde_json::from_str::<serde_json::Value>(&line)
+                && ack.get("error").is_some()
+            {
+                anyhow::bail!("events.subscribe rejected: {line}");
+            }
+            self.set_phase(SubscriberPhase::Connected);
 
-                let mut panes_changed = false;
-                while let Some(line) = lines.next_line().await? {
-                    let Some(event) = HerdrEvent::parse(&line) else {
-                        continue;
-                    };
-                    panes_changed = matches!(event.event.as_str(), "pane.created" | "pane.closed");
-                    self.publish(event.clone());
-                    let client = self.clone();
-                    tokio::spawn(async move { client.handle_event(event).await });
-                    if panes_changed {
-                        break;
-                    }
-                }
-                if !panes_changed {
-                    anyhow::bail!("event stream ended");
+            let mut panes_changed = false;
+            while let Some(line) = lines.next_line().await? {
+                let Some(event) = HerdrEvent::parse(&line) else {
+                    continue;
+                };
+                panes_changed = matches!(event.event.as_str(), "pane.created" | "pane.closed");
+                self.publish(event.clone());
+                let client = self.clone();
+                tokio::spawn(async move { client.handle_event(event).await });
+                if panes_changed {
+                    break;
                 }
             }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = &self.socket_path;
-            tracing::info!(
-                "herdr event subscriber is only supported on Unix; registry will be populated by explicit tool calls"
-            );
-            self.subscriber_state.set(SubscriberPhase::Stopped).await;
-            Ok(())
+            if !panes_changed {
+                anyhow::bail!("event stream ended");
+            }
         }
     }
 
