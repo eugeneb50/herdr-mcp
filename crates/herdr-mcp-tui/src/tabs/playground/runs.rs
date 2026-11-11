@@ -40,9 +40,7 @@ impl RunsState {
         self.runs
             .iter()
             .filter(|r| self.filter.is_none_or(|f| r.recipe_id == f))
-            .filter(|r| {
-                !self.failed_only || matches!(r.status, RunStatus::Failed | RunStatus::Interrupted)
-            })
+            .filter(|r| !self.failed_only || r.status.is_failure())
             .collect()
     }
 
@@ -68,12 +66,7 @@ impl RunsState {
     /// The first run the picked one started (its gate's hand-off, a
     /// `recipe_run` step).
     fn child(&self) -> Option<Uuid> {
-        let id = self.picked()?.id;
-        self.runs
-            .iter()
-            .rev()
-            .find(|r| r.origin.parent() == Some(id))
-            .map(|r| r.id)
+        self.picked()?.children(&self.runs).last().map(|r| r.id)
     }
 
     /// The filter's name for the list title.

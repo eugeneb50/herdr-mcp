@@ -27,6 +27,11 @@ impl RunStatus {
         !matches!(self, Self::Running | Self::Paused)
     }
 
+    /// Failed, or cut off by a restart: what "failed only" lists.
+    pub fn is_failure(self) -> bool {
+        matches!(self, Self::Failed | Self::Interrupted)
+    }
+
     /// The status as on the wire: `running`, `failed`, …
     pub fn as_str(self) -> &'static str {
         match self {
@@ -73,6 +78,13 @@ pub struct RunRecord {
 }
 
 impl RunRecord {
+    /// The runs among `runs` this one started (its gate's hand-off,
+    /// `recipe_run` steps), in `runs`' order.
+    pub fn children<'a>(&self, runs: &'a [RunRecord]) -> impl Iterator<Item = &'a RunRecord> {
+        let id = self.id;
+        runs.iter().filter(move |r| r.origin.parent() == Some(id))
+    }
+
     /// The run's name, or `ad-hoc run`.
     pub fn title(&self) -> &str {
         self.name.as_deref().unwrap_or("ad-hoc run")
@@ -502,6 +514,43 @@ mod tests {
     use super::*;
     use crate::Op;
     use serde_json::json;
+
+    #[test]
+    fn failures_and_children() {
+        let failed: Vec<_> = [
+            RunStatus::Running,
+            RunStatus::Paused,
+            RunStatus::Completed,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+            RunStatus::Interrupted,
+        ]
+        .into_iter()
+        .filter(|s| s.is_failure())
+        .collect();
+        assert_eq!(failed, [RunStatus::Failed, RunStatus::Interrupted]);
+
+        let run = |n: u128, origin: Value| -> RunRecord {
+            serde_json::from_value(json!({
+                "id": Uuid::from_u128(n), "recipe_id": null, "name": null, "session_id": "w1",
+                "steps": [], "origin": origin, "gate": null, "pass": 1,
+                "status": "completed", "current_step": null, "results": {}, "variables": {},
+                "failed_step": null, "error": null,
+                "started_at": "2026-10-25T00:00:00Z", "finished_at": null
+            }))
+            .unwrap()
+        };
+        let parent = Uuid::from_u128(1);
+        let runs = [
+            run(1, json!({ "kind": "api" })),
+            run(2, json!({ "kind": "gate", "run_id": parent })),
+            run(3, json!({ "kind": "api" })),
+            run(4, json!({ "kind": "run", "run_id": parent })),
+        ];
+        let kids: Vec<_> = runs[0].children(&runs).map(|r| r.id).collect();
+        assert_eq!(kids, [Uuid::from_u128(2), Uuid::from_u128(4)]);
+        assert_eq!(runs[2].children(&runs).count(), 0);
+    }
 
     /// Every variant, every optional field set: a field that collides with
     /// [`RunEvent`]'s own (or a serde attribute that drops one) fails here
