@@ -115,17 +115,14 @@ pub fn Runs() -> Element {
     let shown: Vec<RunRecord> = all
         .iter()
         .filter(|r| want.is_empty() || group(r) == want)
-        .filter(|r| {
-            !failed_only() || matches!(r.status, RunStatus::Failed | RunStatus::Interrupted)
-        })
+        .filter(|r| !failed_only() || r.status.is_failure())
         .cloned()
         .collect();
     let picked = pick().and_then(|id| all.iter().find(|r| r.id == id).cloned());
     let child_runs: Vec<(Uuid, String)> = picked
         .as_ref()
         .map(|p| {
-            all.iter()
-                .filter(|r| r.origin.parent() == Some(p.id))
+            p.children(&all)
                 .map(|r| (r.id, r.title().to_string()))
                 .collect()
         })

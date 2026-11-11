@@ -1,6 +1,6 @@
-# On every PR and push to main: the gates AGENTS.md lists. No web bundle —
-# the server builds and tests without it (build.rs embeds one only if dx
-# has made it).
+# On every PR and push to main: the gates AGENTS.md lists. The server builds
+# and tests without the web bundle (build.rs embeds one only if dx has made
+# it); `web` builds it in parallel so a dx break shows before a release.
 name: ci
 
 on:
@@ -34,3 +34,17 @@ jobs:
         run: cargo clippy -p herdr-mcp-api -p herdr-mcp-ui --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
       - name: Test
         run: cargo nextest run --workspace --locked
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust toolchain (rust-toolchain.toml)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: cargo-bins/cargo-binstall@main
+      - name: Dioxus CLI (matches the dioxus in Cargo.lock)
+        run: cargo binstall --no-confirm --locked dioxus-cli@0.7.10
+      - name: Web UI bundle
+        working-directory: crates/herdr-mcp-ui
+        run: dx bundle --platform web --release
