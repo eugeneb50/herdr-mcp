@@ -112,8 +112,12 @@ impl Persistence {
                 if content.trim().is_empty() {
                     continue;
                 }
-                let Ok(recipe) = serde_json::from_str::<Recipe>(&content) else {
-                    continue;
+                let recipe = match serde_json::from_str::<Recipe>(&content) {
+                    Ok(recipe) => recipe,
+                    Err(e) => {
+                        tracing::warn!("skipping recipe {}: {e}", entry.path().display());
+                        continue;
+                    }
                 };
                 if let Some(template_only) = is_template
                     && recipe.is_template != template_only
