@@ -182,9 +182,18 @@ async fn fetch(
             .port_or_known_default()
             .ok_or_else(|| anyhow!("{url}: no port"))?;
         guard.check_host(&host)?;
-        // IP literals skip the resolver.
+        // IP literals skip the resolver, and so does any host sent through
+        // a proxy (only allowed without block-private): check the bridge here.
         if let Ok(ip) = host.parse::<IpAddr>() {
             guard.check_addr(&host, ip, port).map_err(|e| anyhow!(e))?;
+        } else if Some(port) == guard.bridge_port
+            && let Ok(addrs) = tokio::net::lookup_host((host.as_str(), port)).await
+        {
+            for a in addrs {
+                guard
+                    .check_addr(&host, a.ip(), port)
+                    .map_err(|e| anyhow!(e))?;
+            }
         }
         let mut builder = reqwest::Client::builder()
             .timeout(timeout)
