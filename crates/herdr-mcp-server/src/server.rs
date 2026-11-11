@@ -978,7 +978,7 @@ impl HerdrMcpServer {
         let (socket_active, subscriber_phase) = match self.herdr_client.get() {
             Some(client) => {
                 let active = client.is_socket_active().await;
-                let phase = client.subscriber_state().await;
+                let phase = client.subscriber_state();
                 (active, phase)
             }
             None => (false, SubscriberPhase::Stopped),
@@ -3331,6 +3331,10 @@ fn bad_request(e: impl ToString) -> (StatusCode, String) {
     (StatusCode::BAD_REQUEST, e.to_string())
 }
 
+fn internal(e: impl ToString) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
 /// Call a tool by name through rmcp's own router, over the server's
 /// in-process MCP session (see [`HerdrMcpServer::tool_session`]) — the HTTP
 /// bridge and the run engine take exactly the path an MCP client does.
@@ -3392,7 +3396,7 @@ pub(crate) async fn dispatch_tool(
             (StatusCode::FORBIDDEN, e.message.into())
         }
         ServiceError::McpError(e) => mcp_err_to_http(e),
-        e => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        e => internal(e),
     })
 }
 
@@ -3581,18 +3585,14 @@ async fn list_recipes_handler(
         .list_recipes(None)
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal)
 }
 
 async fn create_recipe_handler(
     State(AppState { server, .. }): State<AppState>,
     Json(req): Json<CreateRecipeRequest>,
 ) -> Result<Json<Recipe>, (StatusCode, String)> {
-    server
-        .create_recipe(req)
-        .await
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+    server.create_recipe(req).await.map(Json).map_err(internal)
 }
 
 async fn get_recipe_handler(
@@ -3603,7 +3603,7 @@ async fn get_recipe_handler(
         .persistence
         .load_recipe(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(internal)?
         .map(Json)
         .ok_or((StatusCode::NOT_FOUND, "Recipe not found".into()))
 }
@@ -3616,7 +3616,7 @@ async fn update_recipe_handler(
     server
         .update_recipe(id, req)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(internal)?
         .map(Json)
         .ok_or((StatusCode::NOT_FOUND, "Recipe not found".to_string()))
 }
@@ -3629,7 +3629,7 @@ async fn delete_recipe_handler(
         .persistence
         .delete_recipe(&id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(internal)?
         .then_some(StatusCode::NO_CONTENT)
         .ok_or((StatusCode::NOT_FOUND, "Recipe not found".into()))
 }
@@ -3675,7 +3675,7 @@ async fn list_runs_handler(
     crate::runs::list(&server, q.limit)
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal)
 }
 
 async fn load_run(
@@ -3684,7 +3684,7 @@ async fn load_run(
 ) -> Result<herdr_mcp_api::RunRecord, (StatusCode, String)> {
     crate::runs::load(server, id)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, "Run not found".into()))
 }
 
@@ -3700,7 +3700,6 @@ async fn run_events_handler(
     Path(id): Path<uuid::Uuid>,
     Query(q): Query<SinceQuery>,
 ) -> Result<Json<Vec<herdr_mcp_api::RunEvent>>, (StatusCode, String)> {
-    let internal = |e: anyhow::Error| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
     if server
         .persistence
         .load_run_header(&id)
@@ -3752,9 +3751,7 @@ async fn save_profile_handler(
         Err(crate::profiles::SaveError::Invalid(problems)) => {
             Err((StatusCode::BAD_REQUEST, problems.join("; ")))
         }
-        Err(crate::profiles::SaveError::Io(e)) => {
-            Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-        }
+        Err(crate::profiles::SaveError::Io(e)) => Err(internal(e)),
     }
 }
 
@@ -3767,7 +3764,7 @@ async fn delete_profile_handler(
     match crate::profiles::delete(server.persistence.data_dir(), &id).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err((StatusCode::NOT_FOUND, format!("no user profile {id:?}"))),
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        Err(e) => Err(internal(e)),
     }
 }
 
@@ -3898,7 +3895,7 @@ async fn list_variables_handler(
         .load_variables(None, None)
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal)
 }
 
 /// `GET /api/variables/auto[?workspace_id=w1]` — variables resolved on
@@ -3950,7 +3947,7 @@ async fn resolve_handler(
                 .persistence
                 .load_recipe(&id)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .map_err(internal)?
                 .ok_or((StatusCode::NOT_FOUND, "Recipe not found".to_string()))?
                 .variables
         }
@@ -4035,7 +4032,7 @@ async fn save_variable_handler(
         .save_variable(&var)
         .await
         .map(|()| StatusCode::CREATED)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal)
 }
 
 async fn get_variable_handler(
@@ -4046,7 +4043,7 @@ async fn get_variable_handler(
         .persistence
         .load_variables(None, None)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal)?;
 
     vars.into_iter()
         .find(|v| v.key == key)
@@ -4071,7 +4068,7 @@ async fn delete_variable_handler(
                 StatusCode::NOT_FOUND
             }
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal)
 }
 
 #[cfg(test)]
