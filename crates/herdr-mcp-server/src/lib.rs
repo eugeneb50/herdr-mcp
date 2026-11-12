@@ -1,5 +1,7 @@
 pub mod agents;
 pub mod clipboard;
+#[cfg(test)]
+mod fake_herdr;
 pub mod herdr_client;
 pub mod outbound;
 pub mod panes;
