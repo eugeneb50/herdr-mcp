@@ -907,6 +907,26 @@ impl Executor {
                         result: result.clone(),
                     })
                     .await;
+                    // The tool ran and said it failed (bad params, herdr
+                    // refusing a method): the run fails like any other step
+                    // error; no gate can see past it.
+                    if herdr_mcp_api::tool_is_error(&result) {
+                        let text = herdr_mcp_api::tool_text(&result);
+                        let error = if text.is_empty() {
+                            format!("{} reported an error", def.tool)
+                        } else {
+                            text
+                        };
+                        tracing::warn!(step, "step failed: {error}");
+                        self.emit(RunEventKind::StepFailed {
+                            step: step.clone(),
+                            error,
+                            status_code: 422,
+                        })
+                        .await;
+                        self.snapshot(Some(step)).await;
+                        return Some(RunStatus::Failed);
+                    }
                     if let Err(error) = self.extract(def, &result).await {
                         self.emit(RunEventKind::StepFailed {
                             step: step.clone(),
@@ -1546,6 +1566,26 @@ mod tests {
             start_run(&server, req(&["b", "nope"])).await,
             Err(StartError::UnknownStep(s)) if s == "nope"
         ));
+    }
+
+    /// A step whose tool returns `isError` (here: params that don't
+    /// deserialize) fails the run, and later steps don't run.
+    #[tokio::test]
+    async fn a_tool_error_result_fails_the_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let bad = RecipeStep {
+            params: serde_json::json!({ "bogus": 1 }),
+            ..step("bad", "var_set")
+        };
+        let run = adhoc(vec![bad, var_set("after", "x", Vec::new())]);
+        let (_, handle) = start_run(&server, run).await.unwrap();
+        let done = handle.await.unwrap();
+        assert_eq!(done.status, RunStatus::Failed);
+        assert_eq!(done.failed_step.as_deref(), Some("bad"));
+        let error = done.error.unwrap();
+        assert!(error.contains("deserialize"), "{error}");
+        assert!(!done.results.contains_key("after"));
     }
 
     /// A rule whose path isn't in the result, or a collection variable with
