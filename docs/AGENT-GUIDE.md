@@ -66,7 +66,10 @@ watch starts and would count as new. Ask for it in a form you didn't type
 ## Recipes
 
 A recipe is a saved list of tool calls run in order; a failing step stops
-the run. Steps refer to earlier results and variables with `{{ … }}`:
+the run and fails it. A step fails when its tool can't be called or its
+result has `isError: true` (bad params, herdr refusing a method). A
+`http_request` that gets a 4xx/5xx is not a failure unless `check` says
+so: test its `status` with a gate rule. Steps refer to earlier results and variables with `{{ … }}`:
 
 - `{{ stepId.path }}`: an earlier step's result, followed with dots and
   `[n]` (`{{ ws.result.root_pane.pane_id }}`).
@@ -103,7 +106,7 @@ the pane the run touched last, and, indented under it, the trail of the
 child run its gate handed off to. A recipe's `trail` sets how long its runs are
 kept (`keep_runs`, `keep_days`) and how many pane lines a failure saves
 (`snapshot_lines`); unset fields use the global `runs.*` settings. Run state is persisted: a run survives your session, and the user
-sees it live in the TUI and web playground.
+sees it live in the TUI's and the web's Runs tab.
 
 ### Tools
 

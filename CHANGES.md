@@ -4,6 +4,11 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **A tool error fails the run (breaking).** A step whose tool result has
+  `isError: true` (params that don't deserialize, herdr refusing a
+  `herdr_api` method) now fails the step and the run, with the tool's text
+  as the error; later steps don't run. Before, the step showed ✘ and the run
+  went on to end `completed`. A `http_request` 4xx/5xx is still a result.
 - **The TUI is a monitor (breaking).** The web UI is the main UI; the TUI
   watches and acts. Its tabs are Send, Overview, Runs and Events (`Alt+1`–`4`).
   Runs gains quick actions: `r` runs a collection in this session, `R`
