@@ -18,7 +18,6 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
 
-use crate::persistence::Persistence;
 use herdr_mcp_api::HerdrEvent;
 
 /// Agent lifecycle state, mirroring herdr's `AgentStatus` (snake_case).
@@ -59,18 +58,14 @@ impl AgentStatus {
 pub use herdr_mcp_api::AgentHandle;
 
 /// Thread-safe registry of agents, keyed by herdr pane id.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct AgentRegistry {
     inner: Arc<RwLock<HashMap<String, AgentHandle>>>,
-    persistence: Arc<Persistence>,
 }
 
 impl AgentRegistry {
-    pub fn new(persistence: Arc<Persistence>) -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(HashMap::new())),
-            persistence,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Register or update an agent handle at the given pane, preserving any
@@ -109,8 +104,6 @@ impl AgentRegistry {
         }
         handle.updated_at = now;
         map.insert(pane_id.to_string(), handle);
-        drop(map);
-        self.persist(workspace_id).await;
     }
 
     pub async fn set_status(&self, pane_id: &str, status: &str) {
@@ -122,37 +115,24 @@ impl AgentRegistry {
     }
 
     pub async fn set_output(&self, pane_id: &str, output: String) {
-        let ws = {
-            let mut map = self.inner.write().await;
-            if let Some(h) = map.get_mut(pane_id) {
-                h.output = output;
-                h.updated_at = chrono::Utc::now().timestamp();
-                h.workspace_id.clone()
-            } else {
-                return;
-            }
-        };
-        self.persist(&ws).await;
+        let mut map = self.inner.write().await;
+        if let Some(h) = map.get_mut(pane_id) {
+            h.output = output;
+            h.updated_at = chrono::Utc::now().timestamp();
+        }
     }
 
     pub async fn get(&self, pane_id: &str) -> Option<AgentHandle> {
         self.inner.read().await.get(pane_id).cloned()
     }
 
-    /// Set (or clear) the pane label. Persisted.
+    /// Set (or clear) the pane label.
     pub async fn set_label(&self, pane_id: &str, label: &str) {
-        let ws = {
-            let mut map = self.inner.write().await;
-            if let Some(h) = map.get_mut(pane_id) {
-                h.label = label.to_string();
-                h.updated_at = chrono::Utc::now().timestamp();
-                h.workspace_id.clone()
-            } else {
-                return;
-            }
-        };
-        self.persist(&ws).await;
-        // Note: caller should call `herdr pane rename` via herdr_cli if needed
+        let mut map = self.inner.write().await;
+        if let Some(h) = map.get_mut(pane_id) {
+            h.label = label.to_string();
+            h.updated_at = chrono::Utc::now().timestamp();
+        }
     }
 
     /// Resolve a target (role, pane id, or label) to a pane id within a workspace.
@@ -211,18 +191,6 @@ impl AgentRegistry {
         }
         out
     }
-
-    /// Persist the agent handles for a workspace to the session blob store.
-    async fn persist(&self, ws: &str) {
-        let handles: Vec<AgentHandle> = self.list_for_ws(ws).await;
-        if let Err(e) = self
-            .persistence
-            .save_session_blob(ws, "agents", &serde_json::json!(handles))
-            .await
-        {
-            tracing::debug!("failed to persist agent registry for {ws}: {e}");
-        }
-    }
 }
 
 /// Subscriber connection phase — reported by the `status` tool. `Stopped`:
@@ -260,13 +228,12 @@ const RECENT_EVENTS: usize = 200;
 
 impl HerdrClient {
     pub fn new(
-        persistence: Arc<Persistence>,
         socket_path: std::path::PathBuf,
         reconnect_attempts: u32,
         reconnect_backoff_ms: u64,
     ) -> Self {
         Self {
-            registry: AgentRegistry::new(persistence),
+            registry: AgentRegistry::new(),
             socket_path,
             reconnect_attempts,
             reconnect_backoff_ms,
@@ -601,7 +568,7 @@ mod tests {
     /// A stream that starts late gets the last 200 events, then live ones.
     #[test]
     fn recent_events_replay_the_last_200() {
-        let client = HerdrClient::new(make_persistence(), "/nonexistent".into(), 0, 0);
+        let client = HerdrClient::new("/nonexistent".into(), 0, 0);
         let ev = |n: usize| HerdrEvent {
             event: "pane.created".into(),
             data: serde_json::json!({ "n": n }),
@@ -617,18 +584,8 @@ mod tests {
         assert_eq!(live.try_recv().unwrap(), ev(250));
     }
 
-    fn make_persistence() -> Arc<Persistence> {
-        // Keep the tempdir alive for the test duration by leaking it; the OS
-        // reclaims it when the test process exits.
-        let tmp = tempfile::tempdir().unwrap();
-        let p = Persistence::new(tmp.path().to_path_buf());
-        std::mem::forget(tmp);
-        Arc::new(p)
-    }
-
     fn make_registry() -> AgentRegistry {
-        let p = make_persistence();
-        AgentRegistry::new(p)
+        AgentRegistry::new()
     }
 
     #[tokio::test]

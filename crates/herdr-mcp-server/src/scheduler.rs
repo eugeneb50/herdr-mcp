@@ -1,6 +1,6 @@
 //! Cron schedules for saved recipes.
 //!
-//! A schedule's only state is its persisted record (`data/schedules/`). Each
+//! A schedule's only state is its persisted record (the `schedules` table). Each
 //! schedule has one runner task that re-reads that record every tick, so
 //! deleting or disabling a schedule takes effect at its next tick without
 //! any in-memory copy to keep in sync. Firing hands the recipe id to the

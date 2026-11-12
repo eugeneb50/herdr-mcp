@@ -61,10 +61,10 @@ interpolation.
 │     └───────┬────────┘                                       │
 │             │                                                │
 │     ┌───────▼────────────┐  ┌──────────────────────────┐    │
-│     │ herdr daemon       │  │ Persistence (file-based)  │    │
-│     │ (workspaces,       │  │ data/recipes/*.json       │    │
-│     │  tabs, panes,      │  │ data/sessions/*.json      │    │
-│     │  agents)           │  │ data/schedules/*.json     │    │
+│     │ herdr daemon       │  │ Persistence (SQLite)      │    │
+│     │ (workspaces,       │  │ data/herdr-mcp.db         │    │
+│     │  tabs, panes,      │  │ recipes, variables, runs, │    │
+│     │  agents)           │  │ schedules                 │    │
 │     └────────────────────┘  └──────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
 
@@ -630,17 +630,18 @@ Used by `agent_spawn`, `agent_message`, `agent_read`, `agent_wait`.
 
 ## 9. Persistence Layer
 
-File-based storage under `data/`:
+One SQLite database (`persistence.rs`), WAL mode so the TUI's bridge and an
+`--mcp-only` server can share a data dir. Each row holds one value's JSON;
+`PRAGMA user_version` is the schema version (a newer one is refused).
 
 ```
-data/
-├── recipes/{uuid}.json          # Saved recipes
-├── executions/{uuid}.json       # Recipe execution results
-├── variables/{key}.json         # Variable store
-├── schedules/{uuid}.json        # Cron schedules
-├── sessions/
-│   ├── {session_id}.json        # Session variables
-│   └── {ws}.agents.json         # Agent registry blob
+data/                            # owner-only (0700)
+├── herdr-mcp.db                 # tables: recipes, variables, session_vars,
+│                                #   runs (header, by started_at), run_events
+│                                #   (run_id, seq), schedules
+├── profiles/{id}.toml           # Agent profiles
+├── bridge.token                 # 0600, when the bridge needs a token
+├── audit.jsonl                  # [security] audit-log
 ├── daemon.lock                  # Held by the data dir's daemon (schedules, triggers)
 └── herdr-mcp.log                # Tracing while the TUI owns the terminal
 ```
@@ -648,7 +649,7 @@ data/
 **Key types:**
 - `VariableStore`: per-key variables with session/execution scoping
 - `SessionVars`: bag of variables shared across recipe runs within a session (herdr workspace ID)
-- `ExecutionResult`: full execution record with results, variables, status, error
+- `RunHeader` + `RunEvent`s: a run is its header plus its event log; `RunRecord` is their fold
 
 ---
 
@@ -662,7 +663,7 @@ Cron-based recipe scheduling using the `cron` crate:
 - Persisted schedules start in `serve_core`, which builds the one
   `HerdrMcpServer` shared by HTTP, stdio, the TUI and triggers
 - `DashMap` for concurrent schedule access
-- Persistence: `data/schedules/{uuid}.json`
+- Persistence: the `schedules` table
 - Enable/disable without losing schedule state
 
 ---

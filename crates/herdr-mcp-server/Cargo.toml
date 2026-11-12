@@ -20,6 +20,7 @@ cron = { workspace = true }
 regex = { workspace = true }
 reqwest = { workspace = true }
 toml = { workspace = true }
+rusqlite = { workspace = true }
 
 herdr-mcp-api = { path = "../herdr-mcp-api" }
 herdr-mcp-core = { path = "../herdr-mcp-core" }

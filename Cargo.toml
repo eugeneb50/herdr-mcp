@@ -37,6 +37,7 @@ dirs = "5"
 toml = "0.8"
 toml_edit = "0.22"
 tempfile = "3"
+rusqlite = { version = "0.40", features = ["bundled"] }
 pretty_assertions = "1"
 assert_cmd = "2"
 predicates = "3"

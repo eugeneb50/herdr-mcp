@@ -46,7 +46,7 @@ impl RunStatus {
 }
 
 /// One run of a recipe: what ran, where it got to, and what it produced.
-/// Stored at `data/runs/{id}/run.json`.
+/// Folded from its header and event log (the `runs` and `run_events` tables).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunRecord {
     pub id: Uuid,
@@ -240,8 +240,8 @@ impl RunAction {
 }
 
 /// One thing that happened in a run. A run's events, in `seq` order, are its
-/// state: [`RunRecord`] is their fold. Stored one JSON object per line in
-/// `data/runs/{id}/events.jsonl`; streamed by `GET /api/events`.
+/// state: [`RunRecord`] is their fold. Stored one row each in the
+/// `run_events` table; streamed by `GET /api/events`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunEvent {
     pub run_id: Uuid,

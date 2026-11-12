@@ -926,8 +926,6 @@ pub(super) async fn save_variable_handler(
     if req.key.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "key must not be empty".into()));
     }
-    crate::persistence::file_component(&req.key)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     let now = chrono::Utc::now();
     let parse_uuid = |s: Option<String>| s.as_deref().and_then(|v| uuid::Uuid::parse_str(v).ok());
     let var = crate::persistence::VariableStore {
@@ -967,8 +965,6 @@ pub(super) async fn delete_variable_handler(
     State(AppState { server, .. }): State<AppState>,
     Path(key): Path<String>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    crate::persistence::file_component(&key)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     server
         .persistence
         .delete_variable(&key)
