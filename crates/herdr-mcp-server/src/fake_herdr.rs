@@ -156,12 +156,7 @@ mod tests {
         let persistence = crate::Persistence::new(data.path().to_path_buf());
         persistence.init().await.unwrap();
         let persistence = Arc::new(persistence);
-        let client = Arc::new(crate::HerdrClient::new(
-            persistence.clone(),
-            herdr.socket(),
-            3,
-            10,
-        ));
+        let client = Arc::new(crate::HerdrClient::new(herdr.socket(), 3, 10));
         client.spawn_subscriber();
         let server = crate::HerdrMcpServer::new((*persistence).clone(), client.registry.clone())
             .with_herdr_client(client.clone());
