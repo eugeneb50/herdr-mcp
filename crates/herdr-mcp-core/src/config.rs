@@ -38,7 +38,8 @@ pub struct Config {
 }
 
 /// `[security]`: limits on what MCP clients, recipe runs and the bridge may
-/// do. Every field defaults to today's behaviour except `agent-triggers`.
+/// do. Strict by default: no private addresses, no agent-made triggers,
+/// every tool call audited.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
 pub struct SecurityConfig {
@@ -72,14 +73,14 @@ impl Default for SecurityConfig {
         Self {
             disabled_tools: Vec::new(),
             allow_hosts: Vec::new(),
-            block_private: false,
+            block_private: true,
             max_response_bytes: 10 * 1024 * 1024,
             key_env: ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY"]
                 .map(String::from)
                 .to_vec(),
             agent_triggers: false,
             require_token: false,
-            audit_log: false,
+            audit_log: true,
         }
     }
 }

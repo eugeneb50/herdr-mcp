@@ -460,6 +460,14 @@ pub fn model_list(resp: &Value) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The defaults with private addresses allowed: the test servers are local.
+    fn local() -> Guard {
+        Guard {
+            block_private: false,
+            ..Guard::default()
+        }
+    }
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -556,7 +564,7 @@ mod tests {
         let ip = |s: &str| s.parse::<IpAddr>().unwrap();
         let open = Guard {
             bridge_port: Some(7676),
-            ..Guard::default()
+            ..local()
         };
         assert!(open.check_addr("localhost", ip("127.0.0.1"), 7676).is_err());
         assert!(open.check_addr("x", ip("::ffff:127.0.0.1"), 7676).is_err());
@@ -564,6 +572,12 @@ mod tests {
         assert!(open.check_addr("x", ip("169.254.169.254"), 80).is_err());
         assert!(open.check_addr("x", ip("fd00:ec2::254"), 80).is_err());
         assert!(open.check_addr("x", ip("10.0.0.5"), 80).is_ok());
+        // Private addresses are refused by default.
+        assert!(
+            Guard::default()
+                .check_addr("x", ip("10.0.0.5"), 80)
+                .is_err()
+        );
         let closed = Guard {
             block_private: true,
             allow_hosts: vec!["*.example.com".into(), "localhost".into()],
@@ -636,7 +650,7 @@ mod tests {
         let headers = BTreeMap::from([("X-Test".to_string(), "yes".to_string())]);
         let query = BTreeMap::from([("q".to_string(), "a b".to_string())]);
         let out = send(
-            &Arc::default(),
+            &Arc::new(local()),
             Request {
                 method: "post",
                 url: &format!("{url}/path"),
@@ -660,7 +674,7 @@ mod tests {
     async fn redirects_are_checked_and_drop_credentials_across_origins() {
         let guard = Arc::new(Guard {
             max_response_bytes: 1024,
-            ..Guard::default()
+            ..local()
         });
         let (target, got) = serve_once("{}").await;
         let (start, _) = serve(
@@ -698,7 +712,7 @@ mod tests {
         .await;
         let body = json!({ "model": "m", "messages": [] });
         let resp = api(
-            &Arc::default(),
+            &Arc::new(local()),
             &url,
             "chat/completions",
             Some("sk-1"),

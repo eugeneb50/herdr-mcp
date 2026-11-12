@@ -300,8 +300,8 @@ disabled-tools = ["run_command", "send_keys", "pane_exec"]
 # Hosts http_request and llm_call/llm_models may reach (exact or "*.example.com").
 # Empty (the default): any host.
 allow-hosts = ["openrouter.ai", "*.github.com"]
-# Also refuse loopback and private-network addresses (on by choice; local
-# LLM servers like Ollama need it off, or their host in allow-hosts).
+# Also refuse loopback and private-network addresses (the default; local
+# LLM servers like Ollama need their host in allow-hosts, e.g. "localhost").
 block-private = true
 max-response-bytes = 10485760
 # Environment variables api_key_env may name (default: these three).
@@ -319,12 +319,12 @@ audit-log = true
 |---|---|---|
 | `disabled-tools` | `[]` | Removed from `tools/list` and `/api/tools`; calling one fails (403 on the bridge) |
 | `allow-hosts` | `[]` (any) | Checked for the URL and every redirect hop |
-| `block-private` | `false` | Refuses `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7` unless the host is allowed |
+| `block-private` | `true` | Refuses `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7` unless the host is allowed |
 | `max-response-bytes` | 10 MiB | A larger response body is an error |
 | `key-env` | the three above | `api_key_env` outside it is an error |
 | `agent-triggers` | `false` | `recipe_save` with triggers, changing a recipe that has triggers or a schedule, `schedule_recipe` and `enable_schedule` are refused unless the call came from the bridge API |
 | `require-token` | `false` | `/api/*` (not `/api/health`) needs `Authorization: Bearer <token>` |
-| `audit-log` | `false` | Appends `{at, origin, tool, args, ok, error}`; rolls over at 10 MB |
+| `audit-log` | `true` | Appends `{at, origin, tool, args, ok, error}`; rolls over at 10 MB |
 
 Always on:
 - **No link-local or metadata addresses.** Outbound requests never reach
@@ -343,9 +343,10 @@ Always on:
 **The bridge token.** The bridge makes the token when it needs one, and
 prints a `http://localhost:<port>/#token=…` link at startup. The web UI keeps
 the token from that link, or asks for it. The TUI and the herdr plugin read
-the token file themselves. A hardened setup for agents disables
-`run_command`, `send_keys` and `pane_exec`, turns on `block-private` and
-`require-token`, and leaves `agent-triggers` off.
+the token file themselves. A hardened setup for agents also disables
+`run_command`, `send_keys` and `pane_exec` and turns on `require-token`;
+`block-private`, `audit-log` and `agent-triggers = false` are already the
+defaults.
 
 ---
 

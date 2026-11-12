@@ -12,6 +12,12 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   and triggers no longer re-read every recipe file per herdr event. The
   agent registry is no longer written to `sessions/{ws}.agents.json`
   (nothing read it).
+- **Strict security defaults (breaking).** `block-private` and `audit-log`
+  are on by default: `http_request` and the LLM tools refuse loopback and
+  private-network addresses unless the host is in `allow-hosts` (a local
+  LLM needs e.g. `allow-hosts = ["localhost"]`), and every tool call is
+  appended to `<data-dir>/audit.jsonl`. Set either to `false` for the old
+  behaviour.
 - **Leaner MCP surface.** MCP clients list a core set of 26 tools by
   default, about half the schema of all 46, so agents spend less context on
   every turn. `[mcp] tools` lists more: `all`, a category or tool names.
