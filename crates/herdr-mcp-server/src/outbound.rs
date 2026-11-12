@@ -573,7 +573,11 @@ mod tests {
         assert!(open.check_addr("x", ip("fd00:ec2::254"), 80).is_err());
         assert!(open.check_addr("x", ip("10.0.0.5"), 80).is_ok());
         // Private addresses are refused by default.
-        assert!(Guard::default().check_addr("x", ip("10.0.0.5"), 80).is_err());
+        assert!(
+            Guard::default()
+                .check_addr("x", ip("10.0.0.5"), 80)
+                .is_err()
+        );
         let closed = Guard {
             block_private: true,
             allow_hosts: vec!["*.example.com".into(), "localhost".into()],
