@@ -143,7 +143,7 @@ async fn announce_splits(log: PathBuf, events: broadcast::Sender<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use herdr_mcp_api::{RecipeStep, RecipeTrigger, RunStatus};
+    use herdr_mcp_api::{EventLevel, RecipeStep, RecipeTrigger, RunStatus};
     use std::sync::Arc;
 
     /// herdr's event reaches a trigger over the socket, the run's step goes
@@ -160,7 +160,7 @@ mod tests {
         client.spawn_subscriber();
         let server = crate::HerdrMcpServer::new((*persistence).clone(), client.registry.clone())
             .with_herdr_client(client.clone());
-        crate::triggers::spawn(server.clone(), client.events());
+        crate::triggers::spawn(server.clone(), client.clone());
         let mut created = client.events();
 
         let now = chrono::Utc::now();
@@ -230,5 +230,45 @@ mod tests {
                 break;
             }
         }
+
+        // The Events stream's diagnostics say what happened: subscribed,
+        // the trigger fired with the run's id, resubscribed for the new
+        // pane, and (debug) why the split's own pane didn't trigger it.
+        let mut names = Vec::new();
+        for _ in 0..500 {
+            let (all, _) = client.recent_and_live(EventLevel::Debug);
+            names = all.iter().map(|e| e.event.clone()).collect::<Vec<_>>();
+            if let Some(checked) = all.iter().find(|e| e.event == "herdr-mcp.trigger_checked") {
+                assert_eq!(checked.level, EventLevel::Debug);
+                assert_eq!(
+                    checked.data["no_match"],
+                    json!([r#"pane.tab_id is "w1:t2", not "w1:t1""#])
+                );
+                let fired = all
+                    .iter()
+                    .find(|e| e.event == "herdr-mcp.trigger_fired")
+                    .expect("fired");
+                assert_eq!(fired.level, EventLevel::Reactions);
+                assert_eq!(fired.data["run_id"], json!(runs[0].id));
+                assert!(
+                    names.iter().any(|n| n == "herdr-mcp.subscribed"),
+                    "{names:?}"
+                );
+                assert!(
+                    names.iter().any(|n| n == "herdr-mcp.resubscribing"),
+                    "{names:?}"
+                );
+                // The default level is herdr's own events only.
+                let (herdr_only, _) = client.recent_and_live(EventLevel::Events);
+                assert!(
+                    herdr_only
+                        .iter()
+                        .all(|e| !e.event.starts_with("herdr-mcp."))
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no trigger_checked entry: {names:?}");
     }
 }

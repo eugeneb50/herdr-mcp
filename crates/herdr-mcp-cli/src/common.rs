@@ -129,7 +129,7 @@ fn spawn_daemon(
             "daemon for {}: running schedules, triggers and run retention",
             data_dir.display()
         );
-        triggers::spawn(server.clone(), herdr_client.events());
+        triggers::spawn(server.clone(), herdr_client.clone());
         // Runs past their retention since the last start (keep-days ages
         // runs of collections that no longer run).
         herdr_mcp_server::runs::prune_all(&server).await;

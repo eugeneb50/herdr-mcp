@@ -4,6 +4,14 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Events as a diagnostic log.** The herdr Events stream takes a level
+  (`/api/herdr/events?level=`; a picker on the web Events tab, `Tab` in the
+  TUI's). `events` (the default) is herdr's own, as before. `reactions` adds
+  herdr-mcp's entries: subscriber connects, drops and resubscribes, triggers
+  fired (with the run id), skipped (still running) or failing to start,
+  agent status updates, lagging listeners. `debug` adds every trigger checked
+  and why it didn't match. Entries carry the time herdr-mcp got them;
+  triggers never see the diagnostic ones.
 - **A tool error fails the run (breaking).** A step whose tool result has
   `isError: true` (params that don't deserialize, herdr refusing a
   `herdr_api` method) now fails the step and the run, with the tool's text

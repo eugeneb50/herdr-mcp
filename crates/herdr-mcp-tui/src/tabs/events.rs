@@ -1,14 +1,15 @@
 //! The Events tab: herdr's event stream (`GET /api/herdr/events`, SSE: the
-//! server's last 200 events, then live ones), what collection triggers fire
-//! on, newest first. The stream is read by its own task, which reconnects when the
+//! server's recent entries, then live ones), what collection triggers fire
+//! on, newest first. `Tab` cycles the level: herdr's events only, plus
+//! herdr-mcp's reactions to them, plus debug (every trigger checked). The stream is read by its own task, which reconnects when the
 //! bridge goes away; the main loop drains what it got with
 //! [`EventsState::drain`].
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use herdr_mcp_api::HerdrEvent;
+use herdr_mcp_api::{EventLevel, HerdrEvent};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Modifier;
@@ -19,8 +20,8 @@ use tokio::sync::mpsc;
 use crate::App;
 use crate::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
 
-/// Events kept.
-const KEEP: usize = 200;
+/// Entries kept (diagnostics included).
+const KEEP: usize = 500;
 
 #[derive(Default)]
 pub struct EventsState {
@@ -30,9 +31,13 @@ pub struct EventsState {
     pub filter: String,
     /// The picked event among the shown ones.
     pub index: usize,
+    /// What the stream shows; changing it restarts the stream.
+    pub level: EventLevel,
     /// From the stream task: an event, or `None` when it (re)connects and
     /// the server's recent events follow.
     rx: Option<mpsc::UnboundedReceiver<Option<HerdrEvent>>>,
+    /// The bridge the stream reads, once started.
+    bridge: Option<(u16, PathBuf)>,
     pub(crate) list: ListState,
     pub(crate) list_inner: Rect,
 }
@@ -43,6 +48,8 @@ impl EventsState {
         if self.rx.is_some() {
             return;
         }
+        self.bridge = Some((port, data_dir.to_path_buf()));
+        let level = self.level;
         // No request timeout: it would end the stream.
         let Ok(client) = crate::http::stream_client(port, data_dir) else {
             return;
@@ -51,7 +58,7 @@ impl EventsState {
         self.rx = Some(rx);
         tokio::spawn(async move {
             loop {
-                if let Ok(mut resp) = client.herdr_events().await {
+                if let Ok(mut resp) = client.herdr_events(level).await {
                     if tx.send(None).is_err() {
                         return;
                     }
@@ -112,6 +119,18 @@ impl EventsState {
         true
     }
 
+    /// Show the next level: a new stream, which replays that level's recent
+    /// entries. (The old task ends at its next send.)
+    pub fn cycle_level(&mut self) {
+        self.level = self.level.next();
+        self.rx = None;
+        self.events.clear();
+        self.index = 0;
+        if let Some((port, dir)) = self.bridge.clone() {
+            self.start(port, &dir);
+        }
+    }
+
     fn passes(&self, e: &HerdrEvent) -> bool {
         self.filter.is_empty() || e.event.contains(&self.filter)
     }
@@ -134,12 +153,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
         .split(area);
-    let b = focused_panel_block(" herdr events ");
+    let b = focused_panel_block(&format!(" herdr events · {} ", ev.level.as_str()));
     let inner = b.inner(cols[0]);
     frame.render_widget(b, cols[0]);
     let filter = if ev.filter.is_empty() {
         Line::styled(
-            "type to filter by event name  Esc clear  Ctrl+D clear list",
+            "type to filter by event name  Esc clear  Tab level  Ctrl+D clear list",
             dim_style(),
         )
     } else {
@@ -176,10 +195,19 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         .enumerate()
         .map(|(i, e)| {
             let on = i == ev.index;
-            let mut spans = vec![
-                Span::styled(if on { "▸ " } else { "  " }, accent_style()),
-                Span::styled(e.event.clone(), accent_style()),
-            ];
+            let name = if e.level == EventLevel::Events {
+                accent_style()
+            } else {
+                dim_style()
+            };
+            let mut spans = vec![Span::styled(if on { "▸ " } else { "  " }, accent_style())];
+            if let Some(at) = e.at {
+                spans.push(Span::styled(
+                    format!("{} ", at.format("%H:%M:%S")),
+                    dim_style(),
+                ));
+            }
+            spans.push(Span::styled(e.event.clone(), name));
             if let Some(ws) = e.workspace_id() {
                 spans.push(Span::styled(format!("  {ws}"), dim_style()));
             }
@@ -199,7 +227,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let inner = b.inner(cols[1]);
     frame.render_widget(b, cols[1]);
     let mut lines = vec![Line::styled(
-        "A collection trigger fires on the event name, optionally filtered by values in its data (agent_status=done); the run reads the data as {{herdr.…}}. Edit triggers in the web UI.",
+        "A collection trigger fires on the event name, optionally filtered by values in its data (agent_status=done); the run reads the data as {{herdr.…}}. Edit triggers in the web UI. Tab: reactions adds what herdr-mcp did about each event (subscriber, triggers fired or skipped, agent status); debug adds every trigger checked and why it didn't match.",
         dim_style(),
     )];
     if let Some(e) = picked {
@@ -208,6 +236,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
             e.event.clone(),
             accent_style().add_modifier(Modifier::BOLD),
         ));
+        let mut meta = vec![e.level.as_str().to_string()];
+        if let Some(at) = e.at {
+            meta.push(at.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string());
+        }
+        lines.push(Line::styled(meta.join(" · "), dim_style()));
         lines.extend(
             serde_json::to_string_pretty(&e.data)
                 .unwrap_or_default()
@@ -218,8 +251,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-/// ↑/↓ pick an event, typing filters by name, Esc clears the filter,
-/// Ctrl+D clears the list.
+/// ↑/↓ pick an event, typing filters by name, Esc clears the filter, Tab
+/// cycles the level, Ctrl+D clears the list.
 pub fn handle_key(ev: &mut EventsState, code: KeyCode, mods: KeyModifiers) -> bool {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     let len = ev.shown().len();
@@ -234,6 +267,7 @@ pub fn handle_key(ev: &mut EventsState, code: KeyCode, mods: KeyModifiers) -> bo
             ev.events.clear();
             ev.index = 0;
         }
+        KeyCode::Tab => ev.cycle_level(),
         KeyCode::Esc => {
             ev.filter.clear();
             ev.index = 0;
@@ -297,6 +331,8 @@ mod tests {
         let mk = |name: &str| HerdrEvent {
             event: name.into(),
             data: serde_json::Value::Null,
+            level: EventLevel::Events,
+            at: None,
         };
         tx.send(Some(mk("pane.created"))).unwrap();
         tx.send(Some(mk("tab.created"))).unwrap();
@@ -325,5 +361,23 @@ mod tests {
         assert!(ev.drain());
         assert_eq!(ev.events.len(), 1);
         assert_eq!(ev.index, 0);
+    }
+
+    /// Tab moves to the next level and starts over (no bridge here, so no
+    /// stream: the list is just emptied).
+    #[test]
+    fn tab_cycles_the_level() {
+        let mut ev = EventsState::default();
+        ev.events.push(HerdrEvent::diagnostic(
+            EventLevel::Reactions,
+            "subscribed",
+            serde_json::Value::Null,
+        ));
+        assert!(handle_key(&mut ev, KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(ev.level, EventLevel::Reactions);
+        assert!(ev.events.is_empty());
+        handle_key(&mut ev, KeyCode::Tab, KeyModifiers::NONE);
+        handle_key(&mut ev, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(ev.level, EventLevel::Events);
     }
 }

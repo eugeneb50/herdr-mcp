@@ -346,13 +346,18 @@ impl ApiClient {
         self.get(&["api", "templates"]).await
     }
 
-    /// `GET /api/herdr/events` — herdr's live event stream (SSE), opened:
-    /// read it with `chunk()`, one `data: {HerdrEvent}` line per event. Use
-    /// a client without a request timeout, which would end the stream.
+    /// `GET /api/herdr/events?level=` — herdr's live event stream (SSE),
+    /// with herdr-mcp's diagnostic entries up to `level`, opened: read it
+    /// with `chunk()`, one `data: {HerdrEvent}` line per event. Use a client
+    /// without a request timeout, which would end the stream.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn herdr_events(&self) -> Result<reqwest::Response, ApiError> {
+    pub async fn herdr_events(
+        &self,
+        level: crate::EventLevel,
+    ) -> Result<reqwest::Response, ApiError> {
         let resp = self
             .request(Method::GET, &["api", "herdr", "events"])
+            .query(&[("level", level.as_str())])
             .send()
             .await?;
         let status = resp.status();

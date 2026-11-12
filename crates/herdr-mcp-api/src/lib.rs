@@ -23,7 +23,8 @@ pub use client::{ApiClient, ApiError, schema_type, tool_is_error, tool_payload, 
 pub use config::{ClipboardConfig, ConfigResponse};
 pub use gate::{Check, CheckResult, Gate, GateAction, GateRule, Op};
 pub use herdr::{
-    HerdrEvent, HerdrPane, HerdrSession, PaneFilter, PanesResponse, RecipeTrigger, SessionsResponse,
+    EventLevel, HerdrEvent, HerdrPane, HerdrSession, PaneFilter, PanesResponse, RecipeTrigger,
+    SessionsResponse,
 };
 pub use profile::AgentProfile;
 pub use recipe::{

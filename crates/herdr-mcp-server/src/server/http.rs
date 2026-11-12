@@ -718,31 +718,53 @@ pub(super) async fn events_handler(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
-/// `GET /api/herdr/events` — Server-Sent Events: herdr's own event stream
-/// (`HerdrEvent` JSON per message): the last 200 the subscriber received,
-/// oldest first, then each new one. Without a herdr subscriber attached the
-/// stream stays empty.
+#[derive(Debug, Deserialize)]
+pub(super) struct HerdrEventsQuery {
+    #[serde(default)]
+    level: herdr_mcp_api::EventLevel,
+}
+
+/// `GET /api/herdr/events?level=events|reactions|debug` — Server-Sent
+/// Events (`HerdrEvent` JSON per message): the recent entries up to
+/// `level` (the last 200 of each, oldest first), then each new one. `events`
+/// (the default) is herdr's own stream; the higher levels add herdr-mcp's
+/// diagnostic entries. Without a herdr subscriber attached the stream stays
+/// empty.
 pub(super) async fn herdr_events_handler(
     State(AppState { server, .. }): State<AppState>,
+    Query(HerdrEventsQuery { level }): Query<HerdrEventsQuery>,
 ) -> axum::response::sse::Sse<
     impl futures_util::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
 > {
     use axum::response::sse::{Event, KeepAlive, Sse};
-    let feed = server.herdr_client.get().map(|c| c.recent_and_live());
+    use herdr_mcp_api::{EventLevel, HerdrEvent};
+    let feed = server.herdr_client.get().map(|c| c.recent_and_live(level));
+    let sse = |event: &HerdrEvent| {
+        Event::default()
+            .json_data(event)
+            .unwrap_or_else(|_| Event::default().comment("unencodable event"))
+    };
     let stream = async_stream::stream! {
         let Some((recent, mut rx)) = feed else { return };
-        for event in recent {
-            yield Ok(Event::default()
-                .json_data(&event)
-                .unwrap_or_else(|_| Event::default().comment("unencodable event")));
+        for event in &recent {
+            yield Ok(sse(event));
         }
         loop {
             match rx.recv().await {
-                Ok(event) => yield Ok(Event::default()
-                    .json_data(&event)
-                    .unwrap_or_else(|_| Event::default().comment("unencodable event"))),
+                Ok(event) if event.level <= level => yield Ok(sse(&event)),
+                Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    yield Ok(Event::default().comment(format!("skipped {n} events")));
+                    yield Ok(if level >= EventLevel::Reactions {
+                        let mut lagged = HerdrEvent::diagnostic(
+                            EventLevel::Reactions,
+                            "lagged",
+                            serde_json::json!({ "listener": "this stream", "skipped": n }),
+                        );
+                        lagged.at = Some(chrono::Utc::now());
+                        sse(&lagged)
+                    } else {
+                        Event::default().comment(format!("skipped {n} events"))
+                    });
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
