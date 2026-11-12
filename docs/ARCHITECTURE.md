@@ -37,7 +37,7 @@ interpolation.
 ┌─────────────────────────────────────────────────────────────┐
 │  ┌──────────────────────┐  ┌──────────────────────────────┐ │
 │  │  herdr-mcp Binary    │  │  Axum HTTP Bridge (opt.)     │ │
-│  │  (main.rs)           │  │  server.rs:start_http()      │ │
+│  │  (main.rs)           │  │  server/http.rs:start_http() │ │
 │  │                      │  │  Port configurable            │ │
 │  │  rmcp ServerHandler  │  │  Same-origin (no CORS)        │ │
 │  │  tool_router macro   │  │  REST: /api/tools/:name       │ │
@@ -46,7 +46,7 @@ interpolation.
 │             └──────────┬──────────────┘                      │
 │                        ▼                                     │
 │  ┌─────────────────────────────────────────────────────────┐ │
-│  │              HerdrMcpServer (server.rs)                  │ │
+│  │              HerdrMcpServer (server/mod.rs)              │ │
 │  │  - 46 tool definitions (discovery, lifecycle, read,     │ │
 │  │    write, synchronize, a2a, variables, templates,       │ │
 │  │    scheduler, clipboard)                                │ │
@@ -133,7 +133,7 @@ herdr-mcp/
 │   ├── herdr-mcp-server/   # MCP server, tools, HTTP bridge
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports HerdrMcpServer, Persistence, etc.
-│   │       ├── server.rs   # Tool definitions + HTTP handlers + recipe engine
+│   │       ├── server/     # mod.rs tools, params.rs, http.rs bridge, engine.rs dispatch
 │   │       ├── herdr_client.rs # Socket client (events, raw API calls) + AgentRegistry
 │   │       ├── runs.rs     # Background run engine (pause/resume/cancel, event log)
 │   │       ├── profiles.rs # Agent profiles (drive any CLI agent)
@@ -351,7 +351,7 @@ The bridge serves the Dioxus bundle built into the binary:
 ### 5.4.1 Security (`[security]`)
 
 Every tool call, whoever makes it, goes through `HerdrMcpServer::call_tool`
-(`server.rs`), which checks `security.rs`'s policy before routing and
+(`server/mod.rs`), which checks `security.rs`'s policy before routing and
 appends to the audit log after:
 
 - **Origin:** the in-process session (`dispatch_tool`) tags each call

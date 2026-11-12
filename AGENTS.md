@@ -66,7 +66,7 @@ The workspace has no doctests; if you add one, also run `cargo test --doc`.
 
 **Changing an `/api/*` shape:** edit the type in `crates/herdr-mcp-api` (never
 redefine it elsewhere), use it in the handler, and extend
-`http_contract_roundtrip_with_api_client` in `herdr-mcp-server/src/server.rs`.
+`http_contract_roundtrip_with_api_client` in `herdr-mcp-server/src/server/tests.rs`.
 
 Web UI (Dioxus, needs `dx` — `cargo install dioxus-cli`):
 
@@ -149,7 +149,7 @@ through deliberate team decision.
 - `crates/herdr-mcp-api/` — single definition of every `/api/*` request/response type (`agents.rs`, `config.rs`, `herdr.rs` (herdr events, recipe triggers, panes, sessions), `profile.rs`, `recipe.rs`, `run.rs`, `variables.rs`) + typed `ApiClient` (`client.rs`). The server re-exports these; web UI and TUI call the bridge through `ApiClient`. No tokio, no `herdr-mcp-*` deps.
 - `crates/herdr-mcp-core/` — `config.rs` (full config system: `[http]`, `[herdr]`, `[clipboard]`), `session_context.rs` (inside-herdr / pane id from herdr's env)
 - `crates/herdr-mcp-tui/` — TUI dashboard (`lib.rs` app loop, `tabs/`, `theme.rs`, `http.rs` bridge discovery); talks to the bridge through `herdr-mcp-api::ApiClient`
-- `crates/herdr-mcp-server/` — `server.rs` (tool defs + HTTP handlers), `runs.rs` (run engine), `triggers.rs`, `scheduler.rs`, `herdr_client.rs` (socket client, event subscriber, agent registry), `panes.rs` (herdr panes + sessions, the one pane fetch), `agents.rs` / `profiles.rs` (agent profiles), `persistence.rs`, `templates.rs`, `variables.rs`
+- `crates/herdr-mcp-server/` — `server/` (`mod.rs` tool defs, `params.rs` tool params, `http.rs` HTTP bridge, `engine.rs` tool dispatch + placeholders), `runs.rs` (run engine), `triggers.rs`, `scheduler.rs`, `herdr_client.rs` (socket client, event subscriber, agent registry), `panes.rs` (herdr panes + sessions, the one pane fetch), `agents.rs` / `profiles.rs` (agent profiles), `persistence.rs`, `templates.rs`, `variables.rs`
 - `crates/herdr-mcp-cli/` — `src/main.rs` (mode choice: TUI / MCP stdio / HTTP only; `plugin`), `src/common.rs` (`serve_core`: the one server instance + background tasks), `src/plugin.rs` (herdr plugin), `tests/cli.rs`
 - `crates/herdr-mcp-ui/` — Dioxus web UI; uses `herdr-mcp-api::ApiClient` (one instance from `window.location.origin`, provided as `Signal` context via `use_api()`); `components/playground/` holds the collections view (requests, HTTP/LLM builders) and herdr events; the collections model both UIs share is `herdr-mcp-api::playground`; built into `herdr-mcp` and served by the HTTP bridge
 - `data/` — runtime persistence (recipes, runs, variables, schedules, sessions, profiles)
@@ -159,7 +159,7 @@ through deliberate team decision.
 
 - **Low risk**: docs/chore/tests-only changes, web UI CSS tweaks
 - **Medium risk**: most `crates/*/src/**` behavior changes without boundary/security impact
-- **High risk**: `crates/herdr-mcp-server/src/server.rs` (tool definitions, HTTP bridge), `crates/herdr-mcp-server/src/triggers.rs` (runs recipes unattended), `.github/workflows/**`
+- **High risk**: `crates/herdr-mcp-server/src/server/` (tool definitions, HTTP bridge), `crates/herdr-mcp-server/src/triggers.rs` (runs recipes unattended), `.github/workflows/**`
 
 When uncertain, classify as higher risk.
 
