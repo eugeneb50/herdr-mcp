@@ -4,6 +4,14 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **The TUI is a monitor (breaking).** The web UI is the main UI; the TUI
+  watches and acts. Its tabs are Send, Overview, Runs and Events (`Alt+1`–`4`).
+  Runs gains quick actions: `r` runs a collection in this session, `R`
+  reruns, `x` cancels, `o` focuses the run's pane, `p` / `d` parent / child.
+  `Alt+w` (`keys.web`) opens the web UI. The Playground builder and the
+  Variables and Settings editors are gone from the TUI; edit those on the
+  web. `keys.tab-5` is gone, `keys.tab-3` / `tab-4` are now Runs / Events,
+  and only the chords the TUI still uses are reserved.
 - **SQLite storage (breaking).** Recipes, variables, session variables,
   runs (header + event log) and schedules live in one database,
   `<data-dir>/herdr-mcp.db` (WAL, `user_version` schema version), instead

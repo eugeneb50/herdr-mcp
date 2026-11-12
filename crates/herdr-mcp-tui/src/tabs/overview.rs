@@ -192,18 +192,18 @@ fn render_intro(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let lines = vec![
         Line::from(format!(
-            "Local control surface for herdr. MCP server + HTTP bridge on port {} · {} tools · session {} · {} panes",
-            app.settings.http_port,
-            app.playground.tools.len(),
+            "herdr-mcp monitor: bridge on port {} · session {} · {} panes · edit collections, variables and settings in the web UI ({})",
+            app.opts.http_port,
             app.herdr.session_name(),
             app.herdr.panes.len(),
+            crate::first_chord(&app.knobs, "keys.web"),
         )),
         Line::from(format!(
-            "Tabs: {} / {} or {}…{} (Settings → keys), or click the tab strip. Here: ↑/↓ pick a pane, Tab to its text, drag to select, Ctrl+C copy.",
+            "Tabs: {} / {} or {}…{}, or click the tab strip. Here: ↑/↓ pick a pane, Tab to its text, drag to select, Ctrl+C copy.",
             crate::first_chord(&app.knobs, "keys.tab-next"),
             crate::first_chord(&app.knobs, "keys.tab-prev"),
             crate::first_chord(&app.knobs, "keys.tab-1"),
-            crate::first_chord(&app.knobs, "keys.tab-5"),
+            crate::first_chord(&app.knobs, "keys.tab-4"),
         )),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);

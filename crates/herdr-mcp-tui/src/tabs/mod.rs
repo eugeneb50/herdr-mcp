@@ -1,7 +1,6 @@
 //! Per-tab render + input handlers.
 
+pub mod events;
 pub mod overview;
-pub mod playground;
+pub mod runs;
 pub mod send;
-pub mod settings;
-pub mod variables;

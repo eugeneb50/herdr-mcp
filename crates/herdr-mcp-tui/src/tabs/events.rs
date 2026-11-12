@@ -1,6 +1,6 @@
-//! herdr's event stream (`GET /api/herdr/events`, SSE: the server's last
-//! 200 events, then live ones): what collection triggers fire on, newest
-//! first. The stream is read by its own task, which reconnects when the
+//! The Events tab: herdr's event stream (`GET /api/herdr/events`, SSE: the
+//! server's last 200 events, then live ones), what collection triggers fire
+//! on, newest first. The stream is read by its own task, which reconnects when the
 //! bridge goes away; the main loop drains what it got with
 //! [`EventsState::drain`].
 
@@ -9,9 +9,15 @@ use std::time::Duration;
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use herdr_mcp_api::HerdrEvent;
-use ratatui::layout::Rect;
-use ratatui::widgets::ListState;
+use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::style::Modifier;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{List, ListItem, ListState, Paragraph, Wrap};
 use tokio::sync::mpsc;
+
+use crate::App;
+use crate::theme::{accent_style, dim_style, focused_panel_block, panel_block, selected_style};
 
 /// Events kept.
 const KEEP: usize = 200;
@@ -120,6 +126,96 @@ impl EventsState {
 fn parse_line(line: &str) -> Option<HerdrEvent> {
     let data = line.trim_end().strip_prefix("data:")?;
     serde_json::from_str(data.trim()).ok()
+}
+
+pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
+    let ev = &mut app.events;
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
+        .split(area);
+    let b = focused_panel_block(" herdr events ");
+    let inner = b.inner(cols[0]);
+    frame.render_widget(b, cols[0]);
+    let filter = if ev.filter.is_empty() {
+        Line::styled(
+            "type to filter by event name  Esc clear  Ctrl+D clear list",
+            dim_style(),
+        )
+    } else {
+        Line::from(vec![
+            Span::styled("filter: ", dim_style()),
+            Span::raw(ev.filter.clone()),
+            Span::styled("▌", accent_style()),
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(filter),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+    let list_area = Rect::new(
+        inner.x,
+        inner.y + 1,
+        inner.width,
+        inner.height.saturating_sub(1),
+    );
+    let shown = ev.shown();
+    let picked = shown.get(ev.index).map(|e| (*e).clone());
+    if shown.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "Waiting for herdr events… (create a pane, switch tabs, or run an agent)",
+                dim_style(),
+            ))
+            .wrap(Wrap { trim: false }),
+            list_area,
+        );
+    }
+    let items: Vec<ListItem> = shown
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let on = i == ev.index;
+            let mut spans = vec![
+                Span::styled(if on { "▸ " } else { "  " }, accent_style()),
+                Span::styled(e.event.clone(), accent_style()),
+            ];
+            if let Some(ws) = e.workspace_id() {
+                spans.push(Span::styled(format!("  {ws}"), dim_style()));
+            }
+            let line = Line::from(spans);
+            ListItem::new(if on {
+                line.style(selected_style())
+            } else {
+                line
+            })
+        })
+        .collect();
+    ev.list.select(Some(ev.index));
+    frame.render_stateful_widget(List::new(items), list_area, &mut ev.list);
+    ev.list_inner = list_area;
+
+    let b = panel_block(" Event data ");
+    let inner = b.inner(cols[1]);
+    frame.render_widget(b, cols[1]);
+    let mut lines = vec![Line::styled(
+        "A collection trigger fires on the event name, optionally filtered by values in its data (agent_status=done); the run reads the data as {{herdr.…}}. Edit triggers in the web UI.",
+        dim_style(),
+    )];
+    if let Some(e) = picked {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(
+            e.event.clone(),
+            accent_style().add_modifier(Modifier::BOLD),
+        ));
+        lines.extend(
+            serde_json::to_string_pretty(&e.data)
+                .unwrap_or_default()
+                .lines()
+                .map(|l| Line::from(l.to_string())),
+        );
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// ↑/↓ pick an event, typing filters by name, Esc clears the filter,

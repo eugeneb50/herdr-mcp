@@ -165,16 +165,6 @@ pub fn load_or_create_token(data_dir: &Path) -> anyhow::Result<String> {
     Ok(token)
 }
 
-/// The web UI's address on `localhost:port`, carrying `token` in the
-/// fragment (never sent to the server or written to its logs) for the page
-/// to keep and send.
-pub fn web_url(port: u16, token: Option<&str>) -> String {
-    match token {
-        Some(t) => format!("http://localhost:{port}/#token={t}"),
-        None => format!("http://localhost:{port}"),
-    }
-}
-
 /// Whether `given` is `token`, in time independent of where they differ.
 pub fn token_matches(given: &str, token: &str) -> bool {
     given.len() == token.len()

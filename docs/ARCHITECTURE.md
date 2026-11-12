@@ -117,19 +117,19 @@ herdr-mcp/
 │   │       ├── agents.rs   # AgentHandle, AgentsResponse
 │   │       ├── recipe.rs   # Recipe, RecipeStep, ExecutionResult, templates, recipe requests
 │   │       ├── variables.rs # VariableStore, resolve, variable/tool envelopes
-│   │       ├── playground.rs # Collections model shared by web + TUI: tool/method forms, extract paths, request saves
+│   │       ├── playground.rs # Collections model (web; the TUI's run picker and Runs view): tool/method forms, extract paths, request saves
 │   │       └── client.rs   # Typed ApiClient + ApiError
 │   ├── herdr-mcp-core/     # Config
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports Config, CliOverrides
 │   │       ├── config.rs   # Full config system: TOML + env + CLI
 │   │       └── session_context.rs # inside-herdr / pane id from herdr's env
-│   ├── herdr-mcp-tui/      # TUI dashboard (crossterm + ratatui); bridge client only
+│   ├── herdr-mcp-tui/      # TUI monitor (crossterm + ratatui); bridge client only
 │   │   └── src/
 │   │       ├── lib.rs      # App state, event loop, mouse handling
 │   │       ├── http.rs     # Bridge liveness probe (configured port only); every call goes through ApiClient
 │   │       ├── theme.rs    # Color palette and styles
-│   │       └── tabs/       # send, overview, playground, variables, settings
+│   │       └── tabs/       # send, overview, runs, events
 │   ├── herdr-mcp-server/   # MCP server, tools, HTTP bridge
 │   │   └── src/
 │   │       ├── lib.rs      # Re-exports HerdrMcpServer, Persistence, etc.
@@ -243,8 +243,8 @@ default to the `timeouts.http-request-ms` / `timeouts.llm-call-ms` settings.
 
 The playground's request editor shows an endpoint builder and an LLM wizard
 for these two tools instead of the schema form: on the web `HttpBuilder` /
-`LlmWizard` (`playground/builders.rs`), in the TUI the `HttpRow` / `LlmRow`
-form rows. Both edit the same raw values, and "Plain fields" switches back.
+`LlmWizard` (`playground/builders.rs`). They edit the same raw values, and
+"Plain fields" switches back.
 What they share (body and key modes, provider presets, key/value rows,
 `load_models`) is in `herdr-mcp-api::playground`.
 
@@ -494,13 +494,13 @@ type to stop at. `runs::trail` (`run_get` trail, `GET /api/runs/{id}/trail`)
 prints a run's trail with each child's indented under it.
 `gate::rule_text` / `parse_rule` give a rule a one-line form
 (`code gt 399 or read.text contains "error" → fail msg`, `always → end`):
-the web's gate editor previews it under each rule, the TUI edits rules as
-that text, and the trail prints decisions with it. A `run` names its
+the web's gate editor previews it under each rule and the trail prints
+decisions with it. A `run` names its
 collection by name (`playground::collections` gives the UIs the list) or
 id, then `key=value` inputs (`inputs_text` / `parse_inputs`).
 
 **Runs view.** Both playgrounds have a Runs view (web: the Runs tab,
-`playground/runs.rs`; TUI: the tree's Runs row, `tabs/playground/runs.rs`):
+`playground/runs.rs`; TUI: the Runs tab, `tabs/runs.rs`):
 the run list, newest first, filtered by collection or failed only, and the
 picked run's trail (`/api/runs/{id}/trail`, so a hand-off's child trail is
 included). The list is the newest `playground::RUNS_SHOWN` runs. The web
@@ -530,26 +530,27 @@ the start (with origin), the finish (status, passes) and failed steps.
 
 ---
 
-## 7. TUI Dashboard (`crates/herdr-mcp-tui`)
+## 7. TUI Monitor (`crates/herdr-mcp-tui`)
 
-What `herdr-mcp` opens when run in a terminal: VS Code-style tabs, mouse +
-keyboard navigation, sized for a herdr sidecar pane.
+What `herdr-mcp` opens when run in a terminal: a monitor and quick-action
+console, mouse + keyboard, sized for a herdr sidecar pane. The web UI is the
+main UI: collections, variables and settings are edited there only (`keys.web`,
+default `Alt+w`, opens it with the token in the fragment).
 
-**5 tabs**, opening on Send. The global keys come from the `keys.*`
-settings (Settings → Options, applied live); the defaults: next / previous
+**4 tabs**, opening on Send. The global keys come from the `keys.*`
+settings (applied live); the defaults: next / previous
 `Alt+→` / `Alt+←` (any terminal) or `Ctrl+Tab` / `Ctrl+Shift+Tab`; directly
-`Alt+1`–`Alt+5` or `Ctrl+1`–`Ctrl+5`; `Ctrl+r` refresh, `Ctrl+q` quit.
-Without the kitty keyboard protocol (VTE terminals, for one) Ctrl+Tab
-arrives as a plain Tab and Ctrl+1 / Ctrl+3 as `1` / Esc, so use the Alt
-keys there. A binding must use Ctrl or Alt (or an F-key), so none of them
-type text or edit a field:
+`Alt+1`–`Alt+4` or `Ctrl+1`–`Ctrl+4`; `Ctrl+r` refresh, `Alt+w` web UI,
+`Ctrl+q` quit. Without the kitty keyboard protocol (VTE terminals, for one)
+Ctrl+Tab arrives as a plain Tab and Ctrl+1 / Ctrl+3 as `1` / Esc, so use the
+Alt keys there. A binding must use Ctrl or Alt (or an F-key), so none of them
+type text:
 | Tab | Content |
 |---|---|
 | Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "run the command" (`Ctrl+t`); addressed by pane id |
 | Overview | Stats, pane table (tab/label/agent/status/cwd) for the shown session (`s` cycles sessions), and the picked pane's text below it: re-read every `intervals.tui-pane-ms` (screen, or scrollback with `r`), scrollable, mouse drag selects (reading pauses while a selection is up), Ctrl+C or right-click Copy copies the selection or the whole text, Esc clears; Tab moves focus between table and text |
-| Playground | Collections, as on the web: a tree of collections (saved recipes) and their requests; edit a request's tool or herdr method, params (resolved preview) and extract rules, Send it (Ctrl+G) or run the collection, pick a result path to extract it; collection variables and triggers; new from a template. HTTP and LLM requests get the endpoint builder and LLM wizard (Alt+Enter for a new line in a body or prompt). Ctrl+E shows herdr's live event stream |
-| Variables | Workspace-scoped variable editor |
-| Settings | Options (every `/api/settings` knob: Enter edit, Del default, Shift+Del all defaults), runtime info, clipboard config |
+| Runs | The run list (newest first; `c` cycles the collection filter, `f` failed only) and the picked run's trail (`y` copies it). `r` picks a collection and runs it in this session, `R` runs the picked run again, `x` cancels it, `o` focuses its pane in herdr, `p` / `d` open its parent / child |
+| Events | herdr's live event stream, started when the tab is first opened; typing filters by name, Esc clears the filter, Ctrl+D clears the list |
 
 **Architecture:**
 - Runs **in-process on top of the serve stack** (`serve_core`): the HTTP
@@ -686,7 +687,7 @@ Cron-based recipe scheduling using the `cron` crate:
 | `/` | `Home` | Landing page: send to a pane by `pane_id` and/or `label` (typed, or picked from dropdowns of the panes and labels in `GET /api/variables/auto`; `ApiClient::send_to_pane` → `send_text` / `run_command`, `pane_id` wins), remembers the last target in `localStorage`; collapsed getting-started notes; pane table at the bottom from the same auto variables (click a row to target it) |
 | `/overview` | `Overview` | Pane browser: `GET /api/herdr/panes` with session/status/label filters, grouped by workspace and tab |
 | `/playground` | `Playground` | Collections, Postman style (`playground/collections.rs`): a collection is a saved recipe (folders = `category`), its requests are the steps. A request is any tool or a `herdr_api` method (picked from herdr's schema); its params preview through `POST /api/variables/resolve`; Send saves it and runs just that step (`step_ids`); clicking a path in the response saves its value as a collection variable and adds an extract rule (scope `collection`) so later sends update it. The collection view edits its variables, request order and triggers and runs it in order. Globals reuse the Variables page table. Plus the herdr Events tab. Pane fields offer the auto-variable pane dropdowns (`components/pane_options.rs`) |
-| `/variables` | `Variables` | Globals and each collection's own variables (CRUD/rename/import, `playground::save_global` / `save_collection_var`) + auto variables (read-only). The TUI's Variables tab lists the same three groups |
+| `/variables` | `Variables` | Globals and each collection's own variables (CRUD/rename/import, `playground::save_global` / `save_collection_var`) + auto variables (read-only). |
 | `/settings` | `Settings` | Runtime config + clipboard round-trip test |
 
 ### 11.3 Talking to the Bridge

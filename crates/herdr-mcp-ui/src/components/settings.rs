@@ -1,7 +1,6 @@
 //! Settings page: the options registry (keybindings, timeouts, limits;
 //! `/api/settings`), runtime config rows, clipboard backend commands (saved
 //! to the config file and applied live) and a clipboard round-trip test.
-//! Same bridge calls as the TUI Settings tab.
 
 use std::collections::HashMap;
 

@@ -76,7 +76,7 @@ herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 - **Live herdr events** — the bridge relays herdr's event stream as SSE (`/api/herdr/events`); the playground shows it live
 - **Cron scheduler** — schedule recipe runs on cron expressions
 - **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: collections of saved requests (tools, herdr API, HTTP, LLM) with extract rules and triggers, runs, variables, herdr events
-- **TUI dashboard** — what `herdr-mcp` opens in a terminal: VS Code-style tabs (mouse + keyboard) for send, overview, playground (the same collections as the web, plus herdr events), variables, settings
+- **TUI monitor** — what `herdr-mcp` opens in a terminal: a monitor and quick-action console (mouse + keyboard) with Send, Overview, Runs (run a collection, rerun, cancel, open a run's pane) and herdr's Events. Collections, variables and settings are edited in the web UI (`Alt+w` opens it)
 - **Live agent registry** — Unix socket event subscriber tracks panes and agent status in real time; role/label resolution for a2a primitives
 - **Shell-out core** — talks to herdr through its CLI (`tokio::process::Command`, real argv) and socket; no other runtime dependencies
 
@@ -228,7 +228,7 @@ port = 7676
 # [herdr]
 # socket-path = "~/.config/herdr/herdr.sock"
 
-# Tunables: edit them on the Settings page (web or TUI), which writes these
+# Tunables: edit them on the web UI's Settings page, which writes these
 # tables. Anything missing or invalid uses its built-in default.
 [settings.timeouts]
 pane-exec-ms = 120000
@@ -244,7 +244,7 @@ tab-next = ["alt+right", "ctrl+tab"]
 | `timeouts` | `pane-exec-ms`, `herdr-api-ms`, `agent-wait-ms`, `agent-prompt-ms`, `agent-start-ms`, `tui-request-ms`, `http-request-ms`, `llm-call-ms` |
 | `limits` | `pane-exec-lines`, `reply-fallback-lines`, `watcher-give-up`, `reconnect-attempts` |
 | `intervals` | `watcher-poll-ms`, `reconnect-backoff-ms`, `tui-refresh-ms`, `tui-pane-ms` |
-| `keys` (TUI) | `tab-next`, `tab-prev`, `tab-1`…`tab-5`, `refresh`, `quit` |
+| `keys` (TUI) | `tab-next`, `tab-prev`, `tab-1`…`tab-4`, `refresh`, `web`, `quit` |
 
 Tool calls that pass their own `timeout_ms` / `lines` still win. Key chords
 need Ctrl or Alt (or are F1–F12), may not take a chord a tab already uses
@@ -431,10 +431,13 @@ The recipe picker and web action need the bridge running.
 ./target/release/herdr-mcp
 ```
 
-VS Code-style tabbed TUI with mouse + keyboard navigation: send, overview,
-playground, variable editor and settings, sized for a herdr sidecar pane. It
-runs the HTTP bridge in the same process; if another herdr-mcp already serves
-the port, it uses that one.
+A monitor and quick-action console, mouse + keyboard, sized for a herdr
+sidecar pane: Send (type into a pane), Overview (panes and their text), Runs
+(every run and its trail; `r` runs a collection, `R` reruns, `x` cancels,
+`o` focuses the run's pane, `p` / `d` parent / child) and Events (herdr's
+event stream). Editing happens in the web UI, which `Alt+w` opens. It runs
+the HTTP bridge in the same process; if another herdr-mcp already serves the
+port, it uses that one.
 
 ### Web playground (development with hot reload)
 
@@ -590,7 +593,7 @@ Agents: [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md) shows how to combine them.
 | `llm_call` | An OpenAI-compatible chat call: OpenRouter by default, or OpenAI, Ollama, LM Studio, any `base_url`; key from `api_key` or an env var |
 | `llm_models` | The models such an API offers |
 
-In the playground (web and TUI), **+ HTTP** opens an endpoint builder and
+In the web playground, **+ HTTP** opens an endpoint builder and
 **+ LLM** a provider → model → prompt wizard (with a model picker filled from
 the provider); both edit the same request a plain form does.
 
