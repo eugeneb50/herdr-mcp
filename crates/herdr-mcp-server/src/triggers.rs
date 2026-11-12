@@ -9,42 +9,76 @@
 
 use std::collections::HashMap;
 
-use herdr_mcp_api::{HerdrEvent, Recipe, RunRecord, StartRunRequest};
-use serde_json::Value;
+use std::sync::Arc;
+
+use herdr_mcp_api::{EventLevel, HerdrEvent, Recipe, RunRecord, StartRunRequest};
+use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
+use crate::HerdrClient;
 use crate::server::HerdrMcpServer;
 
-/// Run triggered recipes for every event `events` delivers, until it closes.
-pub fn spawn(server: HerdrMcpServer, mut events: broadcast::Receiver<HerdrEvent>) {
+/// Run triggered recipes for every herdr event `client` delivers, until
+/// its stream closes. What each event led to goes to the Events stream as
+/// diagnostic entries ([`EventLevel::Reactions`], [`EventLevel::Debug`]).
+pub fn spawn(server: HerdrMcpServer, client: Arc<HerdrClient>) {
+    let mut events = client.events();
     tokio::spawn(async move {
-        let mut running: HashMap<Uuid, JoinHandle<RunRecord>> = HashMap::new();
+        // Recipe id → its triggered run still going (id, task).
+        let mut running: HashMap<Uuid, (Uuid, JoinHandle<RunRecord>)> = HashMap::new();
         loop {
             let event = match events.recv().await {
                 Ok(event) => event,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!("triggers skipped {n} herdr events (lagging)");
+                    client.note(
+                        EventLevel::Reactions,
+                        "lagged",
+                        json!({ "listener": "triggers", "skipped": n }),
+                    );
                     continue;
                 }
                 Err(broadcast::error::RecvError::Closed) => return,
             };
-            running.retain(|_, run| !run.is_finished());
+            running.retain(|_, (_, run)| !run.is_finished());
             let recipes = match server.persistence.list_recipes(Some(false)).await {
                 Ok(recipes) => recipes,
                 Err(e) => {
                     tracing::warn!("triggers: cannot list recipes: {e}");
+                    client.note(
+                        EventLevel::Reactions,
+                        "trigger_error",
+                        json!({ "event": event.event, "error": format!("cannot list recipes: {e}") }),
+                    );
                     continue;
                 }
             };
-            for recipe in recipes {
-                if running.contains_key(&recipe.id) {
-                    continue;
-                }
-                let Some(req) = triggered_run(&recipe, &event) else {
+            for recipe in recipes.iter().filter(|r| !r.triggers.is_empty()) {
+                let about =
+                    json!({ "event": event.event, "recipe": recipe.name, "recipe_id": recipe.id });
+                let Some(req) = triggered_run(recipe, &event) else {
+                    let reasons: Vec<String> = recipe
+                        .triggers
+                        .iter()
+                        .filter_map(|t| t.mismatch(&event))
+                        .collect();
+                    client.note(
+                        EventLevel::Debug,
+                        "trigger_checked",
+                        with(about, "no_match", json!(reasons)),
+                    );
                     continue;
                 };
+                if let Some((run_id, _)) = running.get(&recipe.id) {
+                    client.note(
+                        EventLevel::Reactions,
+                        "trigger_skipped",
+                        with(about, "still_running", json!(run_id)),
+                    );
+                    continue;
+                }
                 let origin = herdr_mcp_api::RunOrigin::Trigger {
                     event: event.event.to_string(),
                 };
@@ -56,13 +90,33 @@ pub fn spawn(server: HerdrMcpServer, mut events: broadcast::Receiver<HerdrEvent>
                             run.id,
                             recipe.name
                         );
-                        running.insert(recipe.id, done);
+                        client.note(
+                            EventLevel::Reactions,
+                            "trigger_fired",
+                            with(about, "run_id", json!(run.id)),
+                        );
+                        running.insert(recipe.id, (run.id, done));
                     }
-                    Err(e) => tracing::warn!("triggered run of {:?}: {e:?}", recipe.name),
+                    Err(e) => {
+                        tracing::warn!("triggered run of {:?}: {e:?}", recipe.name);
+                        client.note(
+                            EventLevel::Reactions,
+                            "trigger_error",
+                            with(about, "error", json!(format!("{e:?}"))),
+                        );
+                    }
                 }
             }
         }
     });
+}
+
+/// `obj` with `key` = `value` added.
+fn with(mut obj: Value, key: &str, value: Value) -> Value {
+    if let Value::Object(map) = &mut obj {
+        map.insert(key.into(), value);
+    }
+    obj
 }
 
 /// The run `event` starts for `recipe`, if one of its triggers matches: in
@@ -118,6 +172,8 @@ mod tests {
         HerdrEvent {
             event: "pane.agent_status_changed".into(),
             data: json!({"pane_id": "w2:p1", "workspace_id": "w2", "agent_status": "done"}),
+            level: EventLevel::Events,
+            at: None,
         }
     }
 

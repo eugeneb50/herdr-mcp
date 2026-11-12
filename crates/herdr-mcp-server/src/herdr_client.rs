@@ -18,7 +18,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, broadcast};
 
-use herdr_mcp_api::HerdrEvent;
+use herdr_mcp_api::{EventLevel, HerdrEvent};
+use serde_json::json;
 
 /// Agent lifecycle state, mirroring herdr's `AgentStatus` (snake_case).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,17 +214,21 @@ pub struct HerdrClient {
     reconnect_attempts: u32,
     reconnect_backoff_ms: u64,
     subscriber_state: Arc<std::sync::Mutex<SubscriberPhase>>,
-    /// Relays herdr's event stream to in-process listeners (triggers, SSE).
+    /// herdr's own events, for in-process listeners (triggers).
     events: broadcast::Sender<HerdrEvent>,
-    /// The last [`RECENT_EVENTS`] events, oldest first: what a new
-    /// `/api/herdr/events` stream starts with.
+    /// herdr's events and herdr-mcp's diagnostic entries, every level: what
+    /// `/api/herdr/events` streams (filtered to the viewer's level).
+    feed: broadcast::Sender<HerdrEvent>,
+    /// The last [`RECENT_EVENTS`] entries of each level, oldest first: what
+    /// a new `/api/herdr/events` stream starts with. Per level, so a debug
+    /// flood never pushes herdr's events out.
     recent: Arc<std::sync::Mutex<std::collections::VecDeque<HerdrEvent>>>,
 }
 
 /// herdr events buffered per listener before it lags (and skips ahead).
 const EVENT_BUFFER: usize = 256;
 
-/// herdr events kept for streams that start later.
+/// Entries of each level kept for streams that start later.
 const RECENT_EVENTS: usize = 200;
 
 impl HerdrClient {
@@ -239,6 +244,7 @@ impl HerdrClient {
             reconnect_backoff_ms,
             subscriber_state: Arc::default(),
             events: broadcast::channel(EVENT_BUFFER).0,
+            feed: broadcast::channel(EVENT_BUFFER).0,
             recent: Arc::default(),
         }
     }
@@ -248,22 +254,40 @@ impl HerdrClient {
         self.events.subscribe()
     }
 
-    /// The last [`RECENT_EVENTS`] events (oldest first), and the ones after
-    /// them as they come: no event is missed or repeated between the two.
-    pub fn recent_and_live(&self) -> (Vec<HerdrEvent>, broadcast::Receiver<HerdrEvent>) {
+    /// The recent entries up to `level` (oldest first), and the feed of
+    /// every entry after them as it comes (the caller drops those above
+    /// `level`): no entry is missed or repeated between the two.
+    pub fn recent_and_live(
+        &self,
+        level: EventLevel,
+    ) -> (Vec<HerdrEvent>, broadcast::Receiver<HerdrEvent>) {
         let recent = crate::lock(&self.recent);
-        (recent.iter().cloned().collect(), self.events.subscribe())
+        let shown = recent.iter().filter(|e| e.level <= level).cloned();
+        (shown.collect(), self.feed.subscribe())
     }
 
-    /// Keep `event` among the recent ones and send it to every listener.
-    fn publish(&self, event: HerdrEvent) {
+    /// Keep `event` among the recent ones of its level and send it to the
+    /// feed, and herdr's own events to the in-process listeners.
+    fn publish(&self, mut event: HerdrEvent) {
+        event.at.get_or_insert_with(chrono::Utc::now);
         let mut recent = crate::lock(&self.recent);
-        if recent.len() == RECENT_EVENTS {
-            recent.pop_front();
+        if recent.iter().filter(|e| e.level == event.level).count() == RECENT_EVENTS
+            && let Some(oldest) = recent.iter().position(|e| e.level == event.level)
+        {
+            recent.remove(oldest);
         }
         recent.push_back(event.clone());
         // No listeners is fine.
-        let _ = self.events.send(event);
+        if event.level == EventLevel::Events {
+            let _ = self.events.send(event.clone());
+        }
+        let _ = self.feed.send(event);
+    }
+
+    /// A herdr-mcp diagnostic entry `herdr-mcp.{name}` at `level`, for the
+    /// Events stream only.
+    pub fn note(&self, level: EventLevel, name: &str, data: serde_json::Value) {
+        self.publish(HerdrEvent::diagnostic(level, name, data));
     }
 
     /// The herdr API socket this client talks to.
@@ -358,6 +382,22 @@ impl HerdrClient {
                 let Err(e) = client.run_subscribe_loop().await;
                 let missing = Self::socket_missing(&e);
                 let inside = herdr_mcp_core::session_context::inside_herdr();
+                // Once per outage, not every retry.
+                if was_connected || failures == 0 {
+                    client.note(
+                        EventLevel::Reactions,
+                        if was_connected {
+                            "disconnected"
+                        } else {
+                            "waiting"
+                        },
+                        json!({
+                            "error": format!("{e:#}"),
+                            "socket": client.socket_path.display().to_string(),
+                            "socket_missing": missing,
+                        }),
+                    );
+                }
 
                 if missing && !inside && failures == 0 {
                     // OUTSIDE herdr, socket absent — EXPECTED, not an error.
@@ -419,6 +459,15 @@ impl HerdrClient {
                 anyhow::bail!("events.subscribe rejected: {line}");
             }
             self.set_phase(SubscriberPhase::Connected);
+            let subs = request["params"]["subscriptions"]
+                .as_array()
+                .map_or(&[][..], Vec::as_slice);
+            let panes = subs.iter().filter(|s| s.get("pane_id").is_some()).count();
+            self.note(
+                EventLevel::Reactions,
+                "subscribed",
+                json!({ "subscriptions": subs.len(), "panes": panes }),
+            );
 
             let mut panes_changed = false;
             while let Some(line) = lines.next_line().await? {
@@ -426,10 +475,18 @@ impl HerdrClient {
                     continue;
                 };
                 panes_changed = matches!(event.event.as_str(), "pane.created" | "pane.closed");
+                let name = event.event.clone();
                 self.publish(event.clone());
                 let client = self.clone();
                 tokio::spawn(async move { client.handle_event(event).await });
                 if panes_changed {
+                    // herdr scopes status events to a pane: a new pane set
+                    // needs a new subscription.
+                    self.note(
+                        EventLevel::Reactions,
+                        "resubscribing",
+                        json!({ "because": name }),
+                    );
                     break;
                 }
             }
@@ -501,12 +558,26 @@ impl HerdrClient {
             self.registry
                 .set_status(&data.pane_id, status.as_str())
                 .await;
+            let mut output_saved = None;
             if status == AgentStatus::Idle {
                 // Capture the work product: pane output at idle.
-                if let Ok(out) = crate::server::read_pane_text(&data.pane_id).await {
+                let read = crate::server::read_pane_text(&data.pane_id).await;
+                output_saved = Some(read.is_ok());
+                if let Ok(out) = read {
                     self.registry.set_output(&data.pane_id, out).await;
                 }
             }
+            self.note(
+                EventLevel::Reactions,
+                "agent_status",
+                json!({
+                    "pane_id": data.pane_id,
+                    "workspace_id": data.workspace_id,
+                    "agent": agent,
+                    "status": status.as_str(),
+                    "output_saved": output_saved,
+                }),
+            );
         }
     }
 }
@@ -572,16 +643,32 @@ mod tests {
         let ev = |n: usize| HerdrEvent {
             event: "pane.created".into(),
             data: serde_json::json!({ "n": n }),
+            level: EventLevel::Events,
+            at: None,
         };
+        let mut herdr_only = client.events();
         for n in 0..250 {
             client.publish(ev(n));
+            client.note(EventLevel::Debug, "trigger_checked", json!({ "n": n }));
         }
-        let (recent, mut live) = client.recent_and_live();
+        let data = |e: &HerdrEvent| e.data["n"].as_u64().unwrap();
+        let (recent, mut live) = client.recent_and_live(EventLevel::Events);
         assert_eq!(recent.len(), 200);
-        assert_eq!(recent[0], ev(50));
-        assert_eq!(recent[199], ev(249));
+        assert_eq!(data(&recent[0]), 50);
+        assert_eq!(data(&recent[199]), 249);
+        assert!(recent.iter().all(|e| e.at.is_some()));
+        // The debug flood kept its own 200, and didn't push herdr's out.
+        let (all, _) = client.recent_and_live(EventLevel::Debug);
+        assert_eq!(all.len(), 400);
         client.publish(ev(250));
-        assert_eq!(live.try_recv().unwrap(), ev(250));
+        assert_eq!(data(&live.try_recv().unwrap()), 250);
+        // In-process listeners get herdr's events only.
+        let mut seen = 0;
+        while let Ok(e) = herdr_only.try_recv() {
+            assert_eq!(e.level, EventLevel::Events);
+            seen += 1;
+        }
+        assert!(seen > 0);
     }
 
     fn make_registry() -> AgentRegistry {

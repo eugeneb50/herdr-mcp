@@ -302,7 +302,7 @@ Both go through `clipboard.rs` (see §14.6).
 | `POST` | `/api/runs` | `start_run_handler` | Start a run; `?wait=true` waits for the final record; `variables` add to the run's scope |
 | `GET` | `/api/runs?limit=` | `list_runs_handler` | The newest `limit` runs (all without it), newest first; sorted on the headers, so only those runs' logs are read |
 | `GET` | `/api/runs/{id}/trail` | `run_trail_handler` | The run's trail as text, the trail of the child run its gate handed off to indented under it |
-| `GET` | `/api/herdr/events` | `herdr_events_handler` | SSE: herdr's live event stream (`HerdrEvent` per message) |
+| `GET` | `/api/herdr/events?level=` | `herdr_events_handler` | SSE: herdr's live event stream (`HerdrEvent` per message), plus herdr-mcp's diagnostic entries up to `level` (`events` default, `reactions`, `debug`) |
 
 ### 5.2 Recipe CRUD Routes
 
@@ -553,7 +553,7 @@ type text:
 | Send | Pick a pane (labeled first), type, Enter sends — `send_text`, or `run_command` with "run the command" (`Ctrl+t`); addressed by pane id |
 | Overview | Stats, pane table (tab/label/agent/status/cwd) for the shown session (`s` cycles sessions), and the picked pane's text below it: re-read every `intervals.tui-pane-ms` (screen, or scrollback with `r`), scrollable, mouse drag selects (reading pauses while a selection is up), Ctrl+C or right-click Copy copies the selection or the whole text, Esc clears; Tab moves focus between table and text |
 | Runs | The run list (newest first; `c` cycles the collection filter, `f` failed only) and the picked run's trail (`y` copies it). `r` picks a collection and runs it in this session, `R` runs the picked run again, `x` cancels it, `o` focuses its pane in herdr, `p` / `d` open its parent / child |
-| Events | herdr's live event stream, started when the tab is first opened; typing filters by name, Esc clears the filter, Ctrl+D clears the list |
+| Events | herdr's live event stream, started when the tab is first opened; `Tab` cycles the level (events → reactions → debug: herdr-mcp's diagnostic entries, dimmed), typing filters by name, Esc clears the filter, Ctrl+D clears the list |
 
 **Architecture:**
 - Runs **in-process on top of the serve stack** (`serve_core`): the HTTP
@@ -611,6 +611,21 @@ Every event is broadcast (`HerdrClient::events()`) to recipe triggers and
 `GET /api/herdr/events`, and handled locally:
 `pane.agent_status_changed` updates the registry and captures the work
 product on idle.
+
+**Diagnostic entries.** What herdr-mcp does about the events goes into the
+same stream as `herdr-mcp.*` entries with a level (`EventLevel`), through
+`HerdrClient::note` onto a second channel (`feed`): triggers listen on
+`events()` and never see them. `reactions`: `subscribed` (subscription and
+pane counts), `waiting` / `disconnected` (once per outage), `resubscribing`,
+`agent_status` (the registry update, and whether idle output was saved),
+`trigger_fired` (run id), `trigger_skipped` (its last triggered run still
+going), `trigger_error`, `lagged` (a listener dropped events). `debug`:
+`trigger_checked`, each recipe with triggers that an event didn't fire and
+why (`RecipeTrigger::mismatch`). Every entry carries `at`, when herdr-mcp
+received or made it. The replay buffer keeps the last 200 of each level, so
+a debug flood never pushes herdr's events out. A viewer picks its level
+with `?level=events|reactions|debug` (default `events`, herdr's own only):
+the web Events tab's level picker, `Tab` in the TUI's.
 
 ### 8.3 Recipe Triggers (`triggers.rs`)
 

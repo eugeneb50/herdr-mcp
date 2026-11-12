@@ -6,15 +6,71 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// One event from herdr's `events.subscribe` stream. `event` is always the
-/// subscription name (`pane.created`, `pane.agent_status_changed`, …): herdr
-/// names global events `pane_created` on the wire, which [`HerdrEvent::parse`]
-/// maps back. `data` is herdr's payload as-is.
+/// How much of the Events stream a viewer sees (`?level=` on
+/// `/api/herdr/events`). Each level includes the ones before it.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum EventLevel {
+    /// herdr's own events: what triggers fire on.
+    #[default]
+    Events,
+    /// Plus what herdr-mcp did about them: subscriber connects, drops and
+    /// resubscribes; triggers fired, skipped or failing to start; agent
+    /// status updates; events a listener dropped while lagging.
+    Reactions,
+    /// Plus every trigger checked against each event, and why it didn't match.
+    Debug,
+}
+
+impl EventLevel {
+    pub const ALL: [Self; 3] = [Self::Events, Self::Reactions, Self::Debug];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Events => "events",
+            Self::Reactions => "reactions",
+            Self::Debug => "debug",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|l| l.as_str() == s)
+    }
+
+    /// The next level, wrapping.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::Events => Self::Reactions,
+            Self::Reactions => Self::Debug,
+            Self::Debug => Self::Events,
+        }
+    }
+}
+
+/// One entry of the Events stream. herdr's events (`level` = events) come
+/// from its `events.subscribe` stream: `event` is always the subscription
+/// name (`pane.created`, `pane.agent_status_changed`, …); herdr names global
+/// events `pane_created` on the wire, which [`HerdrEvent::parse`] maps back,
+/// and `data` is herdr's payload as-is. Diagnostic entries (`reactions`,
+/// `debug`) are herdr-mcp's own, named `herdr-mcp.…`; triggers never see
+/// them. `at` is when herdr-mcp received or made the entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HerdrEvent {
     pub event: String,
     #[serde(default)]
     pub data: Value,
+    #[serde(default, skip_serializing_if = "is_events")]
+    pub level: EventLevel,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if signature
+fn is_events(level: &EventLevel) -> bool {
+    *level == EventLevel::Events
 }
 
 impl HerdrEvent {
@@ -26,6 +82,17 @@ impl HerdrEvent {
             ev.event = format!("{scope}.{rest}");
         }
         Some(ev)
+    }
+
+    /// A herdr-mcp diagnostic entry `herdr-mcp.{name}` (the server stamps
+    /// `at` when it publishes it).
+    pub fn diagnostic(level: EventLevel, name: &str, data: Value) -> Self {
+        Self {
+            event: format!("herdr-mcp.{name}"),
+            data,
+            level,
+            at: None,
+        }
     }
 
     /// The workspace the event happened in: `data.workspace_id`, else the
@@ -57,12 +124,21 @@ pub struct RecipeTrigger {
 
 impl RecipeTrigger {
     pub fn matches(&self, ev: &HerdrEvent) -> bool {
-        self.on == ev.event
-            && self.when.iter().all(|(path, want)| {
-                path.split('.')
-                    .try_fold(&ev.data, |v, key| v.get(key))
-                    .is_some_and(|got| got == want)
-            })
+        self.mismatch(ev).is_none()
+    }
+
+    /// Why `ev` doesn't fire this trigger; `None` when it does.
+    pub fn mismatch(&self, ev: &HerdrEvent) -> Option<String> {
+        if self.on != ev.event {
+            return Some(format!("waits for {}", self.on));
+        }
+        self.when.iter().find_map(|(path, want)| {
+            match path.split('.').try_fold(&ev.data, |v, key| v.get(key)) {
+                Some(got) if got == want => None,
+                Some(got) => Some(format!("{path} is {got}, not {want}")),
+                None => Some(format!("no {path} in the event")),
+            }
+        })
     }
 }
 
@@ -229,6 +305,8 @@ mod tests {
         let ev = HerdrEvent {
             event: "pane.agent_status_changed".into(),
             data: json!({"agent_status": "done", "agent": "claude", "pane": {"tab_id": "w1:t1"}}),
+            level: EventLevel::Events,
+            at: None,
         };
         let t = |on: &str, when: Value| RecipeTrigger {
             on: on.into(),
@@ -240,5 +318,37 @@ mod tests {
         assert!(!t("pane.agent_status_changed", json!({"agent_status": "idle"})).matches(&ev));
         assert!(!t("pane.agent_status_changed", json!({"missing": "x"})).matches(&ev));
         assert!(!t("pane.created", json!({})).matches(&ev));
+        let why = |t: RecipeTrigger| t.mismatch(&ev).unwrap();
+        assert_eq!(why(t("pane.created", json!({}))), "waits for pane.created");
+        assert_eq!(
+            why(t(
+                "pane.agent_status_changed",
+                json!({"agent_status": "idle"})
+            )),
+            r#"agent_status is "done", not "idle""#
+        );
+        assert_eq!(
+            why(t("pane.agent_status_changed", json!({"missing": "x"}))),
+            "no missing in the event"
+        );
+    }
+
+    /// herdr events serialize as before; diagnostics carry their level.
+    #[test]
+    fn levels_order_and_serialize() {
+        assert!(EventLevel::Events < EventLevel::Reactions);
+        assert!(EventLevel::Reactions < EventLevel::Debug);
+        assert_eq!(EventLevel::Debug.next(), EventLevel::Events);
+        assert_eq!(EventLevel::parse("reactions"), Some(EventLevel::Reactions));
+        let herdr = HerdrEvent::parse(r#"{"event":"pane_created","data":{}}"#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&herdr).unwrap(),
+            json!({"event": "pane.created", "data": {}})
+        );
+        let diag = HerdrEvent::diagnostic(EventLevel::Debug, "trigger_checked", json!({}));
+        assert_eq!(diag.event, "herdr-mcp.trigger_checked");
+        let back: HerdrEvent =
+            serde_json::from_value(serde_json::to_value(&diag).unwrap()).unwrap();
+        assert_eq!(back, diag);
     }
 }

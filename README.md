@@ -74,7 +74,7 @@ herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 - **herdr plugin** — `herdr plugin install eugeneb50/herdr-mcp` adds herdr actions: a recipe picker popup that runs with the focused pane/selection as `{{herdr.…}}`, the bridge in a tab, the dashboard in a split, the web playground
 - **Recipe engine** — chain tool calls with variable interpolation (`{{ stepId.result.path }}`); runs are tracked (`/api/runs`) with per-step events, pause/resume/cancel
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
-- **Live herdr events** — the bridge relays herdr's event stream as SSE (`/api/herdr/events`); the playground shows it live
+- **Live herdr events** — the bridge relays herdr's event stream as SSE (`/api/herdr/events`); the playground and TUI show it live. A level picker turns it into a diagnostic log: `reactions` adds what herdr-mcp did about each event (subscriber, triggers fired or skipped, agent status), `debug` every trigger checked and why it didn't match
 - **Cron scheduler** — schedule recipe runs on cron expressions
 - **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: collections of saved requests (tools, herdr API, HTTP, LLM) with extract rules and triggers, runs, variables, herdr events
 - **TUI monitor** — what `herdr-mcp` opens in a terminal: a monitor and quick-action console (mouse + keyboard) with Send, Overview, Runs (run a collection, rerun, cancel, open a run's pane) and herdr's Events. Collections, variables and settings are edited in the web UI (`Alt+w` opens it)
@@ -472,7 +472,7 @@ All endpoints return JSON unless noted. Request/response types live in
 | `GET` | `/api/agents?workspace_id=` | Live panes from the agent registry |
 | `GET` | `/api/workspaces` | Workspaces via herdr |
 | `GET` | `/api/herdr/schema` | The installed herdr's API schema (every socket method + params) |
-| `GET` | `/api/herdr/events` | herdr's live event stream (SSE) |
+| `GET` | `/api/herdr/events?level=` | herdr's live event stream (SSE); `reactions` / `debug` add herdr-mcp's diagnostic entries |
 | `GET` / `POST` | `/api/recipes` | List / create recipes |
 | `GET` / `PUT` / `DELETE` | `/api/recipes/{id}` | Get / update / delete a recipe |
 | `GET` | `/api/templates`, `POST /api/templates/{id}/instantiate` | Bundled recipe templates |
