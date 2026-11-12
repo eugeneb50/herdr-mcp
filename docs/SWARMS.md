@@ -5,6 +5,12 @@ for deploying observable, interruptible swarms of real CLI agents, with an
 n8n-style constructor and a Postman-style runner, served to both the web UI
 and the TUI by the one bridge.
 
+> **Since 2026-11:** state lives in SQLite (`data/herdr-mcp.db`: the
+> `recipes`, `runs` and `run_events` tables), not the JSON files this
+> proposal names; the web UI is the authoring UI and the TUI a monitor with
+> quick actions. The design otherwise stands; the paths below map to those
+> tables.
+
 ## 1. Goals
 
 1. **Agent-agnostic.** Run and talk to any terminal agent — Claude Code,
@@ -42,12 +48,12 @@ with `pane read`, and get status from herdr events where available.
 | Concept | Postman / n8n analogue | Source of truth |
 |---|---|---|
 | **Agent profile** | — | `data/profiles/{id}.toml` (bundled defaults shipped in the binary, user files override by id) |
-| **Flow** | Collection / workflow | `data/recipes/{id}.json` (the `Recipe` type, evolved; §6) |
+| **Flow** | Collection / workflow | a `recipes` row (the `Recipe` type, evolved; §6) |
 | **Node** | Request / node | inside its Flow |
 | **Environment** | Environment | `data/environments/{name}.json` |
-| **Run** | Collection run / execution | `data/runs/{run_id}/run.json` + `events.jsonl` |
-| **Event** | Console line | `data/runs/{run_id}/events.jsonl` (append-only); live via `/api/events` |
-| **Message** | — | an event kind in the run's `events.jsonl`; a message's current state is the fold of its events (§5.3) |
+| **Run** | Collection run / execution | a `runs` row (header) + its `run_events` rows |
+| **Event** | Console line | a `run_events` row (append-only, by `seq`); live via `/api/events` |
+| **Message** | — | an event kind in the run's event log; a message's current state is the fold of its events (§5.3) |
 | **Agent instance** | — | the herdr pane + `AgentRegistry` handle (existing) |
 
 ## 4. Agent profiles (agent-agnostic core)
@@ -218,8 +224,8 @@ status_is); results appear in the run report.
 - Control: `pause | resume | cancel` per run (`tokio_util::CancellationToken`
   + a pause gate checked between nodes and inside waits), `skip | retry` per
   node.
-- Record: `data/runs/{run_id}/run.json` holds the flow snapshot it ran, the
-  resolved environment, and the final summary; `events.jsonl` holds
+- Record: the run's header holds the flow snapshot it ran, the
+  resolved environment, and the final summary; its event log holds
   everything that happened. Node state during the run is the fold of
   events. `ExecutionResult` is superseded by this (old executions stay
   readable).

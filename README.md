@@ -48,9 +48,10 @@ cargo build --release
 
 Requires the `herdr` CLI on `PATH` ([install](https://herdr.dev)), 0.9 or newer.
 
-Run in a terminal, `herdr-mcp` opens the TUI dashboard over its own HTTP
-bridge on `127.0.0.1:7676` — open http://localhost:7676/ for the web
-playground. Launched by an MCP client (stdin not a terminal) it serves MCP over
+Run in a terminal, `herdr-mcp` opens the TUI monitor over its own HTTP
+bridge on `127.0.0.1:7676`. The web playground at http://localhost:7676/
+(`Alt+w` from the TUI) is the main UI: collections, variables and settings
+are edited there. Launched by an MCP client (stdin not a terminal) it serves MCP over
 stdio plus the bridge instead; `--no-tui` does the same from a terminal. The
 web UI is built into the `herdr-mcp` binary, so the binary alone is the whole
 deployment (see [Install & build](#install--build)).
@@ -101,7 +102,7 @@ graph TB
     end
 
     subgraph CLIENTS[" "]
-        DASH["TUI dashboard<br/>(ratatui)"]
+        DASH["TUI monitor<br/>(ratatui)"]
         PLUG["herdr plugin actions<br/>(recipe picker, …)"]
     end
 
@@ -140,10 +141,10 @@ herdr-mcp/
 │   ├── herdr-mcp-api/       # HTTP wire contract: every /api/* type + typed ApiClient (native + wasm)
 │   ├── herdr-mcp-core/      # Config system (TOML + env + CLI)
 │   ├── herdr-mcp-server/    # MCP server, tools, HTTP bridge, run engine, triggers, scheduler, event subscriber
-│   ├── herdr-mcp-tui/       # TUI dashboard (bridge client)
+│   ├── herdr-mcp-tui/       # TUI monitor + quick actions (bridge client)
 │   ├── herdr-mcp-ui/        # Dioxus web UI (served by the HTTP bridge)
 │   └── herdr-mcp-cli/       # The herdr-mcp binary: TUI / MCP / HTTP modes, plugin
-├── data/                    # Runtime persistence (recipes, runs, variables, schedules, sessions, …)
+├── data/                    # Runtime data: herdr-mcp.db (SQLite), profiles, token, audit log
 └── docs/                    # Architecture, swarm design
 ```
 
@@ -195,7 +196,7 @@ a bundle, the bridge serves only `/api/*`.
 
 | Command | Description |
 |------------|-------------|
-| `herdr-mcp` | TUI dashboard + HTTP bridge in a terminal; MCP stdio + HTTP when stdin is not a terminal |
+| `herdr-mcp` | TUI monitor + HTTP bridge in a terminal; MCP stdio + HTTP when stdin is not a terminal |
 | `herdr-mcp --no-tui` | MCP stdio + HTTP bridge, no TUI |
 | `herdr-mcp --http-only` | HTTP bridge only (no TUI, no MCP stdio) |
 | `herdr-mcp --mcp-only` | MCP stdio only (no TUI, no HTTP bridge) |
@@ -298,7 +299,8 @@ startup only; nothing over the API changes it.
 # Tools no caller can list or call: MCP clients, the bridge, recipe steps.
 disabled-tools = ["run_command", "send_keys", "pane_exec"]
 # Hosts http_request and llm_call/llm_models may reach (exact or "*.example.com").
-# Empty (the default): any host.
+# Empty (the default): any host. Once it lists any, only those: to call a
+# local backend and a public API, list both ("localhost", "openrouter.ai").
 allow-hosts = ["openrouter.ai", "*.github.com"]
 # Also refuse loopback and private-network addresses (the default; local
 # LLM servers like Ollama need their host in allow-hosts, e.g. "localhost").
@@ -307,7 +309,7 @@ max-response-bytes = 10485760
 # Environment variables api_key_env may name (default: these three).
 key-env = ["OPENROUTER_API_KEY", "OPENAI_API_KEY", "LLM_API_KEY"]
 # Let MCP clients and recipe runs add triggers or schedules (default false:
-# only the web UI and TUI may).
+# only the web UI may).
 agent-triggers = false
 # Require the bridge token on loopback too (always required on any other bind).
 require-token = true
@@ -318,7 +320,7 @@ audit-log = true
 | Key | Default | What it does |
 |---|---|---|
 | `disabled-tools` | `[]` | Removed from `tools/list` and `/api/tools`; calling one fails (403 on the bridge) |
-| `allow-hosts` | `[]` (any) | Checked for the URL and every redirect hop |
+| `allow-hosts` | `[]` (any) | Only these hosts, checked for the URL and every redirect hop; a listed host also passes `block-private` |
 | `block-private` | `true` | Refuses `127.0.0.0/8`, `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `fc00::/7` unless the host is allowed |
 | `max-response-bytes` | 10 MiB | A larger response body is an error |
 | `key-env` | the three above | `api_key_env` outside it is an error |
@@ -425,7 +427,7 @@ command = "herdr-mcp.recipes"
 
 The recipe picker and web action need the bridge running.
 
-### TUI dashboard
+### TUI monitor
 
 ```bash
 ./target/release/herdr-mcp

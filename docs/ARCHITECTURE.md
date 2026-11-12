@@ -83,7 +83,7 @@ interpolation.
 One process serves the HTTP bridge (Axum, `--http <port>`; none with
 `--mcp-only`) plus one of:
 
-1. **TUI dashboard** — in a terminal (stdin is a TTY), the default
+1. **TUI monitor** — in a terminal (stdin is a TTY), the default
 2. **MCP stdio** (JSON-RPC over stdin/stdout) — when an MCP client launches
    it (stdin is a pipe), or with `--no-tui`; `--mcp-only` drops the bridge
 3. nothing more — `--http-only` (`http.http_only`)
@@ -138,7 +138,7 @@ herdr-mcp/
 │   │       ├── runs.rs     # Background run engine (pause/resume/cancel, event log)
 │   │       ├── profiles.rs # Agent profiles (drive any CLI agent)
 │   │       ├── agents.rs   # Agent helpers shared by the a2a tools
-│   │       ├── persistence.rs  # File-based storage
+│   │       ├── persistence.rs  # SQLite storage (one herdr-mcp.db per data dir)
 │   │       ├── scheduler.rs    # Cron-based recipe scheduling
 │   │       ├── templates.rs    # Bundled recipe templates
 │   │       └── variables.rs    # ScheduledRecipe + variable extraction (wire types from api)
@@ -440,7 +440,9 @@ fails the step.
    b. dispatch_tool() — the tool through rmcp's router (in-process MCP session)
    c. record the result (step_finished) under the step id, flattened, and
       under pane_id/role for agent handles
-   d. apply its extract rules (variable_set), or fail the step
+   d. a result with `isError` (params that don't deserialize, herdr
+      refusing a `herdr_api` method) fails the step, and the run with it
+   e. apply its extract rules (variable_set), or fail the step
 4. After the last step, the recipe's gate (if any; skipped when only
    `step_ids` run) picks its first matching rule (gate_decided):
    end → completed, fail → `error` (its message, or the rule that failed)
@@ -499,8 +501,9 @@ decisions with it. A `run` names its
 collection by name (`playground::collections` gives the UIs the list) or
 id, then `key=value` inputs (`inputs_text` / `parse_inputs`).
 
-**Runs view.** Both playgrounds have a Runs view (web: the Runs tab,
-`playground/runs.rs`; TUI: the Runs tab, `tabs/runs.rs`):
+**Runs view.** The web and the TUI both have a Runs tab (web:
+`playground/runs.rs`; TUI: `tabs/runs.rs`, which can also start a
+collection):
 the run list, newest first, filtered by collection or failed only, and the
 picked run's trail (`/api/runs/{id}/trail`, so a hand-off's child trail is
 included). The list is the newest `playground::RUNS_SHOWN` runs. The web
@@ -508,9 +511,9 @@ re-reads the list, and a live run's trail, when `GET /api/events` (SSE)
 streams a run event, at most every 300 ms. From there: copy the
 trail, focus the pane it last used in herdr (`herdr_api` `pane.focus`), run
 it again (`RunRecord::rerun`), cancel it, or open its parent run or the
-runs it started (TUI: `p` / `d`). The collection editor has the
-gate (`playground/flow.rs` on the web) and the run history fields; both
-flag a `run` whose collection no longer exists (`missing_collection`).
+runs it started (TUI: `p` / `d`). The web's collection editor has the
+gate (`playground/flow.rs`) and the run history fields, and flags a `run`
+whose collection no longer exists (`missing_collection`).
 
 **Tracing.** Each run's task runs in a `run` span (`run_id`, `collection`),
 and each step's tool call in a `step` span (`step`, `tool`). So every log
@@ -855,12 +858,19 @@ single-source-of-truth rule applied to the HTTP contract — a shape change is
 one edit, checked by the contract test.  
 **Trade-off:** Building the UI needs the `dx` CLI and the wasm32 target.
 
-### 14.4 File-Based Persistence
+### 14.4 SQLite Persistence
 
-**Decision:** All state (recipes, schedules, variables, stats, agent
-registry) persisted as JSON files under `data/`.  
-**Rationale:** Simple, inspectable, no database dependency. Adequate for
-single-server deployment.
+**Decision:** Recipes, variables, session variables, runs (header + event
+log) and schedules live in one SQLite database, `<data-dir>/herdr-mcp.db`
+(bundled `rusqlite`, WAL, `user_version` schema version; a newer schema is
+refused). Each row holds one value's JSON. Agent profiles stay TOML files,
+the token and audit log stay files.  
+**Rationale:** The run list is one indexed query instead of a directory
+scan, triggers stop re-reading every recipe file per herdr event, and
+several processes can share a data dir without torn writes. Old JSON files
+are not read (alpha: no migration).  
+**Trade-off:** The data is no longer greppable; `sqlite3 data/herdr-mcp.db`
+and the JSON in each row keep it inspectable.
 
 ### 14.5 Workspace-Scoped Variables
 
