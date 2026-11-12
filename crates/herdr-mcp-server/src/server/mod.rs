@@ -169,7 +169,11 @@ fn category(name: &str) -> rmcp::model::Meta {
 #[tool_router]
 impl HerdrMcpServer {
     pub fn new(persistence: Persistence, registry: AgentRegistry) -> Self {
-        Self::with_config(persistence, registry, &herdr_mcp_core::Config::default())
+        let config = herdr_mcp_core::Config {
+            data_dir: persistence.data_dir().to_path_buf(),
+            ..Default::default()
+        };
+        Self::with_config(persistence, registry, &config)
     }
 
     /// Save `req` as a new recipe.
