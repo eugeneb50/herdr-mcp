@@ -1,9 +1,9 @@
 //! Background recipe runs: the one executor behind `/api/runs`, the
 //! scheduler, recipe triggers and the plugin's recipe picker.
 //!
-//! A run is stored as an immutable [`RunHeader`] (`data/runs/{id}/run.json`:
-//! what ran, with which starting variables) plus an append-only event log
-//! (`events.jsonl`). The log is the run's state: [`RunRecord`] is computed by
+//! A run is stored as an immutable [`RunHeader`] (the `runs` table: what
+//! ran, with which starting variables) plus an append-only event log
+//! (`run_events`). The log is the run's state: [`RunRecord`] is computed by
 //! folding it ([`fold`]), with the same [`apply`] the executor uses live.
 //! [`Runs`] holds the control channel of each run executing in this process
 //! and the broadcast that carries new events to `/api/events`; a log without
@@ -248,18 +248,10 @@ pub async fn load(server: &HerdrMcpServer, id: Uuid) -> anyhow::Result<Option<Ru
 /// The newest `limit` runs' records (all without one), newest first. Sorts
 /// on the headers so only the runs returned have their logs read.
 pub async fn list(server: &HerdrMcpServer, limit: Option<usize>) -> anyhow::Result<Vec<RunRecord>> {
-    let store = &server.persistence;
-    let mut newest = Vec::new();
-    for id in store.list_run_ids().await? {
-        if let Some(header) = store.load_run_header(&id).await? {
-            newest.push((header.started_at, id));
-        }
-    }
-    newest.sort_by_key(|(at, _)| std::cmp::Reverse(*at));
-    newest.truncate(limit.unwrap_or(usize::MAX));
+    let newest = server.persistence.list_run_headers(limit).await?;
     let mut runs = Vec::with_capacity(newest.len());
-    for (_, id) in newest {
-        if let Some(run) = load(server, id).await? {
+    for header in newest {
+        if let Some(run) = load(server, header.id).await? {
             runs.push(run);
         }
     }
@@ -592,10 +584,8 @@ async fn prune_runs(server: &HerdrMcpServer, only: Option<Option<Uuid>>) -> anyh
     let group_of = |recipe: Option<Uuid>| recipe.filter(|r| trails.contains_key(r));
     let only = only.map(group_of);
     let mut groups: HashMap<Option<Uuid>, Vec<(DateTime<Utc>, Uuid)>> = HashMap::new();
-    for id in store.list_run_ids().await? {
-        let Some(header) = store.load_run_header(&id).await? else {
-            continue;
-        };
+    for header in store.list_run_headers(None).await? {
+        let id = header.id;
         let group = group_of(header.recipe_id);
         if only.is_some_and(|o| o != group) || server.runs.is_live(id) {
             continue;
@@ -1054,7 +1044,7 @@ mod tests {
 
     fn test_server(dir: &std::path::Path) -> HerdrMcpServer {
         let data = dir.join("data");
-        let registry = AgentRegistry::new(Arc::new(Persistence::new(data.clone())));
+        let registry = AgentRegistry::new();
         HerdrMcpServer::new(Persistence::new(data), registry)
     }
 

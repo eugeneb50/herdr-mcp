@@ -304,11 +304,10 @@ fn test_json_value_to_string_number() {
 /// Build a server with default config (no explicit clipboard commands).
 fn clipboard_test_server() -> HerdrMcpServer {
     let tmp = tempfile::tempdir().unwrap();
-    let data = tmp.path().join("data");
-    let pers = Persistence::new(data);
-    let pers_arc = std::sync::Arc::new(pers);
-    let reg = AgentRegistry::new(pers_arc);
-    HerdrMcpServer::new(Persistence::new(tmp.path().join("data2")), reg)
+    HerdrMcpServer::new(
+        Persistence::new(tmp.path().join("data")),
+        AgentRegistry::new(),
+    )
 }
 
 #[tokio::test]
@@ -401,7 +400,7 @@ async fn clipboard_tools_use_configured_commands() {
     let mut cfg = herdr_mcp_core::Config::default();
     cfg.clipboard.copy_command = Some(format!("tee {}", clip.display()));
     cfg.clipboard.paste_command = Some(format!("cat {}", clip.display()));
-    let reg = AgentRegistry::new(std::sync::Arc::new(Persistence::new(tmp.path().join("d1"))));
+    let reg = AgentRegistry::new();
     let server = HerdrMcpServer::with_config(Persistence::new(tmp.path().join("d2")), reg, &cfg);
 
     server
@@ -660,7 +659,7 @@ async fn security_policy_holds_for_the_bridge_runs_and_mcp_clients() {
         },
         ..Default::default()
     };
-    let registry = AgentRegistry::new(std::sync::Arc::new(Persistence::new(data_dir.clone())));
+    let registry = AgentRegistry::new();
     let server = HerdrMcpServer::with_config(Persistence::new(data_dir.clone()), registry, &config);
     let token = server
         .security
@@ -747,7 +746,7 @@ async fn settings_crud_over_http_with_known_good_fallback() {
 
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
-    let registry = AgentRegistry::new(std::sync::Arc::new(Persistence::new(data_dir.clone())));
+    let registry = AgentRegistry::new();
     let mut server = HerdrMcpServer::new(Persistence::new(data_dir), registry);
     let cfg = tmp.path().join("herdr-mcp.toml");
     std::fs::write(&cfg, "# keep me\n").unwrap();
@@ -817,7 +816,7 @@ async fn http_contract_roundtrip_with_api_client() {
 
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
-    let registry = AgentRegistry::new(std::sync::Arc::new(Persistence::new(data_dir.clone())));
+    let registry = AgentRegistry::new();
     let server = HerdrMcpServer::new(Persistence::new(data_dir), registry);
     let web_dir = tmp.path().join("web");
     std::fs::create_dir_all(&web_dir).unwrap();
@@ -967,20 +966,6 @@ esac
     assert_eq!(resolved.value["text"], "hi you");
     assert_eq!(resolved.unresolved, ["later.out"]);
     api.delete_variable("greeting").await.unwrap();
-    // Path traversal through the key is a client error, not a write.
-    let evil = herdr_mcp_api::SaveVariableRequest {
-        key: "../escaped".into(),
-        ..Default::default()
-    };
-    assert!(matches!(
-        api.save_variable(&evil).await,
-        Err(ApiError::Status { status: 400, .. })
-    ));
-    assert!(!tmp.path().join("data").join("escaped.json").exists());
-    assert!(matches!(
-        api.delete_variable("../escaped").await,
-        Err(ApiError::Status { status: 400, .. })
-    ));
 
     // Runs: start in the background, poll to completion, legacy views.
     let step = |id: &str| herdr_mcp_api::RecipeStep {

@@ -47,7 +47,6 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
 
     let (settings, _) = config.settings();
     let herdr_client = build_herdr_client(
-        &data_dir,
         config.herdr_socket_path(),
         u32::try_from(settings.number(herdr_mcp_api::settings::RECONNECT_ATTEMPTS))
             .unwrap_or(u32::MAX),
@@ -173,19 +172,15 @@ pub async fn run_serve(config: &Config) -> Result<()> {
 }
 
 pub fn build_herdr_client(
-    data_dir: &std::path::Path,
     socket_path: std::path::PathBuf,
     reconnect_attempts: u32,
     reconnect_backoff_ms: u64,
 ) -> std::sync::Arc<HerdrClient> {
-    let persistence = Persistence::new(data_dir.to_path_buf());
-    let client = HerdrClient::new(
-        std::sync::Arc::new(persistence),
+    std::sync::Arc::new(HerdrClient::new(
         socket_path,
         reconnect_attempts,
         reconnect_backoff_ms,
-    );
-    std::sync::Arc::new(client)
+    ))
 }
 
 #[cfg(test)]

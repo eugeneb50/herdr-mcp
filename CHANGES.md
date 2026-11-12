@@ -4,6 +4,14 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **SQLite storage (breaking).** Recipes, variables, session variables,
+  runs (header + event log) and schedules live in one database,
+  `<data-dir>/herdr-mcp.db` (WAL, `user_version` schema version), instead
+  of JSON files under `recipes/`, `variables/`, `sessions/`, `runs/` and
+  `schedules/`. Old files are not read. The run list is one indexed query,
+  and triggers no longer re-read every recipe file per herdr event. The
+  agent registry is no longer written to `sessions/{ws}.agents.json`
+  (nothing read it).
 - **Leaner MCP surface.** MCP clients list a core set of 26 tools by
   default, about half the schema of all 46, so agents spend less context on
   every turn. `[mcp] tools` lists more: `all`, a category or tool names.

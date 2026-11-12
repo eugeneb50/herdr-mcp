@@ -1,7 +1,7 @@
 //! Recipe triggers: a herdr event matching a saved recipe's
 //! [`RecipeTrigger`](herdr_mcp_api::RecipeTrigger) starts a run of it.
 //!
-//! Triggers live on the recipes (`data/recipes/`), read on every event, so
+//! Triggers live on the recipes (the `recipes` table), read on every event, so
 //! editing a recipe takes effect at the next event. A recipe never runs twice
 //! at once from triggers: an event arriving while its triggered run is still
 //! going is skipped (this also stops a recipe re-triggering itself, e.g. one
@@ -156,7 +156,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let persistence = crate::Persistence::new(tmp.path().to_path_buf());
         persistence.init().await.unwrap();
-        let registry = crate::AgentRegistry::new(std::sync::Arc::new(persistence.clone()));
+        let registry = crate::AgentRegistry::new();
         let server = HerdrMcpServer::new(persistence, registry);
         let mut r = recipe(vec![RecipeTrigger {
             on: "pane.agent_status_changed".into(),
