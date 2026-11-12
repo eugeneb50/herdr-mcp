@@ -362,21 +362,15 @@ pub const SPECS: &[Spec] = &[
     ),
     keys(
         "keys.tab-3",
-        "Playground tab",
-        "TUI: jump to Playground.",
+        "Runs tab",
+        "TUI: jump to Runs.",
         &["alt+3", "ctrl+3"],
     ),
     keys(
         "keys.tab-4",
-        "Variables tab",
-        "TUI: jump to Variables.",
+        "Events tab",
+        "TUI: jump to Events.",
         &["alt+4", "ctrl+4"],
-    ),
-    keys(
-        "keys.tab-5",
-        "Settings tab",
-        "TUI: jump to Settings.",
-        &["alt+5", "ctrl+5"],
     ),
     keys(
         "keys.refresh",
@@ -384,32 +378,20 @@ pub const SPECS: &[Spec] = &[
         "TUI: re-read everything from the bridge now.",
         &["ctrl+r"],
     ),
+    keys(
+        "keys.web",
+        "open the web UI",
+        "TUI: open the web UI (where collections, variables and settings are edited) in the browser.",
+        &["alt+w"],
+    ),
     keys("keys.quit", "quit", "TUI: quit.", &["ctrl+q"]),
 ];
 
-/// Chords the TUI's tabs and editors use themselves (Playground run/save,
-/// clear, sub-tabs, Variables edit/delete, copy/cut/paste…). Binding an
-/// action to one would break the tab or be shadowed by it, so they are
-/// refused, except as the action's own default (`ctrl+r` for refresh).
-pub const RESERVED: &[&str] = &[
-    "ctrl+b",
-    "ctrl+c",
-    "ctrl+d",
-    "ctrl+e",
-    "ctrl+j",
-    "ctrl+k",
-    "ctrl+l",
-    "ctrl+n",
-    "ctrl+o",
-    "ctrl+r",
-    "ctrl+s",
-    "ctrl+t",
-    "ctrl+v",
-    "ctrl+w",
-    "ctrl+x",
-    "ctrl+enter",
-    "ctrl+shift+r",
-];
+/// Chords the TUI's tabs use themselves (copy/cut/paste, Send's Enter
+/// toggle, Events' clear, refresh). Binding an action to one would break the
+/// tab or be shadowed by it, so they are refused, except as the action's own
+/// default (`ctrl+r` for refresh).
+pub const RESERVED: &[&str] = &["ctrl+c", "ctrl+d", "ctrl+r", "ctrl+t", "ctrl+v", "ctrl+x"];
 
 /// The spec for `key`.
 pub fn spec(key: &str) -> Option<&'static Spec> {
@@ -875,7 +857,7 @@ mod tests {
                 .contains("type text")
         );
         assert!(
-            s.set("keys.tab-next", keys(&["ctrl+s"]))
+            s.set("keys.tab-next", keys(&["ctrl+t"]))
                 .unwrap_err()
                 .contains("tab already")
         );

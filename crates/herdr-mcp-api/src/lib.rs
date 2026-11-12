@@ -45,3 +45,13 @@ pub use variables::{
     AutoVariablesResponse, ResolveRequest, ResolveResponse, SaveVariableRequest, ToolsResponse,
     VariableStore,
 };
+
+/// The web UI's address on `localhost:port`, carrying `token` in the
+/// fragment (never sent to the server or written to its logs) for the page
+/// to keep and send.
+pub fn web_url(port: u16, token: Option<&str>) -> String {
+    match token {
+        Some(t) => format!("http://localhost:{port}/#token={t}"),
+        None => format!("http://localhost:{port}"),
+    }
+}

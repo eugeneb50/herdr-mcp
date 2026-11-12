@@ -330,7 +330,7 @@ async fn web(port: u16, data_dir: &std::path::Path) -> Result<()> {
         "xdg-open"
     };
     std::process::Command::new(opener)
-        .arg(herdr_mcp_server::security::web_url(
+        .arg(herdr_mcp_api::web_url(
             port,
             herdr_mcp_tui::http::token(data_dir).as_deref(),
         ))

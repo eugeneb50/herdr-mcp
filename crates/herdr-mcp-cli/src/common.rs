@@ -72,7 +72,7 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
             tracing::info!(
                 "the bridge needs its token ({}): open {}",
                 config.data_dir.join(herdr_mcp_api::TOKEN_FILE).display(),
-                herdr_mcp_server::security::web_url(port, Some(token))
+                herdr_mcp_api::web_url(port, Some(token))
             );
         }
         tokio::spawn(async move {
