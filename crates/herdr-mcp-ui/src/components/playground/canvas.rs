@@ -18,11 +18,39 @@ struct View {
     zoom: f64,
 }
 
-const HOME: View = View {
-    x: 24.0,
-    y: 24.0,
-    zoom: 1.0,
-};
+/// The view that shows every node in a `width` × `height` canvas, at most
+/// at full size, with room under the nodes for loop edges.
+fn fit(flow: &Flow, at: &HashMap<String, Point>, (width, height): (f64, f64)) -> View {
+    const PAD: f64 = 24.0;
+    let boxes = flow.nodes.iter().filter_map(|n| {
+        let p = at.get(&n.id)?;
+        Some((
+            p.x as f64,
+            p.y as f64,
+            (p.x + NODE_W) as f64,
+            (p.y + height_of(n)) as f64,
+        ))
+    });
+    let (x0, y0, x1, y1) = boxes.fold(
+        (f64::MAX, f64::MAX, f64::MIN, f64::MIN),
+        |(a, b, c, d), (x, y, r, t)| (a.min(x), b.min(y), c.max(r), d.max(t)),
+    );
+    if x0 > x1 {
+        return View {
+            x: PAD,
+            y: PAD,
+            zoom: 1.0,
+        };
+    }
+    let zoom = ((width - 2.0 * PAD) / (x1 - x0))
+        .min((height - 2.0 * PAD) / (y1 - y0 + 80.0))
+        .clamp(0.3, 1.0);
+    View {
+        x: PAD - x0 * zoom,
+        y: PAD - y0 * zoom,
+        zoom,
+    }
+}
 
 #[derive(Clone, PartialEq)]
 enum Drag {
@@ -59,7 +87,7 @@ fn client(e: &MouseEvent) -> (f64, f64) {
     (p.x, p.y)
 }
 
-fn height(node: &Node) -> f32 {
+fn height_of(node: &Node) -> f32 {
     NODE_H.max(node.kind.ports().len() as f32 * 18.0 + 12.0)
 }
 
@@ -67,14 +95,14 @@ fn height(node: &Node) -> f32 {
 fn port_at(node: &Node, at: Point, i: usize, n: usize) -> Point {
     Point {
         x: at.x + NODE_W,
-        y: at.y + height(node) * (i + 1) as f32 / (n + 1) as f32,
+        y: at.y + height_of(node) * (i + 1) as f32 / (n + 1) as f32,
     }
 }
 
 fn input_at(node: &Node, at: Point) -> Point {
     Point {
         x: at.x,
-        y: at.y + height(node) / 2.0,
+        y: at.y + height_of(node) / 2.0,
     }
 }
 
@@ -153,7 +181,9 @@ pub fn Canvas(
     selected: Signal<Option<String>>,
     on_edit: EventHandler<CanvasEdit>,
 ) -> Element {
-    let mut view = use_signal(|| HOME);
+    // None: fit the flow to the canvas, until the user pans or zooms.
+    let mut view: Signal<Option<View>> = use_signal(|| None);
+    let mut size = use_signal(|| (900.0, 440.0));
     let mut drag: Signal<Option<Drag>> = use_signal(|| None);
     let mut picked_edge: Signal<Option<Edge>> = use_signal(|| None);
 
@@ -164,7 +194,8 @@ pub fn Canvas(
     let shape = flow.shape();
     let reachable: HashSet<String> = flow.reachable().into_iter().map(str::to_string).collect();
     let names: HashMap<Uuid, String> = collections.into_iter().collect();
-    let v = view();
+    let fitted = fit(&flow, &at, size());
+    let v = view().unwrap_or(fitted);
 
     let edges: Vec<(Edge, String, bool, bool)> = flow
         .edges
@@ -188,15 +219,15 @@ pub fn Canvas(
 
     let on_move = move |e: MouseEvent| {
         let (cx, cy) = client(&e);
-        let zoom = view.peek().zoom;
+        let zoom = view.peek().unwrap_or(fitted).zoom;
         let mut d = drag.write();
         match d.as_mut() {
             Some(Drag::Pan { from, view: start }) => {
-                view.set(View {
+                view.set(Some(View {
                     x: start.x + cx - from.0,
                     y: start.y + cy - from.1,
                     ..*start
-                });
+                }));
             }
             Some(Drag::Node {
                 from, at, moved, ..
@@ -245,11 +276,11 @@ pub fn Canvas(
         }
     };
     let mut zoom_by = move |f: f64| {
-        let v = *view.peek();
-        view.set(View {
+        let v = view.peek().unwrap_or(fitted);
+        view.set(Some(View {
             zoom: (v.zoom * f).clamp(0.3, 2.5),
             ..v
-        });
+        }));
     };
 
     rsx! {
@@ -257,7 +288,7 @@ pub fn Canvas(
             div { class: "canvas-tools",
                 button { class: "link-btn", title: "Zoom in", onclick: move |_| zoom_by(1.2), "+" }
                 button { class: "link-btn", title: "Zoom out", onclick: move |_| zoom_by(1.0 / 1.2), "−" }
-                button { class: "link-btn", title: "Back to the start", onclick: move |_| view.set(HOME), "⌂" }
+                button { class: "link-btn", title: "Fit the flow", onclick: move |_| view.set(None), "⌂" }
                 if let Some(edge) = picked_edge() {
                     button {
                         class: "link-btn link-danger",
@@ -272,10 +303,15 @@ pub fn Canvas(
             svg {
                 class: "canvas",
                 tabindex: "0",
+                onmounted: move |e: MountedEvent| async move {
+                    if let Ok(r) = e.get_client_rect().await {
+                        size.set((r.width(), r.height()));
+                    }
+                },
                 onmousedown: move |e| {
                     selected.set(None);
                     picked_edge.set(None);
-                    drag.set(Some(Drag::Pan { from: client(&e), view: *view.peek() }));
+                    drag.set(Some(Drag::Pan { from: client(&e), view: view.peek().unwrap_or(fitted) }));
                 },
                 onmousemove: on_move,
                 onmouseup: on_up,
@@ -318,7 +354,7 @@ pub fn Canvas(
                     for node in flow.nodes.iter().cloned() {
                         {
                             let p = at[&node.id];
-                            let h = height(&node);
+                            let h = height_of(&node);
                             let ports = node.kind.ports();
                             let n = ports.len();
                             let id = node.id.clone();

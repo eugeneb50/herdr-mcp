@@ -85,8 +85,7 @@ pub fn Map() -> Element {
         }
     }
 
-    // Sources in column 0, collections by their column from 1, missing
-    // collections in a column after the rest.
+    // Sources, then collections by their column, then missing collections.
     let mut at: HashMap<Spot, (f32, f32)> = HashMap::new();
     let mut rows: HashMap<usize, usize> = HashMap::new();
     let mut place = |spot: Spot, col: usize, at: &mut HashMap<Spot, (f32, f32)>| {
@@ -108,10 +107,12 @@ pub fn Map() -> Element {
             place(Spot::Source(l.from.clone()), 0, &mut at);
         }
     }
+    // Column 0 holds the triggers and schedules, when there are any.
+    let shift = usize::from(!at.is_empty());
     for r in &recipes {
-        place(Spot::Collection(r.id), cols[&r.id] + 1, &mut at);
+        place(Spot::Collection(r.id), cols[&r.id] + shift, &mut at);
     }
-    let last = cols.values().max().map_or(1, |c| c + 2);
+    let last = cols.values().max().map_or(0, |c| c + 1) + shift;
     for l in &links {
         if !names.contains_key(&l.to) {
             place(Spot::Collection(l.to), last, &mut at);
