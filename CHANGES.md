@@ -4,6 +4,32 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Flows (breaking).** A collection is a flow, not a request list with an
+  end gate. `Recipe.steps` and `gate` are gone; `Recipe.flow` is nodes
+  (`start`, `tool`, `branch`, `run`, `wait`, `fail`) and edges from a
+  node's port (`out`, `error`, a branch rule's number, `else`) to a node.
+  Edges from one port run their nodes in parallel; a node with several
+  edges in joins them, skipping paths a branch ruled out; an edge back
+  upstream loops (`run.pass` counts); a tool node takes `retry` and
+  `timeout_ms`, and its `error` port catches a failure; a `run` node runs
+  another collection as a child run and waits for it (the gate's `run`
+  hand-off, now anywhere in a flow). `max_steps` sits on the flow and
+  counts node runs. `recipe_save` and `recipe_run` still take `steps`
+  (chained from start) or a `flow`; `step_ids` is now `node_ids`. Run
+  events are `node_*` (with `attempt`, `port`, `retry_in_ms`) plus
+  `branched`, `looped` and `child_started`; `gate_decided` is gone, and a
+  child run's origin is `node` (run + node id), not `gate`. Recipes and
+  runs saved before don't load: they are skipped with a warning.
+- **The playground draws flows.** The web collection view is an SVG
+  canvas: pan, zoom, drag nodes, drag a port onto a node to wire it,
+  Delete removes the picked node or edge; loops dashed, unreachable nodes
+  dimmed, problems listed, and Run collection colours nodes and the ports
+  they fired as the run goes (pause, resume, cancel). Picking a node opens
+  its editor; Send still runs one request alone. A Map tab shows what
+  starts each collection (triggers, schedules, other collections' run
+  nodes), coloured by each one's latest run, with deleted targets marked
+  missing. The TUI's Runs tab lists the picked run's nodes with their
+  states above its trail.
 - **Events as a diagnostic log.** The herdr Events stream takes a level
   (`/api/herdr/events?level=`; a picker on the web Events tab, `Tab` in the
   TUI's). `events` (the default) is herdr's own, as before. `reactions` adds

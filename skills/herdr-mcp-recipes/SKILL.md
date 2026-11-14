@@ -33,9 +33,9 @@ t run_get '{"run_id":"<id>","trail":true}'
 | Tool | Does |
 |---|---|
 | `recipe_list` / `recipe_get` | Find saved recipes / read one (`recipe_id`) |
-| `recipe_save` | Create (no `recipe_id`; `name` + `steps`) or update one |
-| `recipe_run` | Run a saved recipe (`recipe_id`) or ad-hoc `steps`; `variables` override the recipe's; `wait: true` returns the finished run |
-| `run_get` | A run's status and each step's result; `trail: true` explains a failure |
+| `recipe_save` | Create (no `recipe_id`; `name` + `steps` or `flow`) or update one |
+| `recipe_run` | Run a saved recipe (`recipe_id`) or an ad-hoc `steps` / `flow`; `variables` override the recipe's; `wait: true` returns the finished run |
+| `run_get` | A run's status and each node's result; `trail: true` explains a failure |
 | `run_control` | `run_id` + `action`: `pause`, `resume` or `cancel` |
 | `list_templates` / `instantiate_template` | Start from a bundled recipe |
 

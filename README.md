@@ -8,7 +8,7 @@
 
 MCP (Model Context Protocol) server written in Rust that exposes [herdr](https://herdr.dev) — a terminal-native agent multiplexer — as tools, and extends herdr itself with recipes, triggers and a plugin.
 
-**HTTP bridge + web playground** included: run any tool or herdr API method, chain them into recipes with variable passing, and watch herdr's live events, all from a browser.
+**HTTP bridge + web playground** included: run any tool or herdr API method, wire them into flows (branches, parallel paths, loops, retries, child runs) on a canvas, and watch runs and herdr's live events, all from a browser.
 
 - [Quick start](#quick-start)
 - [Features](#features)
@@ -76,7 +76,7 @@ herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 - **Recipe triggers** — a recipe starts itself when herdr emits a matching event (e.g. `pane.agent_status_changed` with `agent_status = done`); the run gets the event data as `{{herdr.…}}`
 - **Live herdr events** — the bridge relays herdr's event stream as SSE (`/api/herdr/events`); the playground and TUI show it live. A level picker turns it into a diagnostic log: `reactions` adds what herdr-mcp did about each event (subscriber, triggers fired or skipped, agent status), `debug` every trigger checked and why it didn't match
 - **Cron scheduler** — schedule recipe runs on cron expressions
-- **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: collections of saved requests (tools, herdr API, HTTP, LLM) with extract rules and triggers, runs, variables, herdr events
+- **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: collections drawn and edited as flows on a canvas (tool, herdr API, HTTP and LLM requests wired to branches, loops, waits and child runs) with extract rules, triggers, live run colouring and a map of what starts what; runs, variables, herdr events
 - **TUI monitor** — what `herdr-mcp` opens in a terminal: a monitor and quick-action console (mouse + keyboard) with Send, Overview, Runs (run a collection, rerun, cancel, open a run's pane) and herdr's Events. Collections, variables and settings are edited in the web UI (`Alt+w` opens it)
 - **Live agent registry** — Unix socket event subscriber tracks panes and agent status in real time; role/label resolution for a2a primitives
 - **Shell-out core** — talks to herdr through its CLI (`tokio::process::Command`, real argv) and socket; no other runtime dependencies
@@ -476,8 +476,8 @@ All endpoints return JSON unless noted. Request/response types live in
 | `GET` / `POST` | `/api/recipes` | List / create recipes |
 | `GET` / `PUT` / `DELETE` | `/api/recipes/{id}` | Get / update / delete a recipe |
 | `GET` | `/api/templates`, `POST /api/templates/{id}/instantiate` | Bundled recipe templates |
-| `GET` / `POST` | `/api/runs` | List runs / start one (saved `recipe_id` or ad-hoc `steps`; `?wait=true` returns the finished run) |
-| `GET` | `/api/runs/{id}`, `/api/runs/{id}/events?since=` | A run / its step events |
+| `GET` / `POST` | `/api/runs` | List runs / start one (saved `recipe_id`, or an ad-hoc `flow` or `steps`; `node_ids` runs only those tool nodes; `?wait=true` returns the finished run) |
+| `GET` | `/api/runs/{id}`, `/api/runs/{id}/events?since=`, `/api/runs/{id}/trail` | A run / its node events / its trail as text |
 | `POST` | `/api/runs/{id}/{action}` | Pause, resume or cancel a run |
 | `GET` | `/api/events?run=` | Run events as SSE: one run (replayed, then live) or all runs |
 | `GET` / `PUT` / `DELETE` | `/api/profiles`, `/api/profiles/{id}` | Agent profiles |
@@ -509,7 +509,12 @@ All endpoints return JSON unless noted. Request/response types live in
 }
 ```
 
-`{{ stepId.result.path }}` reads an earlier step's result with dot/bracket
+`steps` is the straight-line form: they run one after another. A recipe
+can save a `flow` instead: nodes (`start`, `tool`, `branch`, `run`, `wait`,
+`fail`) and edges between their ports, for branches, parallel paths, joins,
+loops, retries, timeouts and child runs; the web playground edits it on a
+canvas. See [the agent guide's Flows section](docs/AGENT-GUIDE.md#flows).
+`{{ nodeId.result.path }}` reads an earlier node's result with dot/bracket
 navigation. `triggers` is optional: each entry names a herdr event and values its
 data must match (dotted paths). A triggered run executes in the event's workspace
 with the event data as `{{herdr.…}}`, and a recipe never has two triggered runs
@@ -604,7 +609,7 @@ the provider); both edit the same request a plain form does.
 |------|-------------|
 | `recipe_list` / `recipe_get` | Saved recipes / one recipe |
 | `recipe_save` | Create or update a recipe |
-| `recipe_run` | Run a saved recipe or ad-hoc steps (`wait` for the finished run) |
+| `recipe_run` | Run a saved recipe or an ad-hoc flow or steps (`wait` for the finished run) |
 | `run_get` / `run_control` | A run's record / pause, resume or cancel it |
 
 ### Variables (2) / Templates (3) / Scheduler (4) / Clipboard (2)
