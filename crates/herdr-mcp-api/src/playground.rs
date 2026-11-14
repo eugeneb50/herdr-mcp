@@ -8,7 +8,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::{ApiClient, Recipe, RecipeStep, RunRecord, UpdateRecipeRequest, Uuid, schema_type};
+use crate::{
+    ApiClient, Edge, Flow, Node, Port, Recipe, RecipeStep, RunRecord, UpdateRecipeRequest, Uuid,
+    schema_type,
+};
 
 /// The tool whose requests call any herdr socket method.
 pub const HERDR_API: &str = "herdr_api";
@@ -364,7 +367,7 @@ pub fn tool_label(step: &RecipeStep) -> String {
 
 const NEW_COLLECTION: &str = "New collection";
 
-/// The saved collections as `(id, name)`: what a gate's `run` names.
+/// The saved collections as `(id, name)`: what a `run` node names.
 pub fn collections(recipes: &[Recipe]) -> Vec<(Uuid, String)> {
     recipes
         .iter()
@@ -395,10 +398,7 @@ pub const RUNS_SHOWN: usize = 200;
 /// was `http_request`, and how long the run took (`completed · 200 · 312 ms`).
 pub fn send_summary(run: &RunRecord, step_id: &str) -> String {
     let mut out = vec![run.status.as_str().to_string()];
-    let http = run
-        .steps
-        .iter()
-        .any(|s| s.id == step_id && s.tool == HTTP_REQUEST);
+    let http = run.flow.node(step_id).and_then(Node::tool_name) == Some(HTTP_REQUEST);
     if http
         && let Some(status) = run
             .results
@@ -419,22 +419,15 @@ pub fn send_summary(run: &RunRecord, step_id: &str) -> String {
     out.join(" · ")
 }
 
-/// `requestN`, one past the highest N among `steps`.
-pub fn fresh_request_id(steps: &[RecipeStep]) -> String {
-    let n = steps
+/// `{prefix}N`, one past the highest N among `flow`'s node ids.
+pub fn fresh_node_id(flow: &Flow, prefix: &str) -> String {
+    let n = flow
+        .nodes
         .iter()
-        .filter_map(|s| s.id.strip_prefix("request")?.parse::<usize>().ok())
+        .filter_map(|s| s.id.strip_prefix(prefix)?.parse::<usize>().ok())
         .max()
         .unwrap_or(0);
-    format!("request{}", n + 1)
-}
-
-/// Request ids are used as `{{ id.path }}`: letters, digits, `_` and `-`.
-pub fn valid_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    format!("{prefix}{}", n + 1)
 }
 
 /// The herdr method a `herdr_api` request calls (`workspace.list` for a
@@ -564,10 +557,10 @@ pub fn parse_when(text: &str) -> serde_json::Map<String, Value> {
 
 // ── saving requests ────────────────────────────────────────────────────
 
-/// Set collection `id`'s requests to `steps`.
-pub async fn set_steps(client: &ApiClient, id: Uuid, steps: Vec<RecipeStep>) -> Result<(), String> {
+/// Set collection `id`'s flow.
+pub async fn set_flow(client: &ApiClient, id: Uuid, flow: Flow) -> Result<(), String> {
     let req = UpdateRecipeRequest {
-        steps: Some(steps),
+        flow: Some(flow),
         ..Default::default()
     };
     client
@@ -577,49 +570,69 @@ pub async fn set_steps(client: &ApiClient, id: Uuid, steps: Vec<RecipeStep>) -> 
         .map_err(|e| e.to_string())
 }
 
-/// Replace request `old_id` of collection `id` with `step` (appending it if
-/// it is gone), reading the collection fresh so nothing else is clobbered.
-pub async fn save_step(
-    client: &ApiClient,
-    id: Uuid,
-    old_id: &str,
-    step: RecipeStep,
-) -> Result<(), String> {
-    if !valid_id(&step.id) {
-        return Err("the request name may use letters, digits, _ and - only".into());
-    }
+/// Put `node` in place of node `old_id` (renaming its edges), or add it
+/// when there is none, reading the collection fresh so nothing else is
+/// clobbered.
+pub async fn save_node(client: &ApiClient, id: Uuid, old_id: &str, node: Node) -> Result<(), String> {
     let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
-    if step.id != old_id && recipe.steps.iter().any(|s| s.id == step.id) {
-        return Err(format!(
-            "this collection already has a request `{}`",
-            step.id
-        ));
-    }
-    match recipe.steps.iter_mut().find(|s| s.id == old_id) {
-        Some(s) => *s = step,
-        None => recipe.steps.push(step),
-    }
-    set_steps(client, id, recipe.steps).await
+    replace_node(&mut recipe.flow, old_id, node)?;
+    set_flow(client, id, recipe.flow).await
 }
 
-/// Append a new `tool` request (starting from `params`) to collection
-/// `id`; its id.
+/// See [`save_node`].
+pub fn replace_node(flow: &mut Flow, old_id: &str, node: Node) -> Result<(), String> {
+    if node.id != old_id && flow.node(&node.id).is_some() {
+        return Err(format!("this flow already has a node `{}`", node.id));
+    }
+    for e in &mut flow.edges {
+        if e.from == old_id {
+            e.from.clone_from(&node.id);
+        }
+        if e.to == old_id {
+            e.to.clone_from(&node.id);
+        }
+    }
+    match flow.nodes.iter_mut().find(|n| n.id == old_id) {
+        Some(n) => *n = node,
+        None => flow.nodes.push(node),
+    }
+    Ok(())
+}
+
+/// Add a `tool` node (starting from `params`) to collection `id`, wired
+/// from `after`'s `out` port when given; its id.
 pub async fn add_request(
     client: &ApiClient,
     id: Uuid,
     tool: &str,
     params: Value,
+    after: Option<&str>,
 ) -> Result<String, String> {
     let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
-    let step_id = fresh_request_id(&recipe.steps);
-    recipe.steps.push(RecipeStep {
-        id: step_id.clone(),
+    let node_id = fresh_node_id(&recipe.flow, "request");
+    recipe.flow.nodes.push(Node::tool(RecipeStep {
+        id: node_id.clone(),
         tool: tool.into(),
         params,
         ..Default::default()
-    });
-    set_steps(client, id, recipe.steps).await?;
-    Ok(step_id)
+    }));
+    if let Some(from) = after {
+        recipe.flow.edges.push(Edge {
+            from: from.into(),
+            port: Port::Out,
+            to: node_id.clone(),
+        });
+    }
+    set_flow(client, id, recipe.flow).await?;
+    Ok(node_id)
+}
+
+/// Remove node `node_id` and its edges from collection `id`.
+pub async fn delete_node(client: &ApiClient, id: Uuid, node_id: &str) -> Result<(), String> {
+    let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
+    recipe.flow.nodes.retain(|n| n.id != node_id);
+    recipe.flow.edges.retain(|e| e.from != node_id && e.to != node_id);
+    set_flow(client, id, recipe.flow).await
 }
 
 /// Focus `pane` in herdr (`herdr_api` `pane.focus`); what to tell the user.
@@ -630,13 +643,6 @@ pub async fn focus_pane(client: &ApiClient, pane: &str) -> Result<String, String
         Ok(r) => Err(crate::tool_text(&r)),
         Err(e) => Err(format!("cannot focus {pane}: {e}")),
     }
-}
-
-/// Remove request `step_id` from collection `id`.
-pub async fn delete_step(client: &ApiClient, id: Uuid, step_id: &str) -> Result<(), String> {
-    let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
-    recipe.steps.retain(|s| s.id != step_id);
-    set_steps(client, id, recipe.steps).await
 }
 
 // ── variables ──────────────────────────────────────────────────────────
@@ -1046,7 +1052,7 @@ mod tests {
 
     fn recipe(name: &str, category: Option<&str>) -> Recipe {
         serde_json::from_value(serde_json::json!({
-            "id": Uuid::nil(), "name": name, "description": null, "steps": [],
+            "id": Uuid::nil(), "name": name, "description": null, "flow": { "nodes": [] },
             "variables": {}, "created_at": "2026-10-19T00:00:00Z",
             "updated_at": "2026-10-19T00:00:00Z", "is_template": false,
             "category": category
@@ -1137,47 +1143,49 @@ mod tests {
             recipe_id: None,
             name: None,
             session_id: "w1".into(),
-            steps: vec![RecipeStep {
+            flow: Flow::chain(vec![RecipeStep {
                 id: "get".into(),
                 tool: HTTP_REQUEST.into(),
                 ..Default::default()
-            }],
+            }]),
             origin: Default::default(),
-            gate: None,
             pass: 1,
             status: crate::RunStatus::Completed,
-            current_step: None,
+            active: Vec::new(),
             results: [(
                 "get".to_string(),
                 serde_json::json!({ "content": [{ "type": "text", "text": payload }] }),
             )]
             .into(),
             variables: HashMap::new(),
-            failed_step: None,
+            failed_node: None,
             error: None,
             started_at: started,
             finished_at: Some(started + chrono::Duration::milliseconds(312)),
         };
         assert_eq!(send_summary(&run, "get"), "completed · 404 · 312 ms");
-        run.steps[0].tool = "list_panes".into();
+        run.flow = Flow::chain(vec![RecipeStep {
+            id: "get".into(),
+            tool: "list_panes".into(),
+            ..Default::default()
+        }]);
         run.finished_at = Some(started + chrono::Duration::milliseconds(1420));
         assert_eq!(send_summary(&run, "get"), "completed · 1.4 s");
     }
 
     #[test]
     fn request_ids_and_params() {
-        let steps = [
-            RecipeStep {
-                id: "request2".into(),
-                ..Default::default()
-            },
-            RecipeStep {
-                id: "spawn".into(),
-                ..Default::default()
-            },
-        ];
-        assert_eq!(fresh_request_id(&steps), "request3");
-        assert!(valid_id("spawn_2-b") && !valid_id("a.b") && !valid_id(""));
+        let step = |id: &str| RecipeStep {
+            id: id.into(),
+            tool: "list_panes".into(),
+            ..Default::default()
+        };
+        let mut flow = Flow::chain(vec![step("request2"), step("spawn")]);
+        assert_eq!(fresh_node_id(&flow, "request"), "request3");
+        replace_node(&mut flow, "request2", Node::tool(step("ls"))).unwrap();
+        assert_eq!(flow.edges[0].to, "ls");
+        assert_eq!(flow.edges[1].from, "ls");
+        assert!(replace_node(&mut flow, "ls", Node::tool(step("spawn"))).is_err());
 
         let props: HashMap<String, Value> = [(
             "lines".to_string(),
