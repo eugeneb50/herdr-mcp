@@ -1,12 +1,13 @@
 //! The Runs tab: every run, newest first, and the picked run's trail (what
-//! each request sent and got, the gate's checks, errors, the pane snapshot
+//! each node sent and got, each branch's checks, errors, the pane snapshot
 //! of a failure), as in the web playground's Runs tab. Quick actions: run a
 //! collection, run again, cancel, open the run's pane, follow parent and
 //! child runs. Collections are edited in the web UI (`w`).
 
 use crossterm::event::{KeyCode, KeyModifiers, MouseEvent, MouseEventKind};
 use herdr_mcp_api::{
-    ApiClient, Recipe, RunAction, RunEvent, RunRecord, RunStatus, StartRunRequest, Uuid,
+    ApiClient, NodeKind, NodeState, Port, Recipe, RunAction, RunEvent, RunRecord, RunStatus,
+    StartRunRequest, Uuid, node_states,
 };
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -25,7 +26,7 @@ pub struct RunsState {
     /// Newest first.
     pub runs: Vec<RunRecord>,
     /// The picked run's log and trail (with the trail of the child run its
-    /// gate handed off to), and whose they are.
+    /// run nodes started), and whose they are.
     pub events: Vec<RunEvent>,
     pub trail: String,
     events_of: Option<Uuid>,
@@ -88,7 +89,7 @@ impl RunsState {
         true
     }
 
-    /// The first run the picked one started (its gate's hand-off, a
+    /// The first run the picked one started (a run node, a
     /// `recipe_run` step).
     fn child(&self) -> Option<Uuid> {
         self.picked()?.children(&self.runs).last().map(|r| r.id)
@@ -168,6 +169,39 @@ async fn load_events(app: &mut App, http: &herdr_mcp_api::ApiClient) {
     }
 }
 
+/// One line per node of `run`'s flow, in flow order, start left out: where
+/// it got to after `events`, its id, what it does, and the port a branch
+/// took.
+fn node_lines(run: &RunRecord, events: &[RunEvent]) -> Vec<String> {
+    let states = node_states(events);
+    run.flow
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::Start))
+        .map(|n| {
+            let state = states.get(&n.id);
+            let mark = match state {
+                None => ' ',
+                Some(NodeState::Running) => '▶',
+                Some(NodeState::Done(_)) => '✔',
+                Some(NodeState::Failed) => '✘',
+                Some(NodeState::Skipped) => '·',
+                Some(NodeState::Cancelled) => '■',
+            };
+            let what = n.tool_name().unwrap_or(n.kind.name());
+            match (state, &n.kind) {
+                (Some(NodeState::Done(port)), NodeKind::Branch { .. }) => {
+                    format!("{mark} {}  {what} → {port}", n.id)
+                }
+                (Some(NodeState::Done(Port::Error)), _) => {
+                    format!("{mark} {}  {what} → error", n.id)
+                }
+                _ => format!("{mark} {}  {what}", n.id),
+            }
+        })
+        .collect()
+}
+
 fn status_style(s: RunStatus) -> ratatui::style::Style {
     match s {
         RunStatus::Completed => accent_style(),
@@ -244,7 +278,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(cols[1]);
     frame.render_widget(block, cols[1]);
     state.trail_inner = inner;
-    let mut lines: Vec<Line> = text.lines().map(|l| Line::raw(l.to_string())).collect();
+    let mut lines: Vec<Line> = match &picked {
+        Some(run) if state.events_of == Some(run.id) => node_lines(run, &state.events)
+            .into_iter()
+            .map(Line::raw)
+            .chain([Line::raw("")])
+            .collect(),
+        _ => Vec::new(),
+    };
+    lines.extend(text.lines().map(|l| Line::raw(l.to_string())));
     if picked.is_some() {
         lines.push(Line::raw(""));
         lines.push(Line::styled(
@@ -506,9 +548,9 @@ mod tests {
     fn run(recipe: Option<Uuid>, status: RunStatus) -> RunRecord {
         serde_json::from_value(serde_json::json!({
             "id": Uuid::new_v4(), "recipe_id": recipe, "name": "c", "session_id": "w1",
-            "steps": [], "origin": { "kind": "api" }, "gate": null, "pass": 1,
-            "status": status, "current_step": null, "results": {}, "variables": {},
-            "failed_step": null, "error": null,
+            "flow": { "nodes": [] }, "origin": { "kind": "api" }, "pass": 1,
+            "status": status, "active": [], "results": {}, "variables": {},
+            "failed_node": null, "error": null,
             "started_at": "2026-10-25T00:00:00Z", "finished_at": null
         }))
         .unwrap()
@@ -539,13 +581,56 @@ mod tests {
         assert_eq!(s.filter, None);
     }
 
+    /// The detail pane's node list: flow order, start left out, the
+    /// branch's port, a node not reached yet blank.
+    #[test]
+    fn node_lines_show_where_each_node_got_to() {
+        let mut r = run(None, RunStatus::Running);
+        r.flow = serde_json::from_value(serde_json::json!({
+            "nodes": [
+                { "id": "start", "type": "start" },
+                { "id": "ls", "type": "tool", "tool": "list_panes" },
+                { "id": "check", "type": "branch", "rules": [{}] },
+                { "id": "nap", "type": "wait", "ms": 10 },
+                { "id": "later", "type": "fail" }
+            ]
+        }))
+        .unwrap();
+        let events: Vec<RunEvent> = [
+            serde_json::json!({ "type": "node_finished", "node": "ls" }),
+            serde_json::json!({ "type": "branched", "node": "check", "port": "1", "checks": [] }),
+            serde_json::json!({ "type": "node_started", "node": "nap" }),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(seq, mut e)| {
+            e["run_id"] = serde_json::json!(r.id);
+            e["seq"] = serde_json::json!(seq);
+            e["at"] = serde_json::json!("2026-10-25T00:00:00Z");
+            serde_json::from_value(e).unwrap()
+        })
+        .collect();
+        assert_eq!(
+            node_lines(&r, &events),
+            [
+                "✔ ls  list_panes",
+                "✔ check  branch → 1",
+                "▶ nap  wait",
+                "  later  fail"
+            ]
+        );
+    }
+
     /// `d` finds the run the picked one started and `p` comes back, even
     /// through a filter that hides it.
     #[test]
     fn parent_and_child_navigation() {
         let parent = run(Some(Uuid::new_v4()), RunStatus::Completed);
         let mut child = run(None, RunStatus::Failed);
-        child.origin = herdr_mcp_api::RunOrigin::Gate { run_id: parent.id };
+        child.origin = herdr_mcp_api::RunOrigin::Node {
+            run_id: parent.id,
+            node: "next".into(),
+        };
         let mut s = RunsState {
             runs: vec![child.clone(), parent.clone()],
             failed_only: true,

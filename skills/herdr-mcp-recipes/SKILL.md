@@ -33,9 +33,9 @@ t run_get '{"run_id":"<id>","trail":true}'
 | Tool | Does |
 |---|---|
 | `recipe_list` / `recipe_get` | Find saved recipes / read one (`recipe_id`) |
-| `recipe_save` | Create (no `recipe_id`; `name` + `steps`) or update one |
-| `recipe_run` | Run a saved recipe (`recipe_id`) or ad-hoc `steps`; `variables` override the recipe's; `wait: true` returns the finished run |
-| `run_get` | A run's status and each step's result; `trail: true` explains a failure |
+| `recipe_save` | Create (no `recipe_id`; `name` + `steps` or `flow`) or update one |
+| `recipe_run` | Run a saved recipe (`recipe_id`) or an ad-hoc `steps` / `flow`; `variables` override the recipe's; `wait: true` returns the finished run |
+| `run_get` | A run's status and each node's result; `trail: true` explains a failure |
 | `run_control` | `run_id` + `action`: `pause`, `resume` or `cancel` |
 | `list_templates` / `instantiate_template` | Start from a bundled recipe |
 
@@ -49,13 +49,14 @@ curl -s $B/api/tools | jq '.tools[] | select(.name=="recipe_run") | .inputSchema
 
 - Start without `wait` and poll `run_get` until `status` is `completed` or
   `failed`, so one long call doesn't time out. On `failed`, read
-  `run_get` with `trail: true` before retrying: it shows each step's params
+  `run_get` with `trail: true` before retrying: it shows each node's params
   as sent, unresolved placeholders, results and the pane's last lines.
 - Steps are `{id, tool, params, extract?}`. Later steps read earlier
   results as `{{ id.path }}` (`{{ ws.result.root_pane.pane_id }}`,
   `{{ exec.output }}`) and variables as `{{ name }}`.
-- Gates, loops and child runs: the herdr-mcp://agent-guide MCP resource
-  (docs/AGENT-GUIDE.md), section Recipes.
+- `steps` is a straight line. For branches, parallel paths, loops, retries
+  and child runs save a `flow` (nodes + edges): the herdr-mcp://agent-guide
+  MCP resource (docs/AGENT-GUIDE.md), section Flows.
 
 ## Rules
 

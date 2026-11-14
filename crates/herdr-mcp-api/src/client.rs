@@ -445,7 +445,7 @@ impl ApiClient {
     }
 
     /// `GET /api/runs/{id}/trail` — the run's trail as text, with the trail
-    /// of the child run its gate handed off to indented under it.
+    /// of each child run its run nodes started indented under it.
     pub async fn run_trail(&self, id: Uuid) -> Result<String, ApiError> {
         Self::send(self.request(Method::GET, &["api", "runs", &id.to_string(), "trail"])).await
     }

@@ -9,7 +9,7 @@
 pub mod agents;
 pub mod client;
 pub mod config;
-pub mod gate;
+pub mod flow;
 pub mod herdr;
 pub mod playground;
 pub mod profile;
@@ -21,7 +21,7 @@ pub mod variables;
 pub use agents::{AgentHandle, AgentsResponse};
 pub use client::{ApiClient, ApiError, schema_type, tool_is_error, tool_payload, tool_text};
 pub use config::{ClipboardConfig, ConfigResponse};
-pub use gate::{Check, CheckResult, Gate, GateAction, GateRule, Op};
+pub use flow::{Check, CheckResult, Edge, Flow, Node, NodeKind, Op, Point, Port, Retry, Rule};
 pub use herdr::{
     EventLevel, HerdrEvent, HerdrPane, HerdrSession, PaneFilter, PanesResponse, RecipeTrigger,
     SessionsResponse,
@@ -32,7 +32,8 @@ pub use recipe::{
     RunTrail, TemplateVariable, UpdateRecipeRequest, VarScope,
 };
 pub use run::{
-    RunAction, RunEvent, RunEventKind, RunOrigin, RunRecord, RunStatus, StartRunRequest, trail_text,
+    NodeState, RunAction, RunEvent, RunEventKind, RunOrigin, RunRecord, RunStatus, StartRunRequest,
+    node_states, trail_text,
 };
 pub use settings::{Chord, SettingInfo, Settings, SettingsResponse};
 /// Re-exported so clients name recipe/execution ids without their own uuid dep.

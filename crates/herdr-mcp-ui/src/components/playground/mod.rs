@@ -1,11 +1,13 @@
-//! Playground: collections of saved requests (Postman style) and the live
-//! herdr event stream.
+//! Playground: collections (flows of requests and the nodes that route
+//! them), their runs, and the live herdr event stream.
 
 pub mod builders;
+pub mod canvas;
 pub mod collections;
 pub mod events;
 pub mod flow;
 pub mod forms;
+pub mod map;
 pub mod recipes;
 pub mod runs;
 
@@ -13,6 +15,7 @@ use dioxus::prelude::*;
 
 use collections::Collections;
 use events::HerdrEvents;
+use map::Map;
 use runs::Runs;
 
 use super::pane_options::LivePaneOptions;
@@ -26,7 +29,7 @@ pub fn Playground() -> Element {
             div { class: "eyebrow", "Playground" }
             h1 { class: "page-title", "Collections" }
             p { class: "lede",
-                "Save tool and herdr API calls as requests in collections. Send one, or run a collection in order; extract parts of a result into variables to chain the next request."
+                "A collection is a flow: requests (tool and herdr API calls) wired to branches, loops, waits and other collections. Send one request, or run the flow and watch it; extract parts of a result into variables for the next node."
             }
         }
         LivePaneOptions {}
@@ -42,6 +45,11 @@ pub fn Playground() -> Element {
                 "Runs"
             }
             button {
+                class: if *tab.read() == "map" { "tab tab-active" } else { "tab" },
+                onclick: move |_| tab.set("map"),
+                "Map"
+            }
+            button {
                 class: if *tab.read() == "events" { "tab tab-active" } else { "tab" },
                 onclick: move |_| tab.set("events"),
                 "herdr Events"
@@ -50,6 +58,7 @@ pub fn Playground() -> Element {
         match *tab.read() {
             "events" => rsx! { HerdrEvents {} },
             "runs" => rsx! { Runs {} },
+            "map" => rsx! { Map {} },
             _ => rsx! { Collections {} },
         }
     }
