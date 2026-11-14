@@ -349,7 +349,10 @@ impl Flow {
             match self.node(&e.to) {
                 None => out.push(format!("an edge goes to `{}`, which is not a node", e.to)),
                 Some(to) if to.kind == NodeKind::Start => {
-                    out.push(format!("`{}` → `{}`: nothing goes into the start", e.from, e.to));
+                    out.push(format!(
+                        "`{}` → `{}`: nothing goes into the start",
+                        e.from, e.to
+                    ));
                 }
                 Some(_) => {}
             }
@@ -817,7 +820,9 @@ mod tests {
         let mut back = serde_json::to_value(&f).unwrap();
         back.as_object_mut().unwrap().remove("max_steps");
         assert_eq!(back, value);
-        assert!(serde_json::from_value::<Edge>(json!({"from": "a", "port": "0", "to": "b"})).is_err());
+        assert!(
+            serde_json::from_value::<Edge>(json!({"from": "a", "port": "0", "to": "b"})).is_err()
+        );
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! The Runs tab: every run, newest first, and the picked run's trail (what
-//! each request sent and got, the gate's checks, errors, the pane snapshot
+//! each node sent and got, each branch's checks, errors, the pane snapshot
 //! of a failure), as in the web playground's Runs tab. Quick actions: run a
 //! collection, run again, cancel, open the run's pane, follow parent and
 //! child runs. Collections are edited in the web UI (`w`).
@@ -25,7 +25,7 @@ pub struct RunsState {
     /// Newest first.
     pub runs: Vec<RunRecord>,
     /// The picked run's log and trail (with the trail of the child run its
-    /// gate handed off to), and whose they are.
+    /// run nodes started), and whose they are.
     pub events: Vec<RunEvent>,
     pub trail: String,
     events_of: Option<Uuid>,
@@ -88,7 +88,7 @@ impl RunsState {
         true
     }
 
-    /// The first run the picked one started (its gate's hand-off, a
+    /// The first run the picked one started (a run node, a
     /// `recipe_run` step).
     fn child(&self) -> Option<Uuid> {
         self.picked()?.children(&self.runs).last().map(|r| r.id)
@@ -506,9 +506,9 @@ mod tests {
     fn run(recipe: Option<Uuid>, status: RunStatus) -> RunRecord {
         serde_json::from_value(serde_json::json!({
             "id": Uuid::new_v4(), "recipe_id": recipe, "name": "c", "session_id": "w1",
-            "steps": [], "origin": { "kind": "api" }, "gate": null, "pass": 1,
-            "status": status, "current_step": null, "results": {}, "variables": {},
-            "failed_step": null, "error": null,
+            "flow": { "nodes": [] }, "origin": { "kind": "api" }, "pass": 1,
+            "status": status, "active": [], "results": {}, "variables": {},
+            "failed_node": null, "error": null,
             "started_at": "2026-10-25T00:00:00Z", "finished_at": null
         }))
         .unwrap()
@@ -545,7 +545,10 @@ mod tests {
     fn parent_and_child_navigation() {
         let parent = run(Some(Uuid::new_v4()), RunStatus::Completed);
         let mut child = run(None, RunStatus::Failed);
-        child.origin = herdr_mcp_api::RunOrigin::Gate { run_id: parent.id };
+        child.origin = herdr_mcp_api::RunOrigin::Node {
+            run_id: parent.id,
+            node: "next".into(),
+        };
         let mut s = RunsState {
             runs: vec![child.clone(), parent.clone()],
             failed_only: true,

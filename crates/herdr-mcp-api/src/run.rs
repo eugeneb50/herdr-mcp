@@ -523,11 +523,7 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
                     clip(&value.to_string(), 200)
                 ),
             ),
-            RunEventKind::Branched {
-                node,
-                port,
-                checks,
-            } => {
+            RunEventKind::Branched { node, port, checks } => {
                 line(&mut out, "◆", &format!("{node} → {port}"));
                 for c in checks {
                     let found = c
@@ -622,7 +618,10 @@ mod tests {
         let parent = Uuid::from_u128(1);
         let runs = [
             run(1, json!({ "kind": "api" })),
-            run(2, json!({ "kind": "node", "run_id": parent, "node": "next" })),
+            run(
+                2,
+                json!({ "kind": "node", "run_id": parent, "node": "next" }),
+            ),
             run(3, json!({ "kind": "api" })),
             run(4, json!({ "kind": "run", "run_id": parent })),
         ];

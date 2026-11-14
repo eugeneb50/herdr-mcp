@@ -49,13 +49,14 @@ curl -s $B/api/tools | jq '.tools[] | select(.name=="recipe_run") | .inputSchema
 
 - Start without `wait` and poll `run_get` until `status` is `completed` or
   `failed`, so one long call doesn't time out. On `failed`, read
-  `run_get` with `trail: true` before retrying: it shows each step's params
+  `run_get` with `trail: true` before retrying: it shows each node's params
   as sent, unresolved placeholders, results and the pane's last lines.
 - Steps are `{id, tool, params, extract?}`. Later steps read earlier
   results as `{{ id.path }}` (`{{ ws.result.root_pane.pane_id }}`,
   `{{ exec.output }}`) and variables as `{{ name }}`.
-- Gates, loops and child runs: the herdr-mcp://agent-guide MCP resource
-  (docs/AGENT-GUIDE.md), section Recipes.
+- `steps` is a straight line. For branches, parallel paths, loops, retries
+  and child runs save a `flow` (nodes + edges): the herdr-mcp://agent-guide
+  MCP resource (docs/AGENT-GUIDE.md), section Flows.
 
 ## Rules
 

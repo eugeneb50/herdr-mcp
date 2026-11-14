@@ -573,7 +573,12 @@ pub async fn set_flow(client: &ApiClient, id: Uuid, flow: Flow) -> Result<(), St
 /// Put `node` in place of node `old_id` (renaming its edges), or add it
 /// when there is none, reading the collection fresh so nothing else is
 /// clobbered.
-pub async fn save_node(client: &ApiClient, id: Uuid, old_id: &str, node: Node) -> Result<(), String> {
+pub async fn save_node(
+    client: &ApiClient,
+    id: Uuid,
+    old_id: &str,
+    node: Node,
+) -> Result<(), String> {
     let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
     replace_node(&mut recipe.flow, old_id, node)?;
     set_flow(client, id, recipe.flow).await
@@ -631,7 +636,10 @@ pub async fn add_request(
 pub async fn delete_node(client: &ApiClient, id: Uuid, node_id: &str) -> Result<(), String> {
     let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
     recipe.flow.nodes.retain(|n| n.id != node_id);
-    recipe.flow.edges.retain(|e| e.from != node_id && e.to != node_id);
+    recipe
+        .flow
+        .edges
+        .retain(|e| e.from != node_id && e.to != node_id);
     set_flow(client, id, recipe.flow).await
 }
 

@@ -27,7 +27,7 @@ use clap::Subcommand;
 use serde::Serialize;
 use serde_json::Value;
 
-use herdr_mcp_api::{ApiClient, GateAction, RunEventKind, StartRunRequest, tool_text};
+use herdr_mcp_api::{ApiClient, RunEventKind, StartRunRequest, tool_text};
 use herdr_mcp_core::PLUGIN_ID;
 
 /// Env var carrying the invoking action's context into a plugin pane.
@@ -394,18 +394,15 @@ async fn follow(api: &ApiClient, id: herdr_mcp_api::Uuid) -> Result<()> {
         for event in api.run_events(id, since).await? {
             since = event.seq + 1;
             match event.kind {
-                RunEventKind::StepStarted { step, .. } => println!("▶ {step}"),
-                RunEventKind::StepFinished { step, result } => {
-                    println!("✔ {step}");
+                RunEventKind::NodeStarted { node, .. } => println!("▶ {node}"),
+                RunEventKind::NodeFinished { node, result, port } => {
+                    println!("✔ {node} → {port}");
                     for line in tool_text(&result).lines().take(12) {
                         println!("    \x1b[2m{line}\x1b[0m");
                     }
                 }
-                RunEventKind::StepFailed { step, error, .. } => println!("✘ {step}: {error}"),
-                RunEventKind::GateDecided {
-                    action: Some(GateAction::Restart { .. }),
-                    ..
-                } => println!("↻ restart"),
+                RunEventKind::NodeFailed { node, error, .. } => println!("✘ {node}: {error}"),
+                RunEventKind::Looped { to, pass, .. } => println!("↻ {to} · pass {pass}"),
                 RunEventKind::ChildStarted { child, name, .. } => {
                     println!("⇢ {name} (run {child})");
                 }

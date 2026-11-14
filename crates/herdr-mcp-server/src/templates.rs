@@ -499,14 +499,13 @@ pub fn instantiate(
         id: Uuid::new_v4(),
         name: name.unwrap_or_else(|| template.name.clone()),
         description: Some(template.description.clone()),
-        steps,
+        flow: herdr_mcp_api::Flow::chain(steps),
         variables: vars,
         created_at: now,
         updated_at: now,
         is_template: false,
         category: Some(template.category.clone()),
         triggers: Vec::new(),
-        gate: None,
         trail: Default::default(),
     })
 }
@@ -551,6 +550,14 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
+    fn steps(recipe: &Recipe) -> Vec<RecipeStep> {
+        recipe
+            .flow
+            .tools()
+            .filter_map(herdr_mcp_api::Node::step)
+            .collect()
+    }
+
     #[test]
     fn test_list_templates_nonempty() {
         let t = list_templates();
@@ -583,11 +590,14 @@ mod tests {
         vars.insert("agent_target".to_string(), serde_json::json!("agentA"));
         let recipe = instantiate("dev-watch", vars, None).expect("should instantiate");
         assert_eq!(recipe.name, "Dev Watch");
-        assert!(recipe.steps.iter().any(|s| s.tool == "list_panes"));
-        assert!(recipe.steps.iter().any(|s| s.tool == "agent_message"));
-        let send = recipe
-            .steps
-            .iter()
+        assert!(steps(&recipe).into_iter().any(|s| s.tool == "list_panes"));
+        assert!(
+            steps(&recipe)
+                .into_iter()
+                .any(|s| s.tool == "agent_message")
+        );
+        let send = steps(&recipe)
+            .into_iter()
             .find(|s| s.tool == "agent_message")
             .unwrap();
         assert!(send.params.to_string().contains("agentA"));
@@ -600,9 +610,8 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("agent_target".to_string(), serde_json::json!("agentA"));
         let recipe = instantiate("dev-watch", vars, None).expect("should instantiate");
-        let send = recipe
-            .steps
-            .iter()
+        let send = steps(&recipe)
+            .into_iter()
             .find(|s| s.tool == "agent_message")
             .unwrap();
         assert!(
@@ -617,7 +626,10 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("pane_id".to_string(), serde_json::json!("p1"));
         let recipe = instantiate("git-status", vars, None).expect("should instantiate");
-        let run = recipe.steps.iter().find(|s| s.tool == "pane_exec").unwrap();
+        let run = steps(&recipe)
+            .into_iter()
+            .find(|s| s.tool == "pane_exec")
+            .unwrap();
         assert!(run.params.to_string().contains("git status"));
         assert!(run.params.to_string().contains("p1"));
     }
@@ -627,18 +639,18 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("pane_id".to_string(), serde_json::json!("p9"));
         let recipe = instantiate("build-and-test", vars, None).expect("should instantiate");
-        assert_eq!(recipe.steps.len(), 2);
-        assert!(recipe.steps.iter().all(|s| s.tool == "pane_exec"
+        assert_eq!(steps(&recipe).len(), 2);
+        assert!(steps(&recipe).into_iter().all(|s| s.tool == "pane_exec"
             && s.params["check"] == true
             && s.params["pane_id"] == "p9"));
-        assert_eq!(recipe.steps[0].params["command"], "make build", "default");
+        assert_eq!(steps(&recipe)[0].params["command"], "make build", "default");
     }
 
     #[test]
     fn test_instantiate_health_check_no_vars() {
         let recipe = instantiate("health-check", HashMap::new(), None).expect("should instantiate");
-        assert!(recipe.steps.iter().any(|s| s.tool == "status"));
-        assert!(recipe.steps.iter().any(|s| s.tool == "list_agents"));
+        assert!(steps(&recipe).into_iter().any(|s| s.tool == "status"));
+        assert!(steps(&recipe).into_iter().any(|s| s.tool == "list_agents"));
     }
 
     #[test]
@@ -646,9 +658,8 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("agent".to_string(), serde_json::json!("claude"));
         let recipe = instantiate("restart-agent", vars, None).expect("should instantiate");
-        let start = recipe
-            .steps
-            .iter()
+        let start = steps(&recipe)
+            .into_iter()
             .find(|s| s.tool == "agent_spawn")
             .unwrap();
         assert!(start.params.to_string().contains("claude"));
@@ -659,8 +670,8 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("agent".to_string(), serde_json::json!("gpt"));
         let recipe = instantiate("restart-agent", vars, None).expect("should instantiate");
-        assert!(recipe.steps.iter().any(|s| s.tool == "close_pane"));
-        assert!(recipe.steps.iter().any(|s| s.tool == "agent_spawn"));
+        assert!(steps(&recipe).into_iter().any(|s| s.tool == "close_pane"));
+        assert!(steps(&recipe).into_iter().any(|s| s.tool == "agent_spawn"));
     }
 
     #[test]
@@ -673,20 +684,18 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("session_id".to_string(), serde_json::json!("w1"));
         let recipe = instantiate("a2a-pane-inventory", vars, None).expect("should instantiate");
-        assert!(recipe.steps.iter().any(|s| s.tool == "list_panes"));
-        assert!(recipe.steps.iter().any(|s| s.tool == "agent_list"));
-        assert!(recipe.steps.iter().any(|s| s.tool == "var_set"));
+        assert!(steps(&recipe).into_iter().any(|s| s.tool == "list_panes"));
+        assert!(steps(&recipe).into_iter().any(|s| s.tool == "agent_list"));
+        assert!(steps(&recipe).into_iter().any(|s| s.tool == "var_set"));
         // Template vars are substituted; runtime step refs ({{ panes.panes }}) remain.
         assert!(
-            !recipe
-                .steps
-                .iter()
+            !steps(&recipe)
+                .into_iter()
                 .any(|s| s.params.to_string().contains("{{ template."))
         );
         assert!(
-            recipe
-                .steps
-                .iter()
+            steps(&recipe)
+                .into_iter()
                 .any(|s| s.params.to_string().contains("{{ panes.panes }}"))
         );
     }
@@ -696,9 +705,8 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("target".to_string(), serde_json::json!("agentA"));
         let recipe = instantiate("a2a-ping", vars, None).expect("should instantiate");
-        let send = recipe
-            .steps
-            .iter()
+        let send = steps(&recipe)
+            .into_iter()
             .find(|s| s.tool == "agent_message")
             .unwrap();
         assert!(send.params.to_string().contains("agentA"));
@@ -712,8 +720,8 @@ mod tests {
         vars.insert("target_b".to_string(), serde_json::json!("agentB"));
         vars.insert("session_id".to_string(), serde_json::json!("w1"));
         let recipe = instantiate("a2a-fanout-collect", vars, None).expect("should instantiate");
-        assert_eq!(recipe.steps.len(), 5);
-        assert!(recipe.steps.iter().any(|s| s.tool == "agent_read"));
-        assert!(recipe.steps.iter().any(|s| s.tool == "var_set"));
+        assert_eq!(steps(&recipe).len(), 5);
+        assert!(steps(&recipe).into_iter().any(|s| s.tool == "agent_read"));
+        assert!(steps(&recipe).into_iter().any(|s| s.tool == "var_set"));
     }
 }
