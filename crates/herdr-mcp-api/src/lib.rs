@@ -32,7 +32,8 @@ pub use recipe::{
     RunTrail, TemplateVariable, UpdateRecipeRequest, VarScope,
 };
 pub use run::{
-    RunAction, RunEvent, RunEventKind, RunOrigin, RunRecord, RunStatus, StartRunRequest, trail_text,
+    NodeState, RunAction, RunEvent, RunEventKind, RunOrigin, RunRecord, RunStatus, StartRunRequest,
+    node_states, trail_text,
 };
 pub use settings::{Chord, SettingInfo, Settings, SettingsResponse};
 /// Re-exported so clients name recipe/execution ids without their own uuid dep.

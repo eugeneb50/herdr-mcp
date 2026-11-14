@@ -1,16 +1,17 @@
 //! The playground's model, shared by the web UI and the TUI. Collections are
-//! saved recipes and their requests are the recipe's steps; this module
+//! saved recipes and their requests are the flow's tool nodes; this module
 //! holds what both front ends need to show and edit them: the tool catalog
 //! and herdr's method schema as forms, raw form values to params and back,
-//! result paths for extract rules, and the trigger editor's text form.
+//! result paths for extract rules, flow edits and layout, and the trigger
+//! editor's text form.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::Value;
 
 use crate::{
-    ApiClient, Edge, Flow, Node, Port, Recipe, RecipeStep, RunRecord, UpdateRecipeRequest, Uuid,
-    schema_type,
+    ApiClient, Edge, Flow, Node, NodeKind, Point, Port, Recipe, RecipeStep, RunRecord,
+    UpdateRecipeRequest, Uuid, schema_type,
 };
 
 /// The tool whose requests call any herdr socket method.
@@ -555,40 +556,37 @@ pub fn parse_when(text: &str) -> serde_json::Map<String, Value> {
         .collect()
 }
 
-// ── saving requests ────────────────────────────────────────────────────
+// ── editing flows ──────────────────────────────────────────────────────
 
-/// Set collection `id`'s flow.
-pub async fn set_flow(client: &ApiClient, id: Uuid, flow: Flow) -> Result<(), String> {
+/// Apply `edit` to collection `id`'s flow, read fresh so nothing else is
+/// clobbered, and save it; what `edit` returned.
+pub async fn edit_flow<T>(
+    client: &ApiClient,
+    id: Uuid,
+    edit: impl FnOnce(&mut Flow) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
+    let out = edit(&mut recipe.flow)?;
     let req = UpdateRecipeRequest {
-        flow: Some(flow),
+        flow: Some(recipe.flow),
         ..Default::default()
     };
     client
         .update_recipe(id, &req)
         .await
-        .map(drop)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(out)
 }
 
-/// Put `node` in place of node `old_id` (renaming its edges), or add it
-/// when there is none, reading the collection fresh so nothing else is
-/// clobbered.
-pub async fn save_node(
-    client: &ApiClient,
-    id: Uuid,
-    old_id: &str,
-    node: Node,
-) -> Result<(), String> {
-    let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
-    replace_node(&mut recipe.flow, old_id, node)?;
-    set_flow(client, id, recipe.flow).await
-}
-
-/// See [`save_node`].
+/// Put `node` in place of node `old_id`, renaming its edges and dropping
+/// those from ports it no longer has (a branch's removed rule).
 pub fn replace_node(flow: &mut Flow, old_id: &str, node: Node) -> Result<(), String> {
     if node.id != old_id && flow.node(&node.id).is_some() {
         return Err(format!("this flow already has a node `{}`", node.id));
     }
+    let Some(slot) = flow.nodes.iter_mut().find(|n| n.id == old_id) else {
+        return Err(format!("no node `{old_id}` (deleted?)"));
+    };
     for e in &mut flow.edges {
         if e.from == old_id {
             e.from.clone_from(&node.id);
@@ -597,50 +595,104 @@ pub fn replace_node(flow: &mut Flow, old_id: &str, node: Node) -> Result<(), Str
             e.to.clone_from(&node.id);
         }
     }
-    match flow.nodes.iter_mut().find(|n| n.id == old_id) {
-        Some(n) => *n = node,
-        None => flow.nodes.push(node),
-    }
+    let ports = node.kind.ports();
+    flow.edges
+        .retain(|e| e.from != node.id || ports.contains(&e.port));
+    *slot = node;
     Ok(())
 }
 
-/// Add a `tool` node (starting from `params`) to collection `id`, wired
-/// from `after`'s `out` port when given; its id.
-pub async fn add_request(
-    client: &ApiClient,
-    id: Uuid,
-    tool: &str,
-    params: Value,
-    after: Option<&str>,
-) -> Result<String, String> {
-    let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
-    let node_id = fresh_node_id(&recipe.flow, "request");
-    recipe.flow.nodes.push(Node::tool(RecipeStep {
-        id: node_id.clone(),
-        tool: tool.into(),
-        params,
-        ..Default::default()
-    }));
-    if let Some(from) = after {
-        recipe.flow.edges.push(Edge {
-            from: from.into(),
-            port: Port::Out,
-            to: node_id.clone(),
-        });
+/// Add a node of `kind` named `{prefix}N` at `at`, wired from `after`'s
+/// port when given; its id.
+pub fn add_node(
+    flow: &mut Flow,
+    prefix: &str,
+    kind: NodeKind,
+    at: Point,
+    after: Option<(&str, Port)>,
+) -> String {
+    let id = fresh_node_id(flow, prefix);
+    flow.nodes.push(Node {
+        id: id.clone(),
+        description: None,
+        at: Some(at),
+        kind,
+    });
+    if let Some((from, port)) = after {
+        connect(flow, from, port, &id);
     }
-    set_flow(client, id, recipe.flow).await?;
-    Ok(node_id)
+    id
 }
 
-/// Remove node `node_id` and its edges from collection `id`.
-pub async fn delete_node(client: &ApiClient, id: Uuid, node_id: &str) -> Result<(), String> {
-    let mut recipe = client.get_recipe(id).await.map_err(|e| e.to_string())?;
-    recipe.flow.nodes.retain(|n| n.id != node_id);
-    recipe
-        .flow
-        .edges
-        .retain(|e| e.from != node_id && e.to != node_id);
-    set_flow(client, id, recipe.flow).await
+/// Remove node `id` and its edges.
+pub fn remove_node(flow: &mut Flow, id: &str) {
+    flow.nodes.retain(|n| n.id != id);
+    flow.edges.retain(|e| e.from != id && e.to != id);
+}
+
+/// Add the edge `from`.`port` → `to` unless the flow has it.
+pub fn connect(flow: &mut Flow, from: &str, port: Port, to: &str) {
+    let edge = Edge {
+        from: from.into(),
+        port,
+        to: to.into(),
+    };
+    if !flow.edges.contains(&edge) {
+        flow.edges.push(edge);
+    }
+}
+
+/// Node width and height on the canvas, and the gap between columns and rows.
+pub const NODE_W: f32 = 180.0;
+pub const NODE_H: f32 = 56.0;
+const GAP_X: f32 = 80.0;
+const GAP_Y: f32 = 36.0;
+
+/// Where to draw each node: its `at`, or a column by its longest forward
+/// path from start (loops ignored) and a row in that column. Nodes start
+/// cannot reach go in a column after the rest.
+pub fn layout(flow: &Flow) -> HashMap<String, Point> {
+    let shape = flow.shape();
+    let mut depth: HashMap<&str, usize> = HashMap::new();
+    if let Some(start) = flow.start() {
+        depth.insert(&start.id, 0);
+    }
+    // Longest path by relaxation: a forward graph has no cycle, so at most
+    // one pass per node.
+    for _ in 0..flow.nodes.len() {
+        let mut changed = false;
+        for (i, e) in flow.edges.iter().enumerate() {
+            if shape.back.contains(&i) {
+                continue;
+            }
+            if let Some(&d) = depth.get(e.from.as_str())
+                && depth.get(e.to.as_str()).is_none_or(|&t| t < d + 1)
+            {
+                depth.insert(&e.to, d + 1);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let stray = depth.values().max().map_or(0, |d| d + 1);
+    let mut rows: HashMap<usize, usize> = HashMap::new();
+    flow.nodes
+        .iter()
+        .map(|n| {
+            let at = n.at.unwrap_or_else(|| {
+                let col = depth.get(n.id.as_str()).copied().unwrap_or(stray);
+                let row = rows.entry(col).or_default();
+                *row += 1;
+                Point {
+                    x: col as f32 * (NODE_W + GAP_X),
+                    y: (*row - 1) as f32 * (NODE_H + GAP_Y),
+                }
+            });
+            (n.id.clone(), at)
+        })
+        .collect()
 }
 
 /// Focus `pane` in herdr (`herdr_api` `pane.focus`); what to tell the user.
@@ -1182,6 +1234,67 @@ mod tests {
     }
 
     #[test]
+    fn editing_and_laying_out_a_flow() {
+        let step = |id: &str| RecipeStep {
+            id: id.into(),
+            tool: "list_panes".into(),
+            ..Default::default()
+        };
+        let mut flow = Flow::chain(vec![step("a"), step("b")]);
+        let origin = Point { x: 0.0, y: 0.0 };
+        let wait = add_node(
+            &mut flow,
+            "wait",
+            NodeKind::Wait { ms: 1 },
+            origin,
+            Some(("start", Port::Out)),
+        );
+        assert_eq!(wait, "wait1");
+        connect(&mut flow, "wait1", Port::Out, "b");
+        connect(&mut flow, "wait1", Port::Out, "b");
+        connect(&mut flow, "b", Port::Out, "a");
+        assert_eq!(flow.edges.len(), 5, "no duplicate edge: {:?}", flow.edges);
+        flow.nodes.iter_mut().find(|n| n.id == "wait1").unwrap().at = None;
+        flow.nodes.push(Node::tool(step("stray")));
+
+        let at = layout(&flow);
+        let col = |id: &str| at[id].x / (NODE_W + GAP_X);
+        // b is two hops away by way of a; the loop back to a is ignored.
+        assert_eq!(
+            (col("start"), col("a"), col("wait1"), col("b")),
+            (0.0, 1.0, 1.0, 2.0)
+        );
+        assert_eq!(col("stray"), 3.0);
+        assert_ne!(at["a"].y, at["wait1"].y);
+
+        remove_node(&mut flow, "b");
+        assert!(flow.edges.iter().all(|e| e.from != "b" && e.to != "b"));
+
+        // A branch losing its last rule loses that port's edges.
+        let rule = crate::Rule {
+            checks: Vec::new(),
+            any: false,
+        };
+        let branch = add_node(
+            &mut flow,
+            "branch",
+            NodeKind::Branch {
+                rules: vec![rule.clone(), rule.clone()],
+            },
+            origin,
+            None,
+        );
+        connect(&mut flow, &branch, Port::Rule(1), "a");
+        connect(&mut flow, &branch, Port::Rule(2), "wait1");
+        let mut fewer = flow.node(&branch).unwrap().clone();
+        fewer.kind = NodeKind::Branch { rules: vec![rule] };
+        replace_node(&mut flow, &branch, fewer).unwrap();
+        let from_branch: Vec<_> = flow.edges.iter().filter(|e| e.from == branch).collect();
+        assert_eq!(from_branch.len(), 1);
+        assert_eq!(from_branch[0].port, Port::Rule(1));
+    }
+
+    #[test]
     fn request_ids_and_params() {
         let step = |id: &str| RecipeStep {
             id: id.into(),
@@ -1194,6 +1307,7 @@ mod tests {
         assert_eq!(flow.edges[0].to, "ls");
         assert_eq!(flow.edges[1].from, "ls");
         assert!(replace_node(&mut flow, "ls", Node::tool(step("spawn"))).is_err());
+        assert!(replace_node(&mut flow, "gone", Node::tool(step("x"))).is_err());
 
         let props: HashMap<String, Value> = [(
             "lines".to_string(),

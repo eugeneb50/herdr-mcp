@@ -9,10 +9,10 @@ use super::forms::ResponseViewer;
 use crate::client::use_api;
 use crate::components::pane_options::pane_list;
 use herdr_mcp_api::playground::{display_value, event_names, parse_when, when_text};
-use herdr_mcp_api::{InstantiateTemplateRequest, RecipeStep, RecipeTemplate, RecipeTrigger};
+use herdr_mcp_api::{Flow, InstantiateTemplateRequest, RecipeTemplate, RecipeTrigger};
 
-/// A finished run (`RunRecord`): its status, then each step's result in
-/// step order.
+/// A finished run (`RunRecord`): its status, then each tool node's result
+/// in `order`.
 #[component]
 pub fn RunResults(data: Value, order: Vec<String>) -> Element {
     let status = data
@@ -59,7 +59,7 @@ pub fn RunResults(data: Value, order: Vec<String>) -> Element {
 #[component]
 pub fn TemplateForm(
     template: RecipeTemplate,
-    on_load: EventHandler<(String, Vec<RecipeStep>)>,
+    on_load: EventHandler<(String, Flow)>,
     on_cancel: EventHandler<()>,
 ) -> Element {
     let client = use_api();
@@ -98,7 +98,7 @@ pub fn TemplateForm(
                 name: Some(name),
             };
             match client.instantiate_template(&id, &req).await {
-                Ok(recipe) => on_load.call((recipe.name, recipe.steps)),
+                Ok(recipe) => on_load.call((recipe.name, recipe.flow)),
                 Err(e) => error.set(Some(format!("Could not fill in template: {e}"))),
             }
         });

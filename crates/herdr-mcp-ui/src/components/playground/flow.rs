@@ -1,204 +1,256 @@
-//! A collection's flow settings: the gate (end / restart / fail / run
-//! another collection after the last request) and how long its runs are
-//! kept.
+//! Editors for a flow's non-tool nodes (start, branch, run, wait, fail) and
+//! how long a collection's runs are kept.
 
 use dioxus::prelude::*;
-use herdr_mcp_api::gate::{inputs_text, parse_inputs, rule_text};
+use herdr_mcp_api::flow::{inputs_text, parse_inputs};
 use herdr_mcp_api::playground::{display_value, parse_value};
 use herdr_mcp_api::settings::{KEEP_DAYS, KEEP_RUNS, SNAPSHOT_LINES};
-use herdr_mcp_api::{Check, Gate, GateAction, GateRule, Op, RunTrail, Uuid};
+use herdr_mcp_api::{Check, Node, NodeKind, Op, Rule, RunTrail, Uuid};
 use serde_json::Value;
 
 use crate::client::use_api;
 
-fn action_kind(a: &GateAction) -> &'static str {
-    match a {
-        GateAction::End => "end",
-        GateAction::Restart { .. } => "restart",
-        GateAction::Fail { .. } => "fail",
-        GateAction::Run { .. } => "run",
-    }
-}
-
-/// The gate's rules, checked in order after the last request; the first
-/// match ends, restarts, fails or hands the run off to one of the other
-/// `collections`. `paths` are suggestions for a check's path (the
-/// requests' ids, `run.pass`).
+/// A start, branch, run, wait or fail node. `paths` suggest a check's path
+/// (the flow's node ids, `run.pass`); `collections` are the ones a run node
+/// may start.
 #[component]
-pub fn GateEditor(
-    gate: Signal<Gate>,
+pub fn NodeEditor(
+    node: Node,
     collections: Vec<(Uuid, String)>,
     paths: Vec<String>,
+    on_save: EventHandler<Node>,
+    on_delete: EventHandler<()>,
 ) -> Element {
-    let rules = gate.read().rules.clone();
-    let max_steps = gate.read().max_steps;
+    let mut draft = use_signal(|| node.clone());
+    let mut inputs = use_signal(|| match &node.kind {
+        NodeKind::Run { inputs, .. } => inputs_text(inputs),
+        _ => String::new(),
+    });
+    let mut error = use_signal(|| None::<String>);
+    let start = matches!(node.kind, NodeKind::Start);
+    let d = draft.read().clone();
+
+    let save = move |_| {
+        let mut next = draft.read().clone();
+        next.id = next.id.trim().to_string();
+        if let NodeKind::Run { inputs: parsed, .. } = &mut next.kind {
+            match parse_inputs(&inputs.read()) {
+                Ok(v) => *parsed = v,
+                Err(e) => {
+                    error.set(Some(e));
+                    return;
+                }
+            }
+        }
+        error.set(None);
+        on_save.call(next);
+    };
+
     rsx! {
         div { class: "card",
-            div { class: "var-group-title", "Gate · after the last request" }
-            p { class: "field-desc",
-                "Rules are checked in order once every request ran; the first that holds decides: "
-                b { "end" }
-                ", "
-                b { "restart" }
-                " from the first request (a loop), or "
-                b { "fail" }
-                ". A check reads a path like a placeholder: "
-                code { "list.panes[0].pane_id" }
-                ", a variable, or "
-                code { "run.pass" }
-                " (1 on the first pass). No rule matching completes the run. Sending one request never uses the gate."
-            }
-            datalist { id: "gate-paths",
-                for p in paths.iter() {
-                    option { value: "{p}" }
+            div { class: "var-group-title", "{d.kind.name()} node" }
+            if start {
+                p { class: "field-desc",
+                    "Where every run begins. Wire its port to the first node; several edges run their nodes in parallel."
+                }
+            } else {
+                div { class: "form-row",
+                    div { class: "form-col",
+                        label { class: "form-label", "Node" }
+                        input {
+                            class: "input mono",
+                            r#type: "text",
+                            value: "{d.id}",
+                            oninput: move |e| draft.write().id = e.value(),
+                        }
+                    }
+                    div { class: "form-col",
+                        label { class: "form-label", "Description" }
+                        input {
+                            class: "input",
+                            r#type: "text",
+                            placeholder: "optional",
+                            value: "{d.description.clone().unwrap_or_default()}",
+                            oninput: move |e| draft.write().description = Some(e.value()).filter(|v| !v.trim().is_empty()),
+                        }
+                    }
                 }
             }
-            for (i, rule) in rules.iter().cloned().enumerate() {
-                GateRuleRow {
-                    key: "{i}",
-                    gate,
-                    index: i,
-                    rule,
-                    last: i + 1 == rules.len(),
-                    collections: collections.clone(),
-                }
-            }
-            div { class: "btn-row",
-                button {
-                    class: "btn",
-                    onclick: move |_| {
-                        gate.write().rules.push(GateRule {
-                            checks: vec![Check {
-                                path: String::new(),
-                                op: Op::Exists,
-                                value: Value::Null,
-                            }],
-                            any: false,
-                            then: GateAction::End,
-                        });
-                    },
-                    "+ Rule"
-                }
-                if !rules.is_empty() {
-                    label { class: "form-label", "Max requests per run" }
+            match d.kind.clone() {
+                NodeKind::Branch { rules } => rsx! {
+                    BranchRules { draft, rules, paths }
+                },
+                NodeKind::Run { collection, .. } => rsx! {
+                    p { class: "field-desc",
+                        "Runs another collection as a child run with its own variables, the globals and these inputs, and waits for it. Its result is "
+                        code { "{{run_id, status, error, variables}}" }
+                        "; port error when the child does not complete."
+                    }
+                    div { class: "form-row",
+                        select {
+                            class: "input",
+                            onchange: move |e| {
+                                if let (Ok(id), NodeKind::Run { collection, .. }) = (e.value().parse::<Uuid>(), &mut draft.write().kind) {
+                                    *collection = id;
+                                }
+                            },
+                            if !collections.iter().any(|(id, _)| *id == collection) {
+                                option { value: "{collection}", selected: true, "missing collection" }
+                            }
+                            for (id, name) in collections.iter() {
+                                option { value: "{id}", selected: *id == collection, "{name}" }
+                            }
+                        }
+                        input {
+                            class: "input mono",
+                            r#type: "text",
+                            placeholder: "inputs: key=value … ({{{{path}}}} reads this run)",
+                            value: "{inputs}",
+                            oninput: move |e| inputs.set(e.value()),
+                        }
+                    }
+                },
+                NodeKind::Wait { ms } => rsx! {
+                    div { class: "btn-row",
+                        label { class: "form-label", "Wait" }
+                        input {
+                            class: "input input-narrow",
+                            r#type: "number",
+                            min: "0",
+                            value: "{ms}",
+                            onchange: move |e| {
+                                if let NodeKind::Wait { ms } = &mut draft.write().kind {
+                                    *ms = e.value().trim().parse().unwrap_or(0);
+                                }
+                            },
+                        }
+                        span { class: "muted", "ms" }
+                    }
+                },
+                NodeKind::Fail { message } => rsx! {
                     input {
-                        class: "input input-narrow",
-                        r#type: "number",
-                        min: "1",
-                        title: "Every pass of a restart loop counts; a run that would go over fails.",
-                        value: "{max_steps}",
-                        onchange: move |e| {
-                            if let Ok(n) = e.value().trim().parse::<u32>() {
-                                gate.write().max_steps = n.max(1);
+                        class: "input",
+                        r#type: "text",
+                        placeholder: "message (empty: the error names the node)",
+                        value: "{message}",
+                        oninput: move |e| {
+                            if let NodeKind::Fail { message } = &mut draft.write().kind {
+                                *message = e.value();
                             }
                         },
                     }
+                },
+                NodeKind::Start | NodeKind::Tool { .. } => rsx! {},
+            }
+            if !start {
+                div { class: "btn-row",
+                    button { class: "btn btn-primary", onclick: save, "Save" }
+                    button { class: "btn link-danger", onclick: move |_| on_delete.call(()), "Delete" }
                 }
+            }
+            if let Some(e) = error() {
+                p { class: "send-status send-error", "{e}" }
             }
         }
     }
 }
 
+fn rules_mut(node: &mut Node) -> &mut Vec<Rule> {
+    match &mut node.kind {
+        NodeKind::Branch { rules } => rules,
+        _ => unreachable!("BranchRules edits a branch node"),
+    }
+}
+
+/// A branch's rules: the first that holds fires its port (rule 1 → port
+/// `1`), none fires `else`. Only the last rule can go, so the others keep
+/// their ports.
 #[component]
-fn GateRuleRow(
-    gate: Signal<Gate>,
-    index: usize,
-    rule: GateRule,
-    last: bool,
-    collections: Vec<(Uuid, String)>,
-) -> Element {
-    let i = index;
-    let kind = action_kind(&rule.then);
-    let mut inputs_error = use_signal(|| None::<String>);
-    let (param, target) = match &rule.then {
-        GateAction::End => (String::new(), None),
-        GateAction::Restart { delay_ms } => (delay_ms.to_string(), None),
-        GateAction::Fail { message } => (message.clone(), None),
-        GateAction::Run { collection, inputs } => (inputs_text(inputs), Some(*collection)),
-    };
-    let preview = rule_text(&rule, &collections);
-    let first = collections.first().map(|(id, _)| *id);
+fn BranchRules(draft: Signal<Node>, rules: Vec<Rule>, paths: Vec<String>) -> Element {
+    let last = rules.len();
     rsx! {
-        div { class: "gate-rule",
-            div { class: "btn-row",
-                span { class: "pill", "{i + 1}" }
-                select {
-                    class: "input input-narrow",
-                    onchange: move |e| gate.write().rules[i].any = e.value() == "any",
-                    option { value: "all", selected: !rule.any, "all of" }
-                    option { value: "any", selected: rule.any, "any of" }
-                }
-                span { class: "muted", if rule.checks.is_empty() { "always" } else { "these hold" } }
-                span { class: "spacer" }
-                button {
-                    class: "link-btn",
-                    disabled: i == 0,
-                    onclick: move |_| gate.write().rules.swap(i, i - 1),
-                    "↑"
-                }
-                button {
-                    class: "link-btn",
-                    disabled: last,
-                    onclick: move |_| gate.write().rules.swap(i, i + 1),
-                    "↓"
-                }
-                button {
-                    class: "link-btn link-danger",
-                    onclick: move |_| {
-                        gate.write().rules.remove(i);
-                    },
-                    "✕"
-                }
+        p { class: "field-desc",
+            "A check reads a path like a placeholder: "
+            code { "list.panes[0].pane_id" }
+            ", a variable, or "
+            code { "run.pass" }
+            " (1 on the first pass, +1 per loop). A rule with no checks always holds."
+        }
+        datalist { id: "check-paths",
+            for p in paths.iter() {
+                option { value: "{p}" }
             }
-            for (j, check) in rule.checks.iter().cloned().enumerate() {
-                div { key: "{j}", class: "gate-check",
-                    input {
-                        class: "input mono",
-                        r#type: "text",
-                        list: "gate-paths",
-                        placeholder: "path, e.g. read.text",
-                        value: "{check.path}",
-                        oninput: move |e| gate.write().rules[i].checks[j].path = e.value(),
-                    }
+        }
+        for (i, rule) in rules.iter().cloned().enumerate() {
+            div { key: "{i}", class: "rule-card",
+                div { class: "btn-row",
+                    span { class: "pill", "port {i + 1}" }
                     select {
                         class: "input input-narrow",
-                        onchange: move |e| {
-                            if let Some(op) = Op::ALL.into_iter().find(|o| o.name() == e.value()) {
-                                let mut g = gate.write();
-                                let c = &mut g.rules[i].checks[j];
-                                c.op = op;
-                                if !op.takes_value() {
-                                    c.value = Value::Null;
-                                }
-                            }
-                        },
-                        for op in Op::ALL {
-                            option { value: "{op.name()}", selected: op == check.op, "{op.name()}" }
+                        onchange: move |e| rules_mut(&mut draft.write())[i].any = e.value() == "any",
+                        option { value: "all", selected: !rule.any, "all of" }
+                        option { value: "any", selected: rule.any, "any of" }
+                    }
+                    span { class: "spacer" }
+                    if i + 1 == last {
+                        button {
+                            class: "link-btn link-danger",
+                            title: "Its port's edges go too",
+                            onclick: move |_| {
+                                rules_mut(&mut draft.write()).pop();
+                            },
+                            "✕"
                         }
                     }
-                    if check.op.takes_value() {
+                }
+                for (j, check) in rule.checks.iter().cloned().enumerate() {
+                    div { key: "{j}", class: "rule-check",
                         input {
                             class: "input mono",
                             r#type: "text",
-                            placeholder: "value",
-                            value: "{display_value(&check.value)}",
-                            oninput: move |e| gate.write().rules[i].checks[j].value = parse_value(e.value().trim()),
+                            list: "check-paths",
+                            placeholder: "path, e.g. read.text",
+                            value: "{check.path}",
+                            oninput: move |e| rules_mut(&mut draft.write())[i].checks[j].path = e.value(),
+                        }
+                        select {
+                            class: "input input-narrow",
+                            onchange: move |e| {
+                                if let Some(op) = Op::ALL.into_iter().find(|o| o.name() == e.value()) {
+                                    let mut node = draft.write();
+                                    let c = &mut rules_mut(&mut node)[i].checks[j];
+                                    c.op = op;
+                                    if !op.takes_value() {
+                                        c.value = Value::Null;
+                                    }
+                                }
+                            },
+                            for op in Op::ALL {
+                                option { value: "{op.name()}", selected: op == check.op, "{op.name()}" }
+                            }
+                        }
+                        if check.op.takes_value() {
+                            input {
+                                class: "input mono",
+                                r#type: "text",
+                                placeholder: "value",
+                                value: "{display_value(&check.value)}",
+                                oninput: move |e| rules_mut(&mut draft.write())[i].checks[j].value = parse_value(e.value().trim()),
+                            }
+                        }
+                        button {
+                            class: "link-btn link-danger",
+                            onclick: move |_| {
+                                rules_mut(&mut draft.write())[i].checks.remove(j);
+                            },
+                            "✕"
                         }
                     }
-                    button {
-                        class: "link-btn link-danger",
-                        onclick: move |_| {
-                            gate.write().rules[i].checks.remove(j);
-                        },
-                        "✕"
-                    }
                 }
-            }
-            div { class: "btn-row",
                 button {
                     class: "link-btn",
                     onclick: move |_| {
-                        gate.write().rules[i].checks.push(Check {
+                        rules_mut(&mut draft.write())[i].checks.push(Check {
                             path: String::new(),
                             op: Op::Eq,
                             value: Value::Null,
@@ -206,101 +258,14 @@ fn GateRuleRow(
                     },
                     "+ check"
                 }
-                span { class: "muted", "then" }
-                select {
-                    class: "input input-narrow",
-                    onchange: move |e| {
-                        gate.write().rules[i].then = match e.value().as_str() {
-                            "restart" => GateAction::Restart { delay_ms: 1000 },
-                            "fail" => GateAction::Fail { message: String::new() },
-                            "run" => match first {
-                                Some(collection) => GateAction::Run { collection, inputs: Default::default() },
-                                None => return,
-                            },
-                            _ => GateAction::End,
-                        };
-                    },
-                    option { value: "end", selected: kind == "end", "end" }
-                    option { value: "restart", selected: kind == "restart", "restart" }
-                    option { value: "fail", selected: kind == "fail", "fail" }
-                    option {
-                        value: "run",
-                        selected: kind == "run",
-                        disabled: first.is_none(),
-                        title: "Hand off to another collection: it runs as a child run with its own variables, and this run ends as it ends",
-                        "run collection"
-                    }
-                }
-                match kind {
-                    "restart" => rsx! {
-                        input {
-                            class: "input input-narrow",
-                            r#type: "number",
-                            min: "0",
-                            title: "Delay before the next pass, in ms",
-                            value: "{param}",
-                            onchange: move |e| {
-                                let delay_ms = e.value().trim().parse().unwrap_or(0);
-                                gate.write().rules[i].then = GateAction::Restart { delay_ms };
-                            },
-                        }
-                        span { class: "muted", "ms" }
-                    },
-                    "fail" => rsx! {
-                        input {
-                            class: "input",
-                            r#type: "text",
-                            placeholder: "message (optional)",
-                            value: "{param}",
-                            oninput: move |e| gate.write().rules[i].then = GateAction::Fail { message: e.value() },
-                        }
-                    },
-                    "run" => rsx! {
-                        select {
-                            class: "input input-narrow",
-                            onchange: move |e| {
-                                if let (Ok(id), GateAction::Run { collection, .. }) = (e.value().parse::<Uuid>(), &mut gate.write().rules[i].then) {
-                                    *collection = id;
-                                }
-                            },
-                            if let Some(id) = rule.then.missing_collection(&collections) {
-                                option { value: "{id}", selected: true, "missing collection" }
-                            }
-                            for (id, name) in collections.iter() {
-                                option { value: "{id}", selected: target == Some(*id), "{name}" }
-                            }
-                        }
-                        if rule.then.missing_collection(&collections).is_some() {
-                            span {
-                                class: "send-status send-error",
-                                "No other saved collection has this id (deleted?): pick one, or the run fails here."
-                            }
-                        }
-                        input {
-                            class: "input mono",
-                            r#type: "text",
-                            placeholder: "inputs: key=value … ({{{{path}}}} reads this run)",
-                            title: "Variables the child run starts with, over its own and the globals; values may use {{{{placeholders}}}} from this run",
-                            value: "{param}",
-                            onchange: move |e| match parse_inputs(&e.value()) {
-                                Ok(parsed) => {
-                                    inputs_error.set(None);
-                                    if let GateAction::Run { inputs, .. } = &mut gate.write().rules[i].then {
-                                        *inputs = parsed;
-                                    }
-                                }
-                                Err(err) => inputs_error.set(Some(err)),
-                            },
-                        }
-                    },
-                    _ => rsx! {},
-                }
             }
-            if let Some(err) = inputs_error() {
-                p { class: "send-status send-error", "{err}" }
-            }
-            code { class: "mono muted gate-preview", "{preview}" }
         }
+        button {
+            class: "btn",
+            onclick: move |_| rules_mut(&mut draft.write()).push(Rule { checks: Vec::new(), any: false }),
+            "+ Rule"
+        }
+        p { class: "muted", "No rule holding fires port else." }
     }
 }
 

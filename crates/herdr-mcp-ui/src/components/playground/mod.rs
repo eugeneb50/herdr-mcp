@@ -1,7 +1,8 @@
-//! Playground: collections of saved requests (Postman style) and the live
-//! herdr event stream.
+//! Playground: collections (flows of requests and the nodes that route
+//! them), their runs, and the live herdr event stream.
 
 pub mod builders;
+pub mod canvas;
 pub mod collections;
 pub mod events;
 pub mod flow;
@@ -26,7 +27,7 @@ pub fn Playground() -> Element {
             div { class: "eyebrow", "Playground" }
             h1 { class: "page-title", "Collections" }
             p { class: "lede",
-                "Save tool and herdr API calls as requests in collections. Send one, or run a collection in order; extract parts of a result into variables to chain the next request."
+                "A collection is a flow: requests (tool and herdr API calls) wired to branches, loops, waits and other collections. Send one request, or run the flow and watch it; extract parts of a result into variables for the next node."
             }
         }
         LivePaneOptions {}
