@@ -358,6 +358,9 @@ select.input { appearance: auto; }
 .edge-picked { stroke: #fbbf24; stroke-width: 3; }
 .edge-wire { stroke: var(--accent); stroke-dasharray: 4 3; }
 .edge-hit { fill: none; stroke: transparent; stroke-width: 12; cursor: pointer; }
+.map-wrap { overflow: auto; margin: 0.75rem 0; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+.map { display: block; }
+.map .node { cursor: pointer; }
 .rule-card { border: 1px solid var(--border); border-radius: 8px; padding: 0.6rem 0.75rem; margin-bottom: 0.6rem; }
 .rule-card .btn-row { align-items: center; margin-bottom: 0.5rem; }
 .rule-check { display: grid; grid-template-columns: 2fr auto 2fr auto; gap: 0.5rem; margin-bottom: 0.5rem; align-items: center; }

@@ -7,6 +7,7 @@ pub mod collections;
 pub mod events;
 pub mod flow;
 pub mod forms;
+pub mod map;
 pub mod recipes;
 pub mod runs;
 
@@ -14,6 +15,7 @@ use dioxus::prelude::*;
 
 use collections::Collections;
 use events::HerdrEvents;
+use map::Map;
 use runs::Runs;
 
 use super::pane_options::LivePaneOptions;
@@ -43,6 +45,11 @@ pub fn Playground() -> Element {
                 "Runs"
             }
             button {
+                class: if *tab.read() == "map" { "tab tab-active" } else { "tab" },
+                onclick: move |_| tab.set("map"),
+                "Map"
+            }
+            button {
                 class: if *tab.read() == "events" { "tab tab-active" } else { "tab" },
                 onclick: move |_| tab.set("events"),
                 "herdr Events"
@@ -51,6 +58,7 @@ pub fn Playground() -> Element {
         match *tab.read() {
             "events" => rsx! { HerdrEvents {} },
             "runs" => rsx! { Runs {} },
+            "map" => rsx! { Map {} },
             _ => rsx! { Collections {} },
         }
     }

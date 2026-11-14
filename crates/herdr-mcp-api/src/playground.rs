@@ -705,6 +705,136 @@ pub async fn focus_pane(client: &ApiClient, pane: &str) -> Result<String, String
     }
 }
 
+// ── the map ────────────────────────────────────────────────────────────
+
+/// What starts collections on the map: a herdr event, a cron schedule, or
+/// another collection's run node.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MapSource {
+    Trigger(String),
+    Schedule(String),
+    Collection(Uuid),
+}
+
+/// `from` starts collection `to`, which may be missing (deleted).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MapLink {
+    pub from: MapSource,
+    pub to: Uuid,
+    /// The trigger's filter, `off` for a disabled schedule, the run node's
+    /// id.
+    pub label: String,
+}
+
+/// The `(collection, cron, enabled)` of each schedule in `list_schedules`'
+/// payload.
+pub fn schedules(payload: &Value) -> Vec<(Uuid, String, bool)> {
+    payload["schedules"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| {
+            Some((
+                s["recipe_id"].as_str()?.parse().ok()?,
+                s["cron_schedule"].as_str()?.to_string(),
+                s["enabled"].as_bool().unwrap_or(true),
+            ))
+        })
+        .collect()
+}
+
+/// Every trigger, schedule and run node, as links into the collection each
+/// starts.
+pub fn map_links(recipes: &[Recipe], schedules: &[(Uuid, String, bool)]) -> Vec<MapLink> {
+    let mut out = Vec::new();
+    for r in recipes {
+        for t in &r.triggers {
+            out.push(MapLink {
+                from: MapSource::Trigger(t.on.clone()),
+                to: r.id,
+                label: when_text(&t.when),
+            });
+        }
+        for n in &r.flow.nodes {
+            if let NodeKind::Run { collection, .. } = n.kind {
+                out.push(MapLink {
+                    from: MapSource::Collection(r.id),
+                    to: collection,
+                    label: n.id.clone(),
+                });
+            }
+        }
+    }
+    out.extend(schedules.iter().map(|(to, cron, on)| MapLink {
+        from: MapSource::Schedule(cron.clone()),
+        to: *to,
+        label: if *on { String::new() } else { "off".into() },
+    }));
+    out
+}
+
+/// Each collection's column: one past the deepest collection that runs it,
+/// loops (a link back to a collection that leads to it) ignored.
+pub fn map_columns(recipes: &[Recipe], links: &[MapLink]) -> HashMap<Uuid, usize> {
+    let mut seen: HashMap<Uuid, Visit> = recipes.iter().map(|r| (r.id, Visit::New)).collect();
+    let mut back = HashSet::new();
+    for r in recipes {
+        if seen[&r.id] == Visit::New {
+            find_loops(r.id, links, &mut seen, &mut back);
+        }
+    }
+    let mut col: HashMap<Uuid, usize> = recipes.iter().map(|r| (r.id, 0)).collect();
+    // Longest path by relaxation; without the loops there is no cycle.
+    for _ in 0..recipes.len() {
+        let mut changed = false;
+        for (i, l) in links.iter().enumerate() {
+            if let MapSource::Collection(from) = l.from
+                && !back.contains(&i)
+                && let (Some(&f), Some(&t)) = (col.get(&from), col.get(&l.to))
+                && t < f + 1
+            {
+                col.insert(l.to, f + 1);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    col
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Visit {
+    New,
+    Open,
+    Done,
+}
+
+/// Depth-first from `id` over hand-offs: a link into a collection still
+/// open (on the path) is a loop.
+fn find_loops(
+    id: Uuid,
+    links: &[MapLink],
+    seen: &mut HashMap<Uuid, Visit>,
+    back: &mut HashSet<usize>,
+) {
+    seen.insert(id, Visit::Open);
+    for (i, l) in links.iter().enumerate() {
+        if l.from != MapSource::Collection(id) {
+            continue;
+        }
+        match seen.get(&l.to) {
+            Some(Visit::Open) => {
+                back.insert(i);
+            }
+            Some(Visit::New) => find_loops(l.to, links, seen, back),
+            Some(Visit::Done) | None => {}
+        }
+    }
+    seen.insert(id, Visit::Done);
+}
+
 // ── variables ──────────────────────────────────────────────────────────
 // The variables tab edits globals and every collection's own variables;
 // a rename (`old` differs from `key`) drops the old name.
@@ -1231,6 +1361,76 @@ mod tests {
         }]);
         run.finished_at = Some(started + chrono::Duration::milliseconds(1420));
         assert_eq!(send_summary(&run, "get"), "completed · 1.4 s");
+    }
+
+    #[test]
+    fn the_map_links_triggers_schedules_and_hand_offs() {
+        let now: chrono::DateTime<chrono::Utc> = "2026-11-13T00:00:00Z".parse().unwrap();
+        let recipe = |n: u128| Recipe {
+            id: Uuid::from_u128(n),
+            name: n.to_string(),
+            description: None,
+            flow: Flow::default(),
+            variables: HashMap::new(),
+            created_at: now,
+            updated_at: now,
+            is_template: false,
+            category: None,
+            triggers: Vec::new(),
+            trail: Default::default(),
+        };
+        let (mut a, mut b, mut c) = (recipe(1), recipe(2), recipe(3));
+        let gone = Uuid::from_u128(4);
+        a.triggers.push(crate::RecipeTrigger {
+            on: "pane.created".into(),
+            when: serde_json::json!({"pane.tab_id": "w1:t1"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        });
+        let run = |to: Uuid| NodeKind::Run {
+            collection: to,
+            inputs: Default::default(),
+        };
+        let at = Point { x: 0.0, y: 0.0 };
+        add_node(&mut a.flow, "run", run(b.id), at, None);
+        add_node(&mut b.flow, "run", run(c.id), at, None);
+        add_node(&mut b.flow, "run", run(gone), at, None);
+        let payload = serde_json::json!({ "schedules": [
+            { "recipe_id": c.id, "cron_schedule": "0 * * * * *", "enabled": false },
+            { "recipe_id": "not a uuid", "cron_schedule": "x" },
+        ]});
+        let sched = schedules(&payload);
+        assert_eq!(sched, vec![(c.id, "0 * * * * *".to_string(), false)]);
+
+        let recipes = vec![a.clone(), b.clone(), c.clone()];
+        let links = map_links(&recipes, &sched);
+        assert_eq!(links.len(), 5);
+        assert!(links.contains(&MapLink {
+            from: MapSource::Trigger("pane.created".into()),
+            to: a.id,
+            label: "pane.tab_id=w1:t1".into(),
+        }));
+        assert!(links.contains(&MapLink {
+            from: MapSource::Schedule("0 * * * * *".into()),
+            to: c.id,
+            label: "off".into(),
+        }));
+        assert!(
+            links
+                .iter()
+                .any(|l| l.to == gone && l.from == MapSource::Collection(b.id))
+        );
+
+        let cols = map_columns(&recipes, &links);
+        assert_eq!((cols[&a.id], cols[&b.id], cols[&c.id]), (0, 1, 2));
+
+        // A loop back to a (or c to itself) changes nothing.
+        add_node(&mut c.flow, "run", run(a.id), at, None);
+        add_node(&mut c.flow, "run", run(c.id), at, None);
+        let recipes = vec![a.clone(), b.clone(), c.clone()];
+        let cols = map_columns(&recipes, &map_links(&recipes, &sched));
+        assert_eq!((cols[&a.id], cols[&b.id], cols[&c.id]), (0, 1, 2));
     }
 
     #[test]
