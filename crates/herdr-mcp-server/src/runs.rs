@@ -227,7 +227,7 @@ pub fn apply(run: &mut RunRecord, event: &RunEvent) {
 
 /// Store a node's result and expose it to later nodes: under the node id,
 /// flattened (`result.*`), and — when it is an agent handle — under its pane
-/// id and role so `{{pane_id.output}}` / `{{role.output}}` resolve.
+/// id and label so `{{pane_id.output}}` / `{{label.output}}` resolve.
 fn record_result(run: &mut RunRecord, step: &str, json: &Value) {
     if json.is_null() {
         return;
@@ -239,10 +239,10 @@ fn record_result(run: &mut RunRecord, step: &str, json: &Value) {
     let payload = tool_payload(json);
     if let Some(pane_id) = payload.get("pane_id").and_then(Value::as_str) {
         run.variables.insert(pane_id.to_string(), payload.clone());
-        if let Some(role) = payload.get("role").and_then(Value::as_str)
-            && !role.is_empty()
+        if let Some(label) = payload.get("label").and_then(Value::as_str)
+            && !label.is_empty()
         {
-            run.variables.insert(role.to_string(), payload.clone());
+            run.variables.insert(label.to_string(), payload.clone());
         }
     }
     run.results.insert(step.to_string(), json.clone());
@@ -576,7 +576,7 @@ fn workspace_for(requested: Option<String>, scope: &HashMap<String, Value>) -> S
 }
 
 /// The scope a run starts with (and `/api/variables/resolve` resolves in),
-/// lowest priority first: live agent handles by pane id / role (every
+/// lowest priority first: live agent handles by pane id / label (every
 /// workspace's, then `ws`'s), `template.session_id` / `template.workspace_id`
 /// = `ws`, globals, the recipe's variables, the request's. Step results and
 /// extracted variables go on top as the run goes.
@@ -2096,10 +2096,10 @@ mod tests {
         assert_eq!(Runs::observe(run, false).status, RunStatus::Completed);
     }
 
-    /// An agent spawned/prompted earlier in a run is addressable by role
+    /// An agent spawned/prompted earlier in a run is addressable by label
     /// and pane id in later steps (`{{writer.output}}`).
     #[test]
-    fn agent_handles_from_steps_resolve_by_role() {
+    fn agent_handles_from_steps_resolve_by_label() {
         let header = RunHeader {
             id: Uuid::new_v4(),
             recipe_id: None,
@@ -2110,7 +2110,7 @@ mod tests {
             seed: HashMap::new(),
             started_at: Utc::now(),
         };
-        let handle = r#"{"pane_id":"w1:p9","role":"writer","output":"draft v1"}"#;
+        let handle = r#"{"pane_id":"w1:p9","label":"writer","output":"draft v1"}"#;
         let event = RunEvent {
             run_id: header.id,
             seq: 1,

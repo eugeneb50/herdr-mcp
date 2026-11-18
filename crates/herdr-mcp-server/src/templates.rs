@@ -89,7 +89,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     id: "start".to_string(),
                     tool: "agent_spawn".to_string(),
                     params: serde_json::json!({
-                        "role": "{{ template.agent }}",
+                        "label": "{{ template.agent }}",
                         "agent": "{{ template.agent }}"
                     }),
                     description: Some("Start a fresh agent (profile or herdr agent kind)".to_string()),
@@ -324,7 +324,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
             variables: vec![
                 TemplateVariable {
                     name: "target".to_string(),
-                    description: "Target agent role or pane id".to_string(),
+                    description: "Target agent label or pane id".to_string(),
                     default_value: None,
                     required: true,
                 },
@@ -371,13 +371,13 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 },
                 TemplateVariable {
                     name: "target_a".to_string(),
-                    description: "First agent role or pane id".to_string(),
+                    description: "First agent label or pane id".to_string(),
                     default_value: None,
                     required: true,
                 },
                 TemplateVariable {
                     name: "target_b".to_string(),
-                    description: "Second agent role or pane id".to_string(),
+                    description: "Second agent label or pane id".to_string(),
                     default_value: None,
                     required: true,
                 },

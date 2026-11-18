@@ -837,7 +837,7 @@ pub(super) async fn list_variables_handler(
 /// `GET /api/variables/auto[?workspace_id=w1]` — variables resolved on
 /// request, never stored: every live herdr pane under its pane id (from
 /// `herdr pane list`), with its agent registry handle's non-empty fields laid
-/// over it (and the merged pane also under the handle's role), then the
+/// over it (and the merged pane also under its label), then the
 /// workspace's `var_set` session variables when one is given.
 pub(super) async fn auto_variables_handler(
     State(AppState { server, .. }): State<AppState>,
@@ -914,10 +914,10 @@ pub(super) fn placeholders(value: &serde_json::Value, out: &mut Vec<String>) {
     }
 }
 
-/// Live panes (by pane id) with the registry handles (by pane id and role,
+/// Live panes (by pane id) with the registry handles (by pane id and label,
 /// from `AgentRegistry::seed`) laid over them, non-empty fields winning.
-/// Handles of panes herdr no longer lists are left out: the registry keeps
-/// them after a pane closes.
+/// Handles of panes herdr no longer lists are left out: the registry drops
+/// a closed pane only on its next pane list.
 pub(super) fn pane_vars(
     mut panes: HashMap<String, serde_json::Value>,
     handles: HashMap<String, serde_json::Value>,
