@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use super::builders::{HttpBuilder, LlmWizard};
+use super::builders::{AgentBuilder, HttpBuilder, LlmWizard};
 use super::canvas::{Canvas, CanvasEdit};
 use super::flow::{NodeEditor, TrailEditor};
 use super::forms::{DynamicForm, ResponseViewer};
@@ -31,6 +31,9 @@ use herdr_mcp_api::{
     RecipeTemplate, ResolveRequest, Retry, Rule, RunAction, RunRecord, StartRunRequest,
     UpdateRecipeRequest, Uuid, VarScope, node_states,
 };
+
+/// Name of the `agent_prompt` tool (the server names it `agent_prompt`).
+const AGENT_PROMPT: &str = "agent_prompt";
 
 /// What the main panel shows.
 #[derive(Clone, PartialEq, Debug)]
@@ -505,6 +508,12 @@ fn CollectionView(
                 }
                 button {
                     class: "btn",
+                    title: "Prompt a live agent by label; start it first if it isn't running",
+                    onclick: move |_| add("agent", tool_kind(AGENT_PROMPT, json!({ "target": "", "agent": "", "text": "" }))),
+                    "+ Agent"
+                }
+                button {
+                    class: "btn",
                     title: "Check rules and take the port of the first that holds",
                     onclick: move |_| add("branch", NodeKind::Branch { rules: vec![Rule { checks: Vec::new(), any: false }] }),
                     "+ Branch"
@@ -913,7 +922,7 @@ fn RequestEditor(
                         }
                     }
                 }
-                if *tool.read() == HTTP_REQUEST || *tool.read() == LLM_CALL {
+                if *tool.read() == HTTP_REQUEST || *tool.read() == LLM_CALL || *tool.read() == AGENT_PROMPT {
                     label { class: "check-row",
                         input {
                             r#type: "checkbox",
@@ -932,6 +941,12 @@ fn RequestEditor(
                 } else if *tool.read() == LLM_CALL && !raw_form() {
                     LlmWizard {
                         key: "{rid}/{node.id}/llm",
+                        values: values.read().clone(),
+                        on_change: move |next| values.set(next),
+                    }
+                } else if *tool.read() == AGENT_PROMPT && !raw_form() {
+                    AgentBuilder {
+                        key: "{rid}/{node.id}/agent",
                         values: values.read().clone(),
                         on_change: move |next| values.set(next),
                     }

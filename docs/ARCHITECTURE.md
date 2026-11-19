@@ -208,7 +208,7 @@ engine, always acts on the server's own session.
 | Tool | Parameters | Description |
 |---|---|---|
 | `agent_spawn` | `agent`, `label?`, `args`, `cwd?`, `workspace_id?`, `tab_id?`, `split?`, `needs`, `wait_idle`, `in_pane?` | Spawn agent (in a new split, or in the existing `in_pane`) under a unique label, or return the live agent with that label; wait for deps, capture output |
-| `agent_prompt` | `target`, `text`, `timeout_ms?` | Prompt an agent and wait for its turn to finish; returns its reply |
+| `agent_prompt` | `target`, `text`, `agent?`, `cwd?`, `timeout_ms?` | Optionally ensure a matching agent is running under the target label, then prompt and wait; returns its reply and `spawned` |
 | `agent_interrupt` | `target`, `hard` | Stop the agent's turn (profile `interrupt` keys) or quit it (`hard`) |
 | `agent_message` | `target`, `text` | Send a message to an agent and submit it |
 | `agent_read` | `target`, `source?`, `lines?` | Read + store as work product |
@@ -408,10 +408,11 @@ Variables use `{{ path }}` syntax with dot/bracket navigation:
 {{ ls }} / {{ ls.text }}             the text a node's tool returned
 {{ run.pass }}                       1, plus one per loop taken
 {{ pane_id.output }} {{ label.output }}
+{{ agents }}                         live agent roster as JSON
 ```
 
 **Scope** (`runs::scope`, lowest priority first): live agent handles by pane
-id and label (every workspace's, then the run's), `template.session_id` /
+id and label (every workspace's, then the run's), the `agents` roster from the live registry, `template.session_id` /
 `template.workspace_id` (the run's workspace), globals (`/api/variables`),
 the recipe's `variables`, the run request's `variables`. Step results and
 extracted variables go on top as the run proceeds. `POST
@@ -457,7 +458,10 @@ in-edges.
       retries after `delay_ms` while `retry.times` lasts (through the ready
       queue, so pause holds it), then fires `error` if it has an edge, else
       fails the run. Success records the result (node_finished) under the
-      node id and applies extract rules (variable_set)
+      node id and applies extract rules (variable_set). `agent_prompt`,
+      `agent_spawn` and `agent_wait` can fire `blocked`: when wired, the
+      result is recorded without extracts; otherwise the node fails without
+      retry and takes `error` if wired, or fails the run
    c. branch: `decide` checks its rules (branched, with every check's
       found value) and fires the first that holds, else `else`
    d. wait sleeps; fail fails the run; run starts a child run (below)

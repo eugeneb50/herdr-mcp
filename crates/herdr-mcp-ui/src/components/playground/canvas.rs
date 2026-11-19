@@ -409,7 +409,7 @@ pub fn Canvas(
                                                         }
                                                     }
                                                     circle {
-                                                        class: if port == Port::Error { "port port-out port-error" } else { "port port-out" },
+                                                        class: if port == Port::Error { "port port-out port-error" } else if port == Port::Blocked { "port port-out port-blocked" } else { "port port-out" },
                                                         cx: "{q.x}",
                                                         cy: "{q.y}",
                                                         r: "6",

@@ -12,6 +12,7 @@ use herdr_mcp_api::playground::{
     BodyMode, CUSTOM_PROVIDER, HTTP_METHODS, KeyMode, PROVIDERS, json_body_error, kv_json, kv_rows,
     load_models, model_choices, pick_provider, provider_of, with_value as with,
 };
+use herdr_mcp_api::{AgentHandle, AgentProfile};
 
 // Hints shown in inputs (constants: rsx would read `{{ }}` in a literal as
 // an escaped brace).
@@ -450,6 +451,139 @@ pub fn LlmWizard(
             }
             p { class: "field-desc",
                 "{model} via {provider.name}. Send to try it; later requests read the reply as {{{{this-request.text}}}}."
+            }
+        }
+    }
+}
+
+/// The `agent_prompt` builder: prompt a live agent by label (start it first if
+/// it isn't running).
+#[component]
+pub fn AgentBuilder(
+    values: HashMap<String, String>,
+    on_change: EventHandler<HashMap<String, String>>,
+) -> Element {
+    let client = use_api();
+
+    let target = values.get("target").cloned().unwrap_or_default();
+    let agent = values.get("agent").cloned().unwrap_or_default();
+    let text = values.get("text").cloned().unwrap_or_default();
+    let timeout_ms = values.get("timeout_ms").cloned().unwrap_or_default();
+
+    let v = values.clone();
+    let set = move |key: &'static str, raw: String| on_change.call(with(&v, key, raw));
+
+    // Load live agents + profiles once per component lifetime. Aggressive
+    // failure tolerance: an offline bridge must not break the builder.
+    let loaded = use_resource(move || {
+        let client = client();
+        async move {
+            let agents: Vec<AgentHandle> = client.list_agents(None).await?;
+            let profiles: Vec<AgentProfile> = client.list_profiles().await?;
+            Ok::<(Vec<AgentHandle>, Vec<AgentProfile>), herdr_mcp_api::ApiError>((agents, profiles))
+        }
+    });
+
+    let (agents, profiles) = match &*loaded.read() {
+        Some(Ok((a, p))) => (a.clone(), p.clone()),
+        _ => (Vec::new(), Vec::new()),
+    };
+
+    // A live label's agent name, for auto-filling the Agent field.
+    let live_agent = agents
+        .iter()
+        .find(|a| a.label == target || a.pane_id == target)
+        .map(|a| a.agent.clone())
+        .unwrap_or_default();
+
+    let labels: Vec<String> = agents.iter().map(|a| a.label.clone()).collect();
+    let profile_ids: Vec<String> = profiles.iter().map(|p| p.id.clone()).collect();
+
+    rsx! {
+        div { class: "form-block",
+            div { class: "form-label", "Label" }
+            datalist {
+                id: "agent-labels",
+                for l in &labels {
+                    option { value: "{l}" }
+                }
+            }
+            input {
+                class: "input mono",
+                r#type: "text",
+                list: "agent-labels",
+                placeholder: "label of a live agent (e.g. claude)",
+                value: "{target}",
+                title: "Prompt a live agent by label; start it first if it isn't running",
+                oninput: {
+                    move |e: Event<FormData>| {
+                        let t = e.value();
+                        // A live label brings its agent; any other keeps the picked profile.
+                        let next = with(&values, "target", t.clone());
+                        match agents.iter().find(|ag| ag.label == t) {
+                            Some(ag) => on_change.call(with(&next, "agent", ag.agent.clone())),
+                            None => on_change.call(next),
+                        }
+                    }
+                },
+            }
+            p { class: "field-desc",
+                "Label shown in the pane list. The pane's agent is filled in below once you pick a label."
+            }
+        }
+        div { class: "form-block",
+            div { class: "form-label", "Agent" }
+            select {
+                class: "input mono",
+                onchange: {
+                    let set = set.clone();
+                    move |e: Event<FormData>| set("agent", e.value())
+                },
+                option { value: "", selected: agent.is_empty(), "none — must already be running" }
+                for id in &profile_ids {
+                    option { key: "{id}", value: "{id}", selected: agent == *id, "{id}" }
+                }
+            }
+            p { class: "field-desc",
+                "Start this profile under the label when no live pane has it; none: the agent must already be running."
+            }
+        }
+        div { class: "form-block",
+            div { class: "form-label", "Prompt" }
+            textarea {
+                class: "input textarea",
+                rows: "4",
+                placeholder: "Say something to {{other.output}}",
+                value: "{text}",
+                oninput: {
+                    let set = set.clone();
+                    move |e: Event<FormData>| set("text", e.value())
+                },
+            }
+            p { class: "field-desc", "Prompt text. {{other.output}} and other extract rules resolve on send." }
+        }
+        div { class: "form-row",
+            div { class: "form-col",
+                label { class: "form-label", "Timeout (ms)" }
+                input {
+                    class: "input",
+                    r#type: "number",
+                    placeholder: "server default",
+                    value: "{timeout_ms}",
+                    oninput: {
+                        let set = set.clone();
+                        move |e: Event<FormData>| set("timeout_ms", e.value())
+                    },
+                }
+            }
+        }
+        if live_agent.is_empty() && !target.is_empty() {
+            p { class: "muted field-desc",
+                "No live agent with label {target}. Pick an Agent profile to spawn it first, or target a running pane by label."
+            }
+        } else if !live_agent.is_empty() {
+            p { class: "muted field-desc",
+                "Label {target} runs agent {live_agent}."
             }
         }
     }

@@ -36,7 +36,8 @@ one (`data_dir` in `~/.config/herdr-mcp/config.toml`).
   `agent_spawn` with a label already on a live pane returns that agent
   (`reused: true`) when it runs the same agent, and refuses otherwise, so
   re-running a flow reuses its agents instead of piling up panes.
-- `agent_spawn` and `agent_prompt` can come back `blocked`: the agent is
+- `agent_prompt` accepts optional `agent` and `cwd`: it reuses a live target with the same profile, or starts it under that label and waits for readiness; `spawned` says whether it created a pane. A different agent under that label is an error.
+- `agent_spawn`, `agent_prompt`, and `agent_wait` can come back `blocked`: the agent is
   waiting on a trust prompt, approval or question (its screen is the
   `output`). Show it to the user; don't answer it yourself.
 - `list_panes` shows each pane's agent and its status (`idle`, `working`,
@@ -115,6 +116,8 @@ An edge is `{"from": "a", "port": "error", "to": "b"}`; `port` defaults to
 - An edge back to a node upstream is a loop: taking it runs that part of
   the flow again and adds one to `run.pass`. `max_steps` (default 1000)
   caps the node runs one run may make, retries and loop passes counted.
+- Agent tool nodes (`agent_prompt`, `agent_spawn`, `agent_wait`) have a `blocked` port. A wired port receives the result without extracts; if unwired, the node fails without retry, taking `error` if wired or failing the run.
+- `{{ agents }}` resolves at run start to the live agent roster (label, agent, status, pane_id), as JSON in prompt text.
 - `retry` tries a failing tool again; after the last attempt the `error`
   port fires (or the run fails). `timeout_ms` fails an attempt that takes
   longer.
@@ -152,6 +155,24 @@ Poll a pane until the agent says done, give up after ten passes:
 Port `1` has no edge, so DONE ends the run `completed`. The web UI draws
 and edits the same flow on a canvas and keeps each node's `at` position;
 leave `at` out and it lays the nodes out.
+
+### Bundled templates
+
+Three recipes ship under the `agents` category and are available through
+`list_templates` / `instantiate_template` (or the web playground's template
+picker):
+
+- **agent-fanout-review** — one task to three reviewers in parallel, then a
+  summariser joins their outputs.
+- **agent-relay** — a writer drafts an answer, then a reviewer revises it
+  (`{{ writer.output }}`).
+- **agent-supervisor-loop** — a worker revises until its output contains
+  `TASK_COMPLETE`; the flow loops back on `else` until it does.
+
+They are flows, not steps: `agent-fanout-review` fans out on three parallel
+edges and joins at the summariser, `agent-supervisor-loop` loops back on its
+`else` port. Instantiate one with its variables and run it like any recipe
+(`recipe_run`), or pick it from the template picker in the web UI.
 
 When a run fails, `run_get` with `trail: true` returns its trail as text:
 each node's params as sent, unresolved placeholders, results, retries,

@@ -351,6 +351,7 @@ select.input { appearance: auto; }
 .port-out { cursor: crosshair; }
 .port-out:hover { fill: var(--accent); stroke: var(--accent); }
 .port-error { stroke: #fda4af; }
+.port-blocked { stroke: #fbbf24; }
 .edge { fill: none; stroke: #525252; stroke-width: 2; pointer-events: none; }
 .edge-loop { stroke-dasharray: 6 4; }
 .edge-error { stroke: rgba(244, 63, 94, 0.55); }

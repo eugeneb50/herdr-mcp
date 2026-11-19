@@ -23,6 +23,9 @@ pub const DEFAULT_MAX_STEPS: u32 = 1000;
 /// The start node's id in a flow built by [`Flow::chain`].
 pub const START: &str = "start";
 
+/// Tools that can route a blocked agent to a dedicated port.
+pub const AGENT_TOOLS: [&str; 3] = ["agent_prompt", "agent_spawn", "agent_wait"];
+
 fn default_max_steps() -> u32 {
     DEFAULT_MAX_STEPS
 }
@@ -71,7 +74,7 @@ pub enum NodeKind {
     Start,
     /// Call a herdr-mcp tool. Ports `out`, and `error`: with an edge on
     /// `error`, a failure (after the retries) takes it instead of failing
-    /// the run.
+    /// the run. Agent tools also have a `blocked` port.
     Tool {
         tool: String,
         /// The tool's arguments; strings may hold `{{ ... }}` placeholders.
@@ -133,13 +136,14 @@ pub struct Edge {
 }
 
 /// An output of a node: `out`, `error`, a branch rule's number (`1`, …) or
-/// `else`.
+/// `else`, or an agent tool's `blocked` port.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub enum Port {
     #[default]
     Out,
     Error,
+    Blocked,
     /// A branch rule, from 1.
     Rule(usize),
     Else,
@@ -153,7 +157,7 @@ impl schemars::JsonSchema for Port {
     fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
         schemars::json_schema!({
             "type": "string",
-            "description": "`out` (default), `error`, a branch rule's number (`1`, …) or `else`",
+            "description": "`out` (default), `error`, `blocked`, a branch rule's number (`1`, …) or `else`",
         })
     }
 }
@@ -169,6 +173,7 @@ impl std::fmt::Display for Port {
         match self {
             Self::Out => f.write_str("out"),
             Self::Error => f.write_str("error"),
+            Self::Blocked => f.write_str("blocked"),
             Self::Rule(n) => write!(f, "{n}"),
             Self::Else => f.write_str("else"),
         }
@@ -188,10 +193,13 @@ impl TryFrom<String> for Port {
         match s.as_str() {
             "out" | "" => Ok(Self::Out),
             "error" => Ok(Self::Error),
+            "blocked" => Ok(Self::Blocked),
             "else" => Ok(Self::Else),
             n => match n.parse() {
                 Ok(n) if n > 0 => Ok(Self::Rule(n)),
-                _ => Err(format!("`{s}` is not a port (out, error, 1…, else)")),
+                _ => Err(format!(
+                    "`{s}` is not a port (out, error, blocked, 1…, else)"
+                )),
             },
         }
     }
@@ -202,6 +210,9 @@ impl NodeKind {
     pub fn ports(&self) -> Vec<Port> {
         match self {
             Self::Start | Self::Wait { .. } => vec![Port::Out],
+            Self::Tool { tool, .. } if AGENT_TOOLS.contains(&tool.as_str()) => {
+                vec![Port::Out, Port::Error, Port::Blocked]
+            }
             Self::Tool { .. } | Self::Run { .. } => vec![Port::Out, Port::Error],
             Self::Branch { rules } => (1..=rules.len())
                 .map(Port::Rule)
@@ -823,6 +834,23 @@ mod tests {
         assert!(
             serde_json::from_value::<Edge>(json!({"from": "a", "port": "0", "to": "b"})).is_err()
         );
+    }
+
+    #[test]
+    fn blocked_port_only_valid_for_agent_tools() {
+        for tool in AGENT_TOOLS.into_iter().chain(["list_panes"]) {
+            let f = flow(json!({"nodes": [
+                {"id":"start", "type":"start"},
+                {"id":"agent", "type":"tool", "tool":tool},
+                {"id":"end", "type":"wait", "ms":1}
+            ], "edges": [{"from":"start", "to":"agent"},
+                         {"from":"agent", "port":"blocked", "to":"end"}]}));
+            assert_eq!(f.problems().is_empty(), tool != "list_panes");
+            assert_eq!(
+                serde_json::to_value(&f).unwrap()["edges"][1]["port"],
+                "blocked"
+            );
+        }
     }
 
     #[test]

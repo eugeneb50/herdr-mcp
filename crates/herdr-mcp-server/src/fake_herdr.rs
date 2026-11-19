@@ -102,6 +102,10 @@ case "$1 $2" in
   n=$(grep -c '^pane split' "{log}")
   echo "{{\"result\":{{\"pane\":{{\"pane_id\":\"w1:p$((n + 1))\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t2\"}}}}}}" ;;
 "pane list") if [ -f "{panes}" ]; then cat "{panes}"; else echo '{{"result":{{"panes":[]}}}}'; fi ;;
+"agent start") echo '{{"result":{{}}}}' ;;
+"agent wait") echo '{{"result":{{"agent":{{"agent_status":"idle"}}}}}}' ;;
+"agent prompt") if [ "$4" = "block" ]; then echo '{{"result":{{"agent":{{"agent_status":"blocked"}}}}}}'; else echo '{{"result":{{"agent":{{"agent_status":"idle"}}}}}}'; fi ;;
+"pane read") echo 'approval required' ;;
 "pane rename") echo '{{"result":{{}}}}' ;;
 *) echo "fake herdr: no $*" >&2; exit 1 ;;
 esac
@@ -292,6 +296,62 @@ mod tests {
     /// A label names one agent: spawning it again returns the live pane,
     /// another agent under it is refused, and targets resolve from herdr's
     /// live pane list (a closed pane is not there to match).
+    #[tokio::test]
+    async fn prompt_ensure_reuses_or_spawns_and_roster_is_live() {
+        use crate::security::Origin;
+        use crate::server::dispatch_tool;
+        let herdr = FakeHerdr::start().await;
+        let data = tempfile::tempdir().unwrap();
+        let store = crate::Persistence::new(data.path().to_path_buf());
+        store.init().await.unwrap();
+        let server = crate::HerdrMcpServer::new(store, crate::AgentRegistry::new());
+        herdr.set_panes(json!([
+            {"pane_id":"w1:p1", "workspace_id":"w1", "tab_id":"w1:t1", "agent":"claude", "agent_status":"idle", "label":"rev"}
+        ]));
+        server
+            .registry
+            .upsert("w1:p1", "w1", "w1:t1", "claude", "rev")
+            .await;
+        server.registry.set_status("w1:p1", "idle").await;
+        let scope = crate::runs::scope(&server, "w1", Default::default(), Default::default()).await;
+        assert_eq!(
+            scope["agents"],
+            json!([{"label":"rev","agent":"claude","status":"idle","pane_id":"w1:p1"}])
+        );
+        let mut prompt = json!("peers: {{ agents }}");
+        crate::server::resolve_variables(&mut prompt, &scope);
+        assert!(prompt.as_str().unwrap().contains("\"label\":\"rev\""));
+        let call = |args| dispatch_tool(&server, "agent_prompt", args, Origin::Api);
+        let result = call(json!({"target":"rev", "agent":"claude", "text":"hello"}))
+            .await
+            .unwrap();
+        let payload = herdr_mcp_api::tool_payload(&serde_json::to_value(result).unwrap()).unwrap();
+        assert_eq!(payload["spawned"], false);
+        assert_eq!(payload["pane_id"], "w1:p1");
+        let (_, error) = call(json!({"target":"rev", "agent":"codex", "text":"hello"}))
+            .await
+            .unwrap_err();
+        assert!(error.contains("label `rev` is already pane"), "{error}");
+        let result = call(json!({"target":"new", "agent":"claude", "cwd":"/tmp", "text":"hello"}))
+            .await
+            .unwrap();
+        let payload = herdr_mcp_api::tool_payload(&serde_json::to_value(result).unwrap()).unwrap();
+        assert_eq!(payload["spawned"], true);
+        assert_eq!(payload["label"], "new");
+        assert!(
+            herdr
+                .calls()
+                .iter()
+                .any(|c| c.starts_with("agent start new --kind claude"))
+        );
+        assert!(
+            herdr
+                .calls()
+                .iter()
+                .any(|c| c.starts_with("pane split") && c.contains("/tmp"))
+        );
+    }
+
     #[tokio::test]
     async fn labels_name_one_live_agent() {
         use crate::security::Origin;
