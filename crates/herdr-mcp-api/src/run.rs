@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::{CheckResult, Gate, GateAction, RecipeStep, VarScope};
+use crate::{CheckResult, Flow, Port, RecipeStep, VarScope};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,31 +55,28 @@ pub struct RunRecord {
     pub name: Option<String>,
     /// herdr workspace the run is scoped to.
     pub session_id: String,
-    /// Snapshot of the steps as they were when the run started.
-    pub steps: Vec<RecipeStep>,
+    /// Snapshot of the flow as it was when the run started.
+    pub flow: Flow,
     pub origin: RunOrigin,
-    /// Snapshot of the recipe's gate; `None` when it has none or the run
-    /// sent only some of its steps.
-    pub gate: Option<Gate>,
-    /// Which pass through the steps this is, from 1; a gate restart adds one.
-    /// Also in `variables` as `run.pass`.
+    /// Which pass this is, from 1; each loop taken adds one. Also in
+    /// `variables` as `run.pass`.
     pub pass: u32,
     pub status: RunStatus,
-    /// Step being executed (or paused before) right now.
-    pub current_step: Option<String>,
-    /// Per-step tool results (or `{error, statusCode}`), keyed by step id.
+    /// Nodes running right now.
+    pub active: Vec<String>,
+    /// Per-node results (or `{error, statusCode}`), keyed by node id.
     pub results: HashMap<String, Value>,
     /// Interpolation scope at the end of the run.
     pub variables: HashMap<String, Value>,
-    pub failed_step: Option<String>,
+    pub failed_node: Option<String>,
     pub error: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
 }
 
 impl RunRecord {
-    /// The runs among `runs` this one started (its gate's hand-off,
-    /// `recipe_run` steps), in `runs`' order.
+    /// The runs among `runs` this one started (its `run` nodes,
+    /// `recipe_run` calls), in `runs`' order.
     pub fn children<'a>(&self, runs: &'a [RunRecord]) -> impl Iterator<Item = &'a RunRecord> {
         let id = self.id;
         runs.iter().filter(move |r| r.origin.parent() == Some(id))
@@ -96,8 +93,8 @@ impl RunRecord {
     pub fn pane(&self, events: &[RunEvent]) -> Option<String> {
         let from_events = events.iter().rev().find_map(|e| match &e.kind {
             RunEventKind::PaneSnapshot { pane, .. } => Some(pane.clone()),
-            RunEventKind::StepStarted { pane, .. } => pane.clone(),
-            RunEventKind::StepFinished { result, .. } => crate::tool_payload(result)?
+            RunEventKind::NodeStarted { pane, .. } => pane.clone(),
+            RunEventKind::NodeFinished { result, .. } => crate::tool_payload(result)?
                 .get("pane_id")?
                 .as_str()
                 .map(str::to_string),
@@ -110,11 +107,11 @@ impl RunRecord {
     }
 
     /// A request that runs this again: the same saved collection (its
-    /// current requests) or the same ad-hoc steps, in the same workspace.
+    /// current flow) or the same ad-hoc flow, in the same workspace.
     pub fn rerun(&self) -> StartRunRequest {
         StartRunRequest {
             recipe_id: self.recipe_id,
-            steps: self.recipe_id.is_none().then(|| self.steps.clone()),
+            flow: self.recipe_id.is_none().then(|| self.flow.clone()),
             name: self.name.clone(),
             session_id: Some(self.session_id.clone()),
             ..Default::default()
@@ -146,15 +143,16 @@ pub enum RunOrigin {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane_id: Option<String>,
     },
-    /// A step of run `run_id` (`recipe_run`); none when the step's run is
-    /// unknown.
+    /// A `recipe_run` call by a node of run `run_id`; none when that run
+    /// is unknown.
     Run {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<Uuid>,
     },
-    /// The gate of run `run_id` handed off to this collection (`run`).
-    Gate {
+    /// Node `node` (a `run` node) of run `run_id`.
+    Node {
         run_id: Uuid,
+        node: String,
     },
     Schedule,
     /// A herdr event matched one of the recipe's triggers.
@@ -164,11 +162,11 @@ pub enum RunOrigin {
 }
 
 impl RunOrigin {
-    /// The run that started this one: whose gate handed off to it, or whose
-    /// step called `recipe_run`.
+    /// The run that started this one: by a `run` node, or a node calling
+    /// `recipe_run`.
     pub fn parent(&self) -> Option<Uuid> {
         match self {
-            Self::Gate { run_id } => Some(*run_id),
+            Self::Node { run_id, .. } => Some(*run_id),
             Self::Run { run_id } => *run_id,
             _ => None,
         }
@@ -181,21 +179,24 @@ impl std::fmt::Display for RunOrigin {
             Self::Api => f.write_str("the web UI, TUI or API"),
             Self::Agent { pane_id: Some(p) } => write!(f, "an agent in pane {p}"),
             Self::Agent { pane_id: None } => f.write_str("an agent"),
-            Self::Run { run_id: Some(id) } => write!(f, "a step of run {id}"),
+            Self::Run { run_id: Some(id) } => write!(f, "a node of run {id}"),
             Self::Run { run_id: None } => f.write_str("another run"),
-            Self::Gate { run_id } => write!(f, "the gate of run {run_id}"),
+            Self::Node { run_id, node } => write!(f, "node {node} of run {run_id}"),
             Self::Schedule => f.write_str("a schedule"),
             Self::Trigger { event } => write!(f, "herdr event {event}"),
         }
     }
 }
 
-/// `POST /api/runs` body: a saved recipe (`recipe_id`) or ad-hoc `steps`.
+/// `POST /api/runs` body: a saved recipe (`recipe_id`), an ad-hoc `flow`,
+/// or ad-hoc `steps` run one after another.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StartRunRequest {
     #[serde(default)]
     pub recipe_id: Option<Uuid>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flow: Option<Flow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steps: Option<Vec<RecipeStep>>,
     #[serde(default)]
     pub name: Option<String>,
@@ -206,10 +207,10 @@ pub struct StartRunRequest {
     /// (a plugin invocation or trigger passes `herdr` = its context).
     #[serde(default)]
     pub variables: HashMap<String, Value>,
-    /// Run only these steps of the recipe, in recipe order (sending one
-    /// request of a collection); empty runs them all.
+    /// Run only these tool nodes, one after another in flow order (sending
+    /// one request of a collection); empty runs the whole flow.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub step_ids: Vec<String>,
+    pub node_ids: Vec<String>,
 }
 
 /// `pause` / `resume` / `cancel` for `POST /api/runs/{id}/{action}`.
@@ -261,66 +262,92 @@ pub enum RunEventKind {
     Status {
         status: RunStatus,
     },
-    /// `params` are the step's as sent: placeholders filled in, secrets
+    /// `params` are the node's as sent: placeholders filled in, secrets
     /// redacted. `unresolved` lists the `{{ }}` left in them; `pane` is
-    /// the pane the step targets.
-    StepStarted {
-        step: String,
+    /// the pane it targets; `attempt` counts retries from 1.
+    NodeStarted {
+        node: String,
         #[serde(default, skip_serializing_if = "Value::is_null")]
         params: Value,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         unresolved: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane: Option<String>,
+        #[serde(default = "first", skip_serializing_if = "is_first")]
+        attempt: u32,
     },
-    /// The step's tool result (a serialized `CallToolResult`).
-    StepFinished {
-        step: String,
+    /// The node's result (a tool's serialized `CallToolResult`, a child
+    /// run's outcome) and the port it fired.
+    NodeFinished {
+        node: String,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
         result: Value,
+        #[serde(default, skip_serializing_if = "Port::is_out")]
+        port: Port,
     },
-    StepFailed {
-        step: String,
+    /// The attempt failed. With `retry_in_ms` another attempt follows; else
+    /// the node is done: its `error` port fires, or the run fails.
+    NodeFailed {
+        node: String,
         error: String,
         status_code: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_in_ms: Option<u64>,
     },
-    StepCancelled {
-        step: String,
+    NodeCancelled {
+        node: String,
     },
-    /// The gate after the last step: the rule that matched (none: the
-    /// run completes) and every check it evaluated on the way.
-    GateDecided {
-        rule: Option<usize>,
-        action: Option<GateAction>,
+    /// The node will not run this pass: every path into it was ruled out.
+    NodeSkipped {
+        node: String,
+    },
+    /// A branch took `port`; `checks` is every check it tried on the way.
+    Branched {
+        node: String,
+        port: Port,
         checks: Vec<CheckResult>,
     },
-    /// The gate's `run` started run `child` of `collection` (`name`); this
-    /// run ends as that one ends. Its trail is its own run's.
+    /// `from` took an edge back to `to`: pass `pass` starts there.
+    Looped {
+        from: String,
+        to: String,
+        pass: u32,
+    },
+    /// Run node `node` started run `child` of `collection` (`name`).
     ChildStarted {
+        node: String,
         child: Uuid,
         collection: Uuid,
         name: String,
     },
     /// The last lines of `pane` (as many as the trail's `snapshot_lines`)
-    /// when the run failed (`step`: the failed step; none for a gate
-    /// failure).
+    /// when the run failed (`node`: the node that failed it).
     PaneSnapshot {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        step: Option<String>,
+        node: Option<String>,
         pane: String,
         text: String,
     },
-    /// The run stops with `error` and no failed step: a gate `fail` rule, or
-    /// the gate's `max_steps` ran out.
+    /// The run stops with `error`: a `fail` node, `max_steps` ran out, a
+    /// child that could not start.
     Error {
         error: String,
     },
-    /// An [`Extract`](crate::Extract) of `step` saved `var`.
+    /// An [`Extract`](crate::Extract) of `node` saved `var`.
     VariableSet {
-        step: String,
+        node: String,
         var: String,
         scope: VarScope,
         value: Value,
     },
+}
+
+fn first() -> u32 {
+    1
+}
+
+fn is_first(n: &u32) -> bool {
+    *n == 1
 }
 
 impl RunEventKind {
@@ -330,10 +357,47 @@ impl RunEventKind {
     }
 }
 
+/// Where a node got to in a run, for drawing it: the last thing that
+/// happened to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeState {
+    Running,
+    /// Finished and fired its port.
+    Done(Port),
+    /// Failed for good (no retry left).
+    Failed,
+    Skipped,
+    Cancelled,
+}
+
+/// Each node's [`NodeState`] after `events`; nodes nothing happened to are
+/// absent. A loop clears the states of the pass before only as its nodes
+/// run again.
+pub fn node_states(events: &[RunEvent]) -> HashMap<String, NodeState> {
+    let mut out = HashMap::new();
+    for e in events {
+        let (node, state) = match &e.kind {
+            RunEventKind::NodeStarted { node, .. } => (node, NodeState::Running),
+            RunEventKind::NodeFinished { node, port, .. } => (node, NodeState::Done(*port)),
+            RunEventKind::NodeFailed {
+                node,
+                retry_in_ms: None,
+                ..
+            } => (node, NodeState::Failed),
+            RunEventKind::NodeSkipped { node } => (node, NodeState::Skipped),
+            RunEventKind::NodeCancelled { node } => (node, NodeState::Cancelled),
+            RunEventKind::Branched { node, port, .. } => (node, NodeState::Done(*port)),
+            _ => continue,
+        };
+        out.insert(node.clone(), state);
+    }
+    out
+}
+
 /// A run as plain text for troubleshooting, one line per event with its
-/// time from the start: what each step sent and got, the variables it set,
-/// why the gate chose its rule, errors and pane snapshots. What `run_get
-/// trail` returns and the playgrounds copy.
+/// time from the start: what each node sent and got, the variables it set,
+/// why each branch took its port, loops, errors and pane snapshots. What
+/// `run_get trail` returns and the playgrounds copy.
 pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -355,21 +419,10 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
         run.origin,
         run.pass
     );
-    // A `run` action names its collection as the child run it started did.
-    let collections: Vec<(Uuid, String)> = events
-        .iter()
-        .filter_map(|e| match &e.kind {
-            RunEventKind::ChildStarted {
-                collection, name, ..
-            } => Some((*collection, name.clone())),
-            _ => None,
-        })
-        .collect();
-    let tool = |step: &str| {
-        run.steps
-            .iter()
-            .find(|s| s.id == step)
-            .map_or("?", |s| s.tool.as_str())
+    let what = |node: &str| {
+        run.flow
+            .node(node)
+            .map_or("?", |n| n.tool_name().unwrap_or(n.kind.name()))
     };
     for event in events {
         let at = format!("+{}", seconds(event.at - run.started_at));
@@ -384,18 +437,28 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
                 RunStatus::Running if event.seq == 0 => {}
                 s => line(&mut out, "■", s.as_str()),
             },
-            RunEventKind::StepStarted {
-                step,
+            RunEventKind::NodeStarted {
+                node,
                 params,
                 unresolved,
                 pane,
+                attempt,
             } => {
                 let sent = if params.is_null() {
                     String::new()
                 } else {
                     format!(" {}", clip(&params.to_string(), 300))
                 };
-                line(&mut out, "▶", &format!("{step} · {}{sent}", tool(step)));
+                let attempt = if *attempt > 1 {
+                    format!(" (attempt {attempt})")
+                } else {
+                    String::new()
+                };
+                line(
+                    &mut out,
+                    "▶",
+                    &format!("{node} · {}{attempt}{sent}", what(node)),
+                );
                 if let Some(pane) = pane {
                     more(&mut out, &format!("pane {pane}"));
                 }
@@ -403,7 +466,7 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
                     more(&mut out, &format!("unresolved: {}", unresolved.join(", ")));
                 }
             }
-            RunEventKind::StepFinished { step, result } => {
+            RunEventKind::NodeFinished { node, result, port } => {
                 let mark = if crate::tool_is_error(result) {
                     "✘"
                 } else {
@@ -411,22 +474,40 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
                 };
                 let text = crate::tool_text(result);
                 let first = text.lines().next().unwrap_or_default();
-                line(&mut out, mark, &format!("{step} · {}", clip(first, 200)));
+                let port = if port.is_out() {
+                    String::new()
+                } else {
+                    format!(" → {port}")
+                };
+                line(
+                    &mut out,
+                    mark,
+                    &format!("{node}{port} · {}", clip(first, 200)),
+                );
             }
-            RunEventKind::StepFailed {
-                step,
+            RunEventKind::NodeFailed {
+                node,
                 error,
                 status_code,
-            } => line(
-                &mut out,
-                "✘",
-                &format!("{step} failed ({status_code}): {error}"),
-            ),
-            RunEventKind::StepCancelled { step } => {
-                line(&mut out, "■", &format!("{step} cancelled"));
+                retry_in_ms,
+            } => {
+                let retry = retry_in_ms
+                    .map(|ms| format!(" · retrying in {ms}ms"))
+                    .unwrap_or_default();
+                line(
+                    &mut out,
+                    "✘",
+                    &format!("{node} failed ({status_code}): {error}{retry}"),
+                );
+            }
+            RunEventKind::NodeCancelled { node } => {
+                line(&mut out, "■", &format!("{node} cancelled"));
+            }
+            RunEventKind::NodeSkipped { node } => {
+                line(&mut out, "·", &format!("{node} skipped"));
             }
             RunEventKind::VariableSet {
-                step,
+                node,
                 var,
                 scope,
                 value,
@@ -434,7 +515,7 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
                 &mut out,
                 "=",
                 &format!(
-                    "{step} set {var} ({}) = {}",
+                    "{node} set {var} ({}) = {}",
                     match scope {
                         VarScope::Global => "global",
                         VarScope::Collection => "collection",
@@ -442,19 +523,8 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
                     clip(&value.to_string(), 200)
                 ),
             ),
-            RunEventKind::GateDecided {
-                rule,
-                action,
-                checks,
-            } => {
-                let decided = match (rule, action) {
-                    (Some(rule), Some(action)) => {
-                        let action = crate::gate::action_text(action, &collections);
-                        format!("rule {} → {action}", rule + 1)
-                    }
-                    _ => "no rule matched → end".to_string(),
-                };
-                line(&mut out, "◆", &format!("gate: {decided}"));
+            RunEventKind::Branched { node, port, checks } => {
+                line(&mut out, "◆", &format!("{node} → {port}"));
                 for c in checks {
                     let found = c
                         .found
@@ -469,7 +539,7 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
                         &mut out,
                         &format!(
                             "rule {}: {} {}{expected} — found {found} {}",
-                            c.rule + 1,
+                            c.rule,
                             c.path,
                             c.op.name(),
                             if c.held { "✔" } else { "✘" }
@@ -477,12 +547,17 @@ pub fn trail_text(run: &RunRecord, events: &[RunEvent]) -> String {
                     );
                 }
             }
-            RunEventKind::Error { error } => line(&mut out, "✘", error),
-            RunEventKind::ChildStarted { child, name, .. } => {
-                line(&mut out, "⇢", &format!("{name} · run {child}"));
+            RunEventKind::Looped { from, to, pass } => {
+                line(&mut out, "↺", &format!("{from} → {to} · pass {pass}"));
             }
-            RunEventKind::PaneSnapshot { step, pane, text } => {
-                let of = step
+            RunEventKind::Error { error } => line(&mut out, "✘", error),
+            RunEventKind::ChildStarted {
+                node, child, name, ..
+            } => {
+                line(&mut out, "⇢", &format!("{node} · {name} · run {child}"));
+            }
+            RunEventKind::PaneSnapshot { node, pane, text } => {
+                let of = node
                     .as_deref()
                     .map(|s| format!(" after {s}"))
                     .unwrap_or_default();
@@ -533,9 +608,9 @@ mod tests {
         let run = |n: u128, origin: Value| -> RunRecord {
             serde_json::from_value(json!({
                 "id": Uuid::from_u128(n), "recipe_id": null, "name": null, "session_id": "w1",
-                "steps": [], "origin": origin, "gate": null, "pass": 1,
-                "status": "completed", "current_step": null, "results": {}, "variables": {},
-                "failed_step": null, "error": null,
+                "flow": { "nodes": [] }, "origin": origin, "pass": 1,
+                "status": "completed", "active": [], "results": {}, "variables": {},
+                "failed_node": null, "error": null,
                 "started_at": "2026-10-25T00:00:00Z", "finished_at": null
             }))
             .unwrap()
@@ -543,7 +618,10 @@ mod tests {
         let parent = Uuid::from_u128(1);
         let runs = [
             run(1, json!({ "kind": "api" })),
-            run(2, json!({ "kind": "gate", "run_id": parent })),
+            run(
+                2,
+                json!({ "kind": "node", "run_id": parent, "node": "next" }),
+            ),
             run(3, json!({ "kind": "api" })),
             run(4, json!({ "kind": "run", "run_id": parent })),
         ];
@@ -562,30 +640,31 @@ mod tests {
             RunEventKind::Status {
                 status: RunStatus::Paused,
             },
-            RunEventKind::StepStarted {
-                step: "s".into(),
+            RunEventKind::NodeStarted {
+                node: "s".into(),
                 params: json!({"text": "hi"}),
                 unresolved: vec!["{{x}}".into()],
                 pane: Some("p1".into()),
+                attempt: 2,
             },
-            RunEventKind::StepFinished {
-                step: "s".into(),
+            RunEventKind::NodeFinished {
+                node: "s".into(),
                 result: json!({"ok": true}),
+                port: Port::Error,
             },
-            RunEventKind::StepFailed {
-                step: "s".into(),
+            RunEventKind::NodeFailed {
+                node: "s".into(),
                 error: "boom".into(),
                 status_code: 502,
+                retry_in_ms: Some(10),
             },
-            RunEventKind::StepCancelled { step: "s".into() },
-            RunEventKind::GateDecided {
-                rule: Some(0),
-                action: Some(GateAction::Run {
-                    collection: id,
-                    inputs: [("k".to_string(), json!("v"))].into(),
-                }),
+            RunEventKind::NodeCancelled { node: "s".into() },
+            RunEventKind::NodeSkipped { node: "s".into() },
+            RunEventKind::Branched {
+                node: "b".into(),
+                port: Port::Rule(1),
                 checks: vec![CheckResult {
-                    rule: 0,
+                    rule: 1,
                     path: "s.status".into(),
                     op: Op::Eq,
                     value: json!(200),
@@ -593,13 +672,19 @@ mod tests {
                     held: true,
                 }],
             },
+            RunEventKind::Looped {
+                from: "b".into(),
+                to: "s".into(),
+                pass: 2,
+            },
             RunEventKind::ChildStarted {
+                node: "r".into(),
                 child: Uuid::from_u128(2),
                 collection: id,
                 name: "next".into(),
             },
             RunEventKind::PaneSnapshot {
-                step: Some("s".into()),
+                node: Some("s".into()),
                 pane: "p1".into(),
                 text: "$ ls".into(),
             },
@@ -607,7 +692,7 @@ mod tests {
                 error: "max_steps".into(),
             },
             RunEventKind::VariableSet {
-                step: "s".into(),
+                node: "s".into(),
                 var: "v".into(),
                 scope: VarScope::Collection,
                 value: json!(1),
@@ -617,11 +702,13 @@ mod tests {
             // No wildcard: a new variant fails to compile until it is listed above.
             match &kind {
                 RunEventKind::Status { .. }
-                | RunEventKind::StepStarted { .. }
-                | RunEventKind::StepFinished { .. }
-                | RunEventKind::StepFailed { .. }
-                | RunEventKind::StepCancelled { .. }
-                | RunEventKind::GateDecided { .. }
+                | RunEventKind::NodeStarted { .. }
+                | RunEventKind::NodeFinished { .. }
+                | RunEventKind::NodeFailed { .. }
+                | RunEventKind::NodeCancelled { .. }
+                | RunEventKind::NodeSkipped { .. }
+                | RunEventKind::Branched { .. }
+                | RunEventKind::Looped { .. }
                 | RunEventKind::ChildStarted { .. }
                 | RunEventKind::PaneSnapshot { .. }
                 | RunEventKind::Error { .. }

@@ -183,14 +183,13 @@ impl HerdrMcpServer {
             id: uuid::Uuid::new_v4(),
             name: req.name,
             description: req.description,
-            steps: req.steps,
+            flow: req.flow,
             variables: req.variables,
             created_at: now,
             updated_at: now,
             is_template: false,
             category: req.category,
             triggers: req.triggers,
-            gate: req.gate.filter(|g| !g.rules.is_empty()),
             trail: req.trail,
         };
         self.persistence.save_recipe(&recipe).await?;
@@ -212,8 +211,8 @@ impl HerdrMcpServer {
         if let Some(desc) = req.description {
             recipe.description = Some(desc);
         }
-        if let Some(steps) = req.steps {
-            recipe.steps = steps;
+        if let Some(flow) = req.flow {
+            recipe.flow = flow;
         }
         if let Some(vars) = req.variables {
             recipe.variables = vars;
@@ -223,9 +222,6 @@ impl HerdrMcpServer {
         }
         if let Some(category) = req.category {
             recipe.category = Some(category).filter(|c| !c.trim().is_empty());
-        }
-        if let Some(gate) = req.gate {
-            recipe.gate = Some(gate).filter(|g| !g.rules.is_empty());
         }
         if let Some(trail) = req.trail {
             recipe.trail = trail;
@@ -1428,7 +1424,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Recipes"),
-        description = "List the saved recipes: id, name, description, category, step ids and trigger count. Run one with recipe_run."
+        description = "List the saved recipes: id, name, description, category, node ids and trigger count. Run one with recipe_run."
     )]
     async fn recipe_list(
         &self,
@@ -1447,7 +1443,7 @@ impl HerdrMcpServer {
                     "name": r.name,
                     "description": r.description,
                     "category": r.category,
-                    "steps": r.steps.iter().map(|s| &s.id).collect::<Vec<_>>(),
+                    "nodes": r.flow.nodes.iter().map(|n| &n.id).collect::<Vec<_>>(),
                     "triggers": r.triggers.len(),
                 })
             })
@@ -1457,7 +1453,7 @@ impl HerdrMcpServer {
         ]))
     }
 
-    #[tool(meta = category("Recipes"), description = "Get a saved recipe by id: its steps, variables and triggers.")]
+    #[tool(meta = category("Recipes"), description = "Get a saved recipe by id: its flow, variables and triggers.")]
     async fn recipe_get(
         &self,
         Parameters(RecipeGetParams { recipe_id }): Parameters<RecipeGetParams>,
@@ -1476,7 +1472,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Recipes"),
-        description = "Save a recipe. Without recipe_id it creates one (name and steps required); with recipe_id the fields given replace the saved ones. Steps run in order and a failing step stops the run; a step's params may use {{ stepId.path }} (an earlier step's result) and {{ var }} (variables). An optional gate decides what a full run does after the last step: its rules are checked in order and the first whose checks hold ends the run, restarts it from step 1 (a loop; {{ run.pass }} counts passes), fails it, or hands off to another saved recipe (action run, with collection = its id and optional inputs whose {{ }} fill from this run): the other recipe runs as a child run with its own variables, and this run ends as the child ends; max_steps caps the requests one run may execute. Returns the saved recipe."
+        description = "Save a recipe. Without recipe_id it creates one (name and flow or steps required); with recipe_id the fields given replace the saved ones. steps is a straight line of tool calls (start → each step; a failing step stops the run). flow is a graph: nodes {id, type: start|tool|branch|run|wait|fail, ...} and edges {from, port, to}. Ports: out (default), error (tool/run: a failure takes it instead of failing the run), branch rule numbers 1.. and else. A node with several incoming edges waits for all of them (a branch's untaken ports count as done); an edge back upstream loops ({{ run.pass }} counts passes; max_steps caps node runs). tool nodes take tool, params, extract, retry {times, delay_ms}, timeout_ms; branch takes rules [{checks [{path, op, value}], any}]; run takes collection (a recipe id) and inputs, runs it as a child and waits; wait takes ms; fail takes message. params may use {{ nodeId.path }} and {{ var }}. Returns the saved recipe."
     )]
     async fn recipe_save(
         &self,
@@ -1484,25 +1480,25 @@ impl HerdrMcpServer {
             recipe_id,
             name,
             description,
+            flow,
             steps,
             variables,
             triggers,
             category,
-            gate,
             trail,
         }): Parameters<RecipeSaveParams>,
     ) -> Result<CallToolResult, McpError> {
+        let flow = flow.or_else(|| steps.map(herdr_mcp_api::Flow::chain));
         let recipe = match recipe_id {
             Some(raw) => {
                 let id = parse_id("recipe_id", &raw)?;
                 let req = UpdateRecipeRequest {
                     name,
                     description,
-                    steps,
+                    flow,
                     variables,
                     triggers,
                     category,
-                    gate,
                     trail,
                 };
                 self.update_recipe(id, req)
@@ -1511,17 +1507,16 @@ impl HerdrMcpServer {
                     .ok_or_else(|| user_err(format!("no recipe {raw}")))?
             }
             None => {
-                let (Some(name), Some(steps)) = (name, steps) else {
-                    return Err(user_err("a new recipe needs name and steps"));
+                let (Some(name), Some(flow)) = (name, flow) else {
+                    return Err(user_err("a new recipe needs name and flow (or steps)"));
                 };
                 let req = CreateRecipeRequest {
                     name,
                     description,
-                    steps,
+                    flow,
                     variables: variables.unwrap_or_default(),
                     category,
                     triggers: triggers.unwrap_or_default(),
-                    gate,
                     trail: trail.unwrap_or_default(),
                 };
                 self.create_recipe(req).await.map_err(to_mcp_err)?
@@ -1534,34 +1529,36 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Recipes"),
-        description = "Run a saved recipe (recipe_id) or ad-hoc steps. Returns the run record at once ({id, status, steps, results, ...}); follow it with run_get, or pass wait: true to get the finished record. variables are added to the run's scope."
+        description = "Run a saved recipe (recipe_id), an ad-hoc flow, or ad-hoc steps. Returns the run record at once ({id, status, active, results, ...}); follow it with run_get, or pass wait: true to get the finished record. variables are added to the run's scope; node_ids runs only those tool nodes, one after another."
     )]
     async fn recipe_run(
         &self,
         Parameters(RecipeRunParams {
             recipe_id,
+            flow,
             steps,
             name,
             session_id,
             variables,
-            step_ids,
+            node_ids,
             wait,
         }): Parameters<RecipeRunParams>,
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        if recipe_id.is_none() && steps.is_none() {
-            return Err(user_err("pass recipe_id or steps"));
+        if recipe_id.is_none() && flow.is_none() && steps.is_none() {
+            return Err(user_err("pass recipe_id, flow or steps"));
         }
         let req = herdr_mcp_api::StartRunRequest {
             recipe_id: recipe_id
                 .as_deref()
                 .map(|raw| parse_id("recipe_id", raw))
                 .transpose()?,
+            flow,
             steps,
             name,
             session_id,
             variables,
-            step_ids,
+            node_ids,
         };
         let origin = match self.origin(&context.meta) {
             Origin::Mcp => herdr_mcp_api::RunOrigin::Agent {
@@ -1592,7 +1589,7 @@ impl HerdrMcpServer {
 
     #[tool(
         meta = category("Recipes"),
-        description = "Get a run's record: status (running, paused, completed, failed, cancelled, interrupted), each step's state and result, and the error of a failed step. With trail: true, the run's trail as text instead: each event with its time, the params each step sent, why the gate chose its rule, a snapshot of the pane a failed run last used, and, indented under it, the trail of the child run the gate handed off to."
+        description = "Get a run's record: status (running, paused, completed, failed, cancelled, interrupted), the nodes running now (active), each node's result, and the error of a failed node. With trail: true, the run's trail as text instead: each event with its time, the params each node sent, the port each branch took and why, loops, a snapshot of the pane a failed run last used, and, indented under it, the trail of each child run its run nodes started."
     )]
     async fn run_get(
         &self,

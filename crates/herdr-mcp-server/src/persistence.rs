@@ -473,20 +473,19 @@ mod tests {
             id: Uuid::new_v4(),
             name: "test recipe".into(),
             description: Some("desc".into()),
-            steps: vec![RecipeStep {
+            flow: herdr_mcp_api::Flow::chain(vec![RecipeStep {
                 id: "s1".into(),
                 tool: "status".into(),
                 params: serde_json::json!({}),
                 description: None,
                 extract: Vec::new(),
-            }],
+            }]),
             variables: HashMap::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             is_template: false,
             category: None,
             triggers: Vec::new(),
-            gate: None,
             trail: Default::default(),
         }
     }

@@ -255,10 +255,10 @@ The MCP face of `/api/recipes` and `/api/runs`: the same server methods
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `recipe_list` | — | Saved recipes: id, name, description, category, step ids, trigger count |
+| `recipe_list` | — | Saved recipes: id, name, description, category, node ids, trigger count |
 | `recipe_get` | `recipe_id` | One recipe |
-| `recipe_save` | `recipe_id?`, `name?`, `description?`, `steps?`, `variables?`, `triggers?`, `category?` | Create (no id: `name` + `steps`) or update the fields given |
-| `recipe_run` | `recipe_id?` or `steps?`, `name?`, `session_id?`, `variables`, `step_ids`, `wait` | Start a run; returns its first record, or the final one with `wait` |
+| `recipe_save` | `recipe_id?`, `name?`, `description?`, `flow?` or `steps?`, `variables?`, `triggers?`, `category?` | Create (no id: `name` + `flow` or `steps`, chained) or update the fields given |
+| `recipe_run` | `recipe_id?`, `flow?` or `steps?`, `name?`, `session_id?`, `variables`, `node_ids`, `wait` | Start a run; returns its first record, or the final one with `wait` |
 | `run_get` | `run_id` | A run's record |
 | `run_control` | `run_id`, `action` | Pause, resume or cancel (an error if it isn't executing) |
 
@@ -301,7 +301,7 @@ Both go through `clipboard.rs` (see §14.6).
 | `GET` | `/api/herdr/panes?session=&workspace_id=&tab_id=&agent_status=&focused=&label=` | `herdr_panes_handler` | `PanesResponse`, filtered like `list_panes`; 502 for an unknown or stopped session |
 | `POST` | `/api/runs` | `start_run_handler` | Start a run; `?wait=true` waits for the final record; `variables` add to the run's scope |
 | `GET` | `/api/runs?limit=` | `list_runs_handler` | The newest `limit` runs (all without it), newest first; sorted on the headers, so only those runs' logs are read |
-| `GET` | `/api/runs/{id}/trail` | `run_trail_handler` | The run's trail as text, the trail of the child run its gate handed off to indented under it |
+| `GET` | `/api/runs/{id}/trail` | `run_trail_handler` | The run's trail as text, its child runs' trails indented under it |
 | `GET` | `/api/herdr/events?level=` | `herdr_events_handler` | SSE: herdr's live event stream (`HerdrEvent` per message), plus herdr-mcp's diagnostic entries up to `level` (`events` default, `reactions`, `debug`) |
 
 ### 5.2 Recipe CRUD Routes
@@ -355,7 +355,7 @@ Every tool call, whoever makes it, goes through `HerdrMcpServer::call_tool`
 appends to the audit log after:
 
 - **Origin:** the in-process session (`dispatch_tool`) tags each call
-  `api` (`POST /api/tools/{name}`) or `run` (a recipe step) in the request
+  `api` (`POST /api/tools/{name}`) or `run` (a recipe's tool node) in the request
   `_meta`; only that session's tag is read, so any other caller is `mcp`.
 - **Policy:** `disabled-tools` are refused (and hidden from both tool
   lists). `[mcp] tools` only narrows what external MCP clients list
@@ -404,8 +404,9 @@ Variables use `{{ path }}` syntax with dot/bracket navigation:
 
 ```
 {{ greeting }}                       a variable in scope
-{{ step1.panes[0].pane_id }}         a step's result (or the JSON its tool returned)
-{{ step1 }} / {{ step1.text }}       the text a step's tool returned
+{{ ls.panes[0].pane_id }}            a node's result (or the JSON its tool returned)
+{{ ls }} / {{ ls.text }}             the text a node's tool returned
+{{ run.pass }}                       1, plus one per loop taken
 {{ pane_id.output }} {{ role.output }}
 ```
 
@@ -417,51 +418,75 @@ extracted variables go on top as the run proceeds. `POST
 /api/variables/resolve` resolves in the same scope, so a preview never
 disagrees with a run.
 
-**Extract rules** chain requests: a step's `extract: [{path, var, scope}]`
+**Extract rules** chain requests: a tool node's `extract: [{path, var, scope}]`
 saves `path` of its result (`""` = the text it returned) as `var` once the
-step succeeds — `scope: "global"` into `/api/variables`, `"collection"` into
-the recipe's `variables` (needs a saved recipe). Later steps of the same run
+node succeeds — `scope: "global"` into `/api/variables`, `"collection"` into
+the recipe's `variables` (needs a saved recipe). Later nodes of the same run
 see it at once (`variable_set` run event). A path that isn't in the result
-fails the step.
+fails the node.
 
 **Key spec facts:**
 - `extract_variables` always prefixes keys with `result.` (e.g., `{"result":"hello"}` → `"result.result"`) and ignores arrays
-- an exact scope key wins over `step.path` navigation
+- an exact scope key wins over `node.path` navigation
 - Unknown `{{ path }}` placeholders are left unchanged
 
 ### 6.2 Recipe Lifecycle
 
+A recipe's `flow` (`herdr_mcp_api::flow`, shared by the server and both
+UIs) is nodes (`start`, `tool`, `branch`, `run`, `wait`, `fail`) and edges
+from a node's port (`out`, `error`, a branch rule's number, `else`) to a
+node; `Flow::chain(steps)` is the straight-line form agents and templates
+still save. `Flow::problems` validates it (one start, unique ids, edges
+between known nodes on ports the node has); `Flow::shape` classifies, by a
+depth-first walk from start, the back edges (loops) and each node's forward
+in-edges.
+
 ```
-1. POST /api/runs (or the scheduler / a trigger / the plugin picker):
-   a recipe (optionally only `step_ids`) or ad-hoc `steps`
-2. Build the scope (6.1); persist the run header
-3. For each step:
-   a. resolve_variables() in its params
-   b. dispatch_tool() — the tool through rmcp's router (in-process MCP session)
-   c. record the result (step_finished) under the step id, flattened, and
-      under pane_id/role for agent handles
-   d. a result with `isError` (params that don't deserialize, herdr
-      refusing a `herdr_api` method) fails the step, and the run with it
-   e. apply its extract rules (variable_set), or fail the step
-4. After the last step, the recipe's gate (if any; skipped when only
-   `step_ids` run) picks its first matching rule (gate_decided):
-   end → completed, fail → `error` (its message, or the rule that failed)
-   + failed, restart → `pass` + 1 and back to 3 after `delay_ms`, run →
-   hand off (below). No match completes the run.
-5. The event log is the run; RunRecord is its fold
+1. POST /api/runs (or the scheduler / a trigger / the plugin picker / a run
+   node): a recipe, ad-hoc `flow` or `steps`, optionally only `node_ids`
+   (those tool nodes, chained in flow order)
+2. Validate the flow, build the scope (6.1), persist the run header
+3. Fire start's `out`. The executor (one task per run) keeps a ready queue
+   and a JoinSet of nodes in flight:
+   a. a node whose forward in-edges have all fired or been ruled out runs
+      if at least one fired, else it is skipped (node_skipped) and its own
+      out-edges are ruled out: dead-path elimination, so joins never wait
+      on a branch not taken
+   b. tool: resolve_variables() in its params, dispatch_tool() (rmcp's
+      router, in-process) under `timeout_ms`; a failure (or `isError`)
+      retries after `delay_ms` while `retry.times` lasts (through the ready
+      queue, so pause holds it), then fires `error` if it has an edge, else
+      fails the run. Success records the result (node_finished) under the
+      node id and applies extract rules (variable_set)
+   c. branch: `decide` checks its rules (branched, with every check's
+      found value) and fires the first that holds, else `else`
+   d. wait sleeps; fail fails the run; run starts a child run (below)
+   e. a fired back edge is a loop: once every node in the loop's region
+      (`Shape::region`) is quiescent, the region's states reset, `pass` + 1
+      (looped) and its target runs again
+   f. `max_steps` (default 1000) caps node runs, retries and passes
+      counted; going over fails the run
+4. No node ready, in flight or looping: completed
+5. The event log is the run; RunRecord is its fold (`active` nodes,
+   `failed_node`, `pass`)
 ```
+
+Pause holds the ready queue (nodes in flight finish); cancel aborts the
+JoinSet and the child runs; both reach child runs, which the control watch
+forwards on every turn.
 
 **Trail.** The event log is also the run's audit trail. `step_started`
 carries the params as sent (placeholders filled, secret-named fields
-redacted as in the security audit log), the `{{ }}` nothing resolved, and
-the pane the step targets; the header records who started the run
-(`origin`: api, agent + its pane, run + the run whose step called
-`recipe_run`, gate + the run that handed off, schedule, trigger + event;
-`RunOrigin::parent` gives the parent run);
-`gate_decided` lists every check evaluated with what its path resolved to.
-When a run fails (a step, a gate `fail`, `max_steps`), `pane_snapshot` saves
-the last `snapshot_lines` lines of the pane it touched last (a step's
-`pane_id`, or an agent a step returned). `herdr_mcp_api::trail_text`
+redacted as in the security audit log), the `{{ }}` nothing resolved, the
+pane the node targets and the attempt; the header records who started the
+run (`origin`: api, agent + its pane, run + the run whose node called
+`recipe_run`, node + the run whose run node started it, schedule, trigger
++ event; `RunOrigin::parent` gives the parent run); `branched` lists every
+check evaluated with what its path resolved to. When a run fails (a node,
+a `fail` node, `max_steps`), `pane_snapshot` saves the last
+`snapshot_lines` lines of the pane it touched last (a node's `pane_id`, or
+an agent a node returned). `run::node_states` folds the log into each
+node's state for drawing (the web canvas, the TUI's node list). `herdr_mcp_api::trail_text`
 renders it all as text (`run_get` with `trail: true`).
 
 **Retention.** After each run, and for every group at daemon start,
@@ -471,55 +496,44 @@ runs form one group) beyond the newest `keep_runs`, or older than
 `runs.keep-runs` / `runs.keep-days` / `runs.snapshot-lines` settings; 0 means
 no limit, and the defaults keep every run (snapshot: 40 lines).
 
-**Gate** (`herdr_mcp_api::gate`, shared by the server and both UIs): an
-ordered list of rules; each has `checks` (all must hold, or any with
-`any: true`; none = always) and a `then` action. A check resolves `path`
-like a `{{ path }}` placeholder in the run's scope and compares it with
-`value`: `eq` / `ne` (a string and a number compare by text), `lt` / `gt`
-(numbers), `contains` (substring, array element, object key), `exists` /
-`missing` (null and `""` count as missing). `{{ run.pass }}` is the pass
-number from 1. A gated run executes at most `max_steps` requests (default
-1000, every pass counted), then fails. Restart loops run in the one
-executor task: no recursion, and cancel interrupts a restart delay.
+**Checks** (`flow::Check`): a check resolves `path` like a `{{ path }}`
+placeholder in the run's scope and compares it with `value`: `eq` / `ne`
+(a string and a number compare by text), `lt` / `gt` (numbers), `contains`
+(substring, array element, object key), `exists` / `missing` (null and `""`
+count as missing). A branch rule's checks must all hold (`any: true`: one;
+none = always). `{{ run.pass }}` is the pass number from 1.
 
-**Hand-off** (`Executor::hand_off`): a `run` action starts the other saved
-collection as a child run (`start_with`, origin `gate` + this run's id) in
-this run's workspace, its scope built like any run's (its own variables,
-globals) plus `inputs` with their `{{ }}` filled from this run. The parent
-records `child_started`, forwards pause / resume / cancel to the child
-while it waits (reading as paused itself while it forwards a pause), and ends with the child's status (a failed child's error,
-prefixed with its name, becomes the parent's). Before starting it walks
-the `gate` origins up (`ancestors`): a collection already in the chain
-fails the run, so hand-offs can't nest forever (`restart` is the loop).
-`start_child` boxes the start as a `Send` future so the recursion has a
-type to stop at. `runs::trail` (`run_get` trail, `GET /api/runs/{id}/trail`)
-prints a run's trail with each child's indented under it.
-`gate::rule_text` / `parse_rule` give a rule a one-line form
-(`code gt 399 or read.text contains "error" → fail msg`, `always → end`):
-the web's gate editor previews it under each rule and the trail prints
-decisions with it. A `run` names its
-collection by name (`playground::collections` gives the UIs the list) or
-id, then `key=value` inputs (`inputs_text` / `parse_inputs`).
+**Child runs** (`Executor::start_child`): a `run` node starts the saved
+collection as a child run (`start_with`, origin `node` + this run's id and
+the node) in this run's workspace, its scope built like any run's (its own
+variables, globals) plus `inputs` with their `{{ }}` filled from this run.
+The node waits for it (child_started) and finishes with `{run_id, status,
+error, variables}`, firing `error` when the child did not complete. Before
+starting it walks the `node` origins up (`ancestors`): a collection already
+in the chain fails the node, so child runs can't nest forever (loop with a
+back edge). `start_child` boxes the start as a `Send` future so the
+recursion has a type to stop at. `runs::trail` (`run_get` trail,
+`GET /api/runs/{id}/trail`) prints a run's trail with each child's indented
+under it, depth first. `inputs_text` / `parse_inputs` give a run node's
+inputs the `key=value …` form the web editor edits.
 
 **Runs view.** The web and the TUI both have a Runs tab (web:
 `playground/runs.rs`; TUI: `tabs/runs.rs`, which can also start a
 collection):
 the run list, newest first, filtered by collection or failed only, and the
-picked run's trail (`/api/runs/{id}/trail`, so a hand-off's child trail is
-included). The list is the newest `playground::RUNS_SHOWN` runs. The web
+picked run's trail (`/api/runs/{id}/trail`, so child runs' trails are
+included); the TUI lists the flow's nodes with their states above it. The list is the newest `playground::RUNS_SHOWN` runs. The web
 re-reads the list, and a live run's trail, when `GET /api/events` (SSE)
 streams a run event, at most every 300 ms. From there: copy the
 trail, focus the pane it last used in herdr (`herdr_api` `pane.focus`), run
 it again (`RunRecord::rerun`), cancel it, or open its parent run or the
-runs it started (TUI: `p` / `d`). The web's collection editor has the
-gate (`playground/flow.rs`) and the run history fields, and flags a `run`
-whose collection no longer exists (`missing_collection`).
+runs it started (TUI: `p` / `d`).
 
 **Tracing.** Each run's task runs in a `run` span (`run_id`, `collection`),
-and each step's tool call in a `step` span (`step`, `tool`). So every log
-line the run causes, down to herdr calls, names its run. A hand-off's child
+and each tool call in a `node` span (`node`, `tool`, `attempt`). So every
+log line the run causes, down to herdr calls, names its run. A child run's
 span nests under its parent's; other runs are root spans. The executor logs
-the start (with origin), the finish (status, passes) and failed steps.
+the start (with origin), the finish (status, passes) and failed nodes.
 
 ### 6.3 Bundled Templates
 
@@ -704,7 +718,7 @@ Cron-based recipe scheduling using the `cron` crate:
 |---|---|---|
 | `/` | `Home` | Landing page: send to a pane by `pane_id` and/or `label` (typed, or picked from dropdowns of the panes and labels in `GET /api/variables/auto`; `ApiClient::send_to_pane` → `send_text` / `run_command`, `pane_id` wins), remembers the last target in `localStorage`; collapsed getting-started notes; pane table at the bottom from the same auto variables (click a row to target it) |
 | `/overview` | `Overview` | Pane browser: `GET /api/herdr/panes` with session/status/label filters, grouped by workspace and tab |
-| `/playground` | `Playground` | Collections, Postman style (`playground/collections.rs`): a collection is a saved recipe (folders = `category`), its requests are the steps. A request is any tool or a `herdr_api` method (picked from herdr's schema); its params preview through `POST /api/variables/resolve`; Send saves it and runs just that step (`step_ids`); clicking a path in the response saves its value as a collection variable and adds an extract rule (scope `collection`) so later sends update it. The collection view edits its variables, request order and triggers and runs it in order. Globals reuse the Variables page table. Plus the herdr Events tab. Pane fields offer the auto-variable pane dropdowns (`components/pane_options.rs`) |
+| `/playground` | `Playground` | Collections (`playground/collections.rs`): a collection is a saved recipe (folders = `category`) drawn as its flow on an SVG canvas (`playground/canvas.rs`: pan, zoom, drag nodes, drag a port onto a node to wire it, Delete removes the picked node or edge; loop edges dashed, unreachable nodes dimmed, `Flow::problems` listed). Edits apply to a local copy at once and save through `playground::edit_flow`; positions persist in `Node::at`, and `playground::layout` places nodes without one by depth from start. Run collection colours nodes and the ports they fired from `node_states` as `GET /api/events` streams, with pause / resume / cancel. A picked tool node opens the request editor: any tool or a `herdr_api` method (picked from herdr's schema), retry and timeout, params previewed through `POST /api/variables/resolve`; Send saves it and runs just that node (`node_ids`); clicking a path in the response saves its value as a collection variable and adds an extract rule (scope `collection`). Branch, run, wait and fail nodes have their own editors (`playground/flow.rs`). The Map tab (`playground/map.rs`) draws what starts each collection: triggers, schedules, other collections' run nodes (`playground::map_links` / `map_columns`), coloured by each one's latest run, with a missing box for deleted targets. Globals reuse the Variables page table. Plus the Runs and herdr Events tabs. Pane fields offer the auto-variable pane dropdowns (`components/pane_options.rs`) |
 | `/variables` | `Variables` | Globals and each collection's own variables (CRUD/rename/import, `playground::save_global` / `save_collection_var`) + auto variables (read-only). |
 | `/settings` | `Settings` | Runtime config + clipboard round-trip test |
 

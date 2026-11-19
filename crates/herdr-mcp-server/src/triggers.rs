@@ -150,20 +150,19 @@ mod tests {
             id: Uuid::new_v4(),
             name: "on-done".into(),
             description: None,
-            steps: vec![RecipeStep {
+            flow: herdr_mcp_api::Flow::chain(vec![RecipeStep {
                 id: "read".into(),
                 tool: "read_pane".into(),
                 params: json!({"pane_id": "{{herdr.pane_id}}"}),
                 description: None,
                 extract: Vec::new(),
-            }],
+            }]),
             variables: HashMap::new(),
             created_at: now,
             updated_at: now,
             is_template: false,
             category: None,
             triggers,
-            gate: None,
             trail: Default::default(),
         }
     }
@@ -218,13 +217,13 @@ mod tests {
             on: "pane.agent_status_changed".into(),
             when: serde_json::Map::new(),
         }]);
-        r.steps = vec![RecipeStep {
+        r.flow = herdr_mcp_api::Flow::chain(vec![RecipeStep {
             id: "echo".into(),
             tool: "var_set".into(),
             params: json!({"key": "seen", "value": "{{herdr.pane_id}}", "session_id": "w2"}),
             description: None,
             extract: Vec::new(),
-        }];
+        }]);
         let req = triggered_run(&r, &done_event()).unwrap();
         server.persistence.save_recipe(&r).await.unwrap();
         let (_, done) = crate::runs::start_run(&server, req, herdr_mcp_api::RunOrigin::Api)

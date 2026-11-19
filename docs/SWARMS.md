@@ -10,6 +10,14 @@ and the TUI by the one bridge.
 > proposal names; the web UI is the authoring UI and the TUI a monitor with
 > quick actions. The design otherwise stands; the paths below map to those
 > tables.
+>
+> **Since 2026-11-13:** §6's flow graph has shipped in its own shape
+> (`herdr_mcp_api::flow`: start, tool, branch, run, wait and fail nodes;
+> ports `out` / `error` / rule numbers / `else`; joins with dead-path
+> elimination, back-edge loops, retry, timeout, child runs) with a canvas
+> editor and a map in the web playground; the agent guide's Flows section
+> is the reference. Agent nodes, the mailbox and approval are still to
+> come.
 
 ## 1. Goals
 

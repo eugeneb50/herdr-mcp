@@ -9,19 +9,22 @@
 //! and the broadcast that carries new events to `/api/events`; a log without
 //! a terminal event and without a live run reads as `interrupted`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Context;
+use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
+use herdr_mcp_api::flow::{Shape, decide};
 use herdr_mcp_api::{
-    Extract, Gate, GateAction, RecipeStep, RunAction, RunEvent, RunEventKind, RunOrigin, RunRecord,
-    RunStatus, RunTrail, StartRunRequest, VarScope,
+    Edge, Extract, Flow, Node, NodeKind, Port, RunAction, RunEvent, RunEventKind, RunOrigin,
+    RunRecord, RunStatus, RunTrail, StartRunRequest, VarScope,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{broadcast, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tracing::Instrument;
 use uuid::Uuid;
 
@@ -37,13 +40,10 @@ pub struct RunHeader {
     pub recipe_id: Option<Uuid>,
     pub name: Option<String>,
     pub session_id: String,
-    /// Snapshot of the steps as they were when the run started.
-    pub steps: Vec<RecipeStep>,
+    /// Snapshot of the flow as it was when the run started.
+    pub flow: Flow,
     #[serde(default)]
     pub origin: RunOrigin,
-    /// Snapshot of the recipe's gate (none when only some steps run).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gate: Option<Gate>,
     /// Interpolation scope before the first step.
     pub seed: HashMap<String, Value>,
     pub started_at: DateTime<Utc>,
@@ -91,8 +91,8 @@ impl Runs {
     }
 
     /// Signal a live run. Returns false if no run with that id is executing.
-    /// Pause takes effect at the next step boundary; cancel also aborts the
-    /// step in flight.
+    /// Pause holds nodes that have not started (running ones finish);
+    /// cancel also aborts the nodes in flight and the child runs.
     pub fn control(&self, id: Uuid, action: RunAction) -> bool {
         self.set(
             id,
@@ -142,15 +142,14 @@ pub fn fold(header: RunHeader, events: &[RunEvent]) -> RunRecord {
         recipe_id: header.recipe_id,
         name: header.name,
         session_id: header.session_id,
-        steps: header.steps,
+        flow: header.flow,
         origin: header.origin,
-        gate: header.gate,
         pass: 1,
         status: RunStatus::Running,
-        current_step: None,
+        active: Vec::new(),
         results: HashMap::new(),
         variables,
-        failed_step: None,
+        failed_node: None,
         error: None,
         started_at: header.started_at,
         finished_at: None,
@@ -163,52 +162,76 @@ pub fn fold(header: RunHeader, events: &[RunEvent]) -> RunRecord {
 
 /// Advance a record by one event.
 pub fn apply(run: &mut RunRecord, event: &RunEvent) {
+    let mut idle = |node: &str| run.active.retain(|n| n != node);
     match &event.kind {
         RunEventKind::Status { status } => {
             run.status = *status;
             if status.is_finished() {
                 run.finished_at = Some(event.at);
-            }
-            if *status == RunStatus::Completed {
-                run.current_step = None;
+                run.active.clear();
             }
         }
-        RunEventKind::StepStarted { step, .. } => run.current_step = Some(step.clone()),
-        RunEventKind::StepFinished { step, result } => record_result(run, step, result),
-        RunEventKind::StepFailed {
-            step,
+        RunEventKind::NodeStarted { node, .. } => {
+            if !run.active.contains(node) {
+                run.active.push(node.clone());
+            }
+        }
+        RunEventKind::NodeFinished { node, result, port } => {
+            idle(node);
+            record_result(run, node, result);
+            // The failure went out the error port: the run goes on.
+            if *port == Port::Error && run.failed_node.as_ref() == Some(node) {
+                run.failed_node = None;
+                run.error = None;
+            }
+        }
+        RunEventKind::NodeFailed {
+            node,
             error,
             status_code,
+            retry_in_ms,
         } => {
-            run.results.insert(
-                step.clone(),
-                serde_json::json!({ "error": error, "statusCode": status_code }),
-            );
-            run.failed_step = Some(step.clone());
-            run.error = Some(error.clone());
+            idle(node);
+            if retry_in_ms.is_none() {
+                run.results.insert(
+                    node.clone(),
+                    serde_json::json!({ "error": error, "statusCode": status_code }),
+                );
+                run.failed_node = Some(node.clone());
+                run.error = Some(error.clone());
+            }
         }
-        RunEventKind::StepCancelled { step } => {
+        RunEventKind::NodeCancelled { node } => {
+            idle(node);
             run.results
-                .insert(step.clone(), serde_json::json!({ "error": "cancelled" }));
+                .insert(node.clone(), serde_json::json!({ "error": "cancelled" }));
+        }
+        RunEventKind::Branched { node, port, .. } => {
+            let result = serde_json::json!({ "port": port });
+            run.variables.insert(node.clone(), result.clone());
+            run.results.insert(node.clone(), result);
+        }
+        RunEventKind::Looped { pass, .. } => {
+            run.pass = *pass;
+            run.variables.insert(PASS_VAR.to_string(), (*pass).into());
         }
         RunEventKind::VariableSet { var, value, .. } => {
             run.variables.insert(var.clone(), value.clone());
         }
-        RunEventKind::GateDecided { action, .. } => {
-            if let Some(GateAction::Restart { .. }) = action {
-                run.pass += 1;
-                run.variables.insert(PASS_VAR.to_string(), run.pass.into());
-            }
-        }
         RunEventKind::Error { error } => run.error = Some(error.clone()),
-        RunEventKind::PaneSnapshot { .. } | RunEventKind::ChildStarted { .. } => {}
+        RunEventKind::NodeSkipped { .. }
+        | RunEventKind::PaneSnapshot { .. }
+        | RunEventKind::ChildStarted { .. } => {}
     }
 }
 
-/// Store a step's result and expose it to later steps: under the step id,
+/// Store a node's result and expose it to later nodes: under the node id,
 /// flattened (`result.*`), and — when it is an agent handle — under its pane
 /// id and role so `{{pane_id.output}}` / `{{role.output}}` resolve.
 fn record_result(run: &mut RunRecord, step: &str, json: &Value) {
+    if json.is_null() {
+        return;
+    }
     run.variables
         .extend(crate::variables::extract_variables(json));
     run.variables.insert(step.to_string(), json.clone());
@@ -318,8 +341,10 @@ type Started = Result<(RunRecord, JoinHandle<RunRecord>), StartError>;
 #[derive(Debug)]
 pub enum StartError {
     RecipeNotFound,
-    /// A `step_ids` entry the recipe has no step for.
-    UnknownStep(String),
+    /// A `node_ids` entry that is not a tool node of the flow.
+    UnknownNode(String),
+    /// The flow cannot run: [`Flow::problems`], joined.
+    Invalid(String),
     Persist(anyhow::Error),
 }
 
@@ -327,7 +352,8 @@ impl std::fmt::Display for StartError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::RecipeNotFound => f.write_str("Recipe not found"),
-            Self::UnknownStep(id) => write!(f, "the recipe has no step `{id}`"),
+            Self::UnknownNode(id) => write!(f, "the flow has no tool node `{id}`"),
+            Self::Invalid(why) => write!(f, "the flow cannot run: {why}"),
             Self::Persist(e) => write!(f, "{e:#}"),
         }
     }
@@ -343,13 +369,37 @@ pub async fn start_run(
     start_with(server, req, Control::Run, origin).await
 }
 
+/// `ids`' tool nodes of `flow`, one after another from a new start (in
+/// flow order, with their retry and timeout).
+fn only(flow: &Flow, ids: &[String]) -> Result<Flow, StartError> {
+    if let Some(id) = ids
+        .iter()
+        .find(|id| flow.node(id).and_then(Node::tool_name).is_none())
+    {
+        return Err(StartError::UnknownNode(id.clone()));
+    }
+    let mut out = Flow::chain(Vec::new());
+    out.nodes
+        .extend(flow.tools().filter(|n| ids.contains(&n.id)).cloned());
+    out.edges = out
+        .nodes
+        .windows(2)
+        .map(|w| Edge {
+            from: w[0].id.clone(),
+            port: Port::Out,
+            to: w[1].id.clone(),
+        })
+        .collect();
+    Ok(out)
+}
+
 pub(crate) async fn start_with(
     server: &HerdrMcpServer,
     req: StartRunRequest,
     initial: Control,
     origin: RunOrigin,
 ) -> Started {
-    let (recipe_id, name, mut steps, mut gate, trail, collection) = match req.recipe_id {
+    let (recipe_id, name, mut flow, trail, collection) = match req.recipe_id {
         Some(id) => {
             let recipe = server
                 .persistence
@@ -360,8 +410,7 @@ pub(crate) async fn start_with(
             (
                 Some(id),
                 Some(recipe.name),
-                recipe.steps,
-                recipe.gate,
+                recipe.flow,
                 recipe.trail,
                 recipe.variables,
             )
@@ -369,23 +418,19 @@ pub(crate) async fn start_with(
         None => (
             None,
             req.name,
-            req.steps.unwrap_or_default(),
-            None,
+            req.flow
+                .or_else(|| req.steps.map(Flow::chain))
+                .unwrap_or_default(),
             RunTrail::default(),
             HashMap::new(),
         ),
     };
-    if let Some(id) = req
-        .step_ids
-        .iter()
-        .find(|id| !steps.iter().any(|s| &s.id == *id))
-    {
-        return Err(StartError::UnknownStep(id.clone()));
+    if !req.node_ids.is_empty() {
+        flow = only(&flow, &req.node_ids)?;
     }
-    if !req.step_ids.is_empty() {
-        // Sending some requests never loops or fails on the gate.
-        steps.retain(|s| req.step_ids.contains(&s.id));
-        gate = None;
+    let problems = flow.problems();
+    if !problems.is_empty() {
+        return Err(StartError::Invalid(problems.join("; ")));
     }
     let session_id = run_workspace(req.session_id, &collection, &req.variables);
     let seed = scope(server, &session_id, collection, req.variables).await;
@@ -394,9 +439,8 @@ pub(crate) async fn start_with(
         recipe_id,
         name,
         session_id,
-        steps,
+        flow,
         origin,
-        gate,
         seed,
         started_at: Utc::now(),
     };
@@ -408,11 +452,12 @@ pub(crate) async fn start_with(
         server.runs.live().remove(&header.id);
         return Err(StartError::Persist(e));
     }
+    let shape = header.flow.shape();
     let mut exec = Executor {
         server: server.clone(),
         run: fold(header, &[]),
         next_seq: 0,
-        steps_run: 0,
+        nodes_run: 0,
         snapshot_lines: trail.snapshot_lines.unwrap_or_else(|| {
             let n = server
                 .settings()
@@ -421,17 +466,26 @@ pub(crate) async fn start_with(
         }),
         last_pane: None,
         ctl: rx,
+        shape,
+        state: HashMap::new(),
+        fired: HashSet::new(),
+        ruled_out: HashSet::new(),
+        ready: VecDeque::new(),
+        loops: Vec::new(),
+        tasks: JoinSet::new(),
+        attempts: HashMap::new(),
+        children: HashMap::new(),
     };
     exec.emit(RunEventKind::Status {
         status: RunStatus::Running,
     })
     .await;
     let first = exec.run.clone();
-    // Every log line of the run's task carries its id. A gate's child nests
-    // under its parent's span (start_child runs inside it); any other run
-    // is a root, not a child of the request that started it.
+    // Every log line of the run's task carries its id. A run node's child
+    // nests under its parent's span (start_child runs inside it); any other
+    // run is a root, not a child of the request that started it.
     let parent = match first.origin {
-        RunOrigin::Gate { .. } => tracing::Span::current().id(),
+        RunOrigin::Node { .. } => tracing::Span::current().id(),
         _ => None,
     };
     let span = tracing::info_span!(
@@ -444,37 +498,40 @@ pub(crate) async fn start_with(
 }
 
 /// A run's trail ([`herdr_mcp_api::trail_text`]) with, indented under it,
-/// the trail of the child run its gate handed off to, and so on down.
+/// the trail of each child run its `run` nodes started, and so on down.
 /// `None`: no such run.
 pub async fn trail(server: &HerdrMcpServer, id: Uuid) -> anyhow::Result<Option<String>> {
     let mut out = String::new();
-    let mut next = Some(id);
-    let mut indent = String::new();
-    while let Some(id) = next.take() {
+    let mut todo = vec![(id, 0usize)];
+    while let Some((id, depth)) = todo.pop() {
         let Some(run) = load(server, id).await? else {
-            // ponytail: a pruned child just ends the chain.
-            break;
+            // ponytail: a pruned child just leaves its branch out.
+            continue;
         };
         let events = server.persistence.load_run_events(&id, 0).await?;
-        next = events.iter().find_map(|e| match e.kind {
-            RunEventKind::ChildStarted { child, .. } => Some(child),
-            _ => None,
-        });
-        if !indent.is_empty() {
+        let children: Vec<Uuid> = events
+            .iter()
+            .filter_map(|e| match e.kind {
+                RunEventKind::ChildStarted { child, .. } => Some(child),
+                _ => None,
+            })
+            .collect();
+        todo.extend(children.into_iter().rev().map(|c| (c, depth + 1)));
+        if !out.is_empty() {
             out.push('\n');
         }
+        let indent = "    ".repeat(depth);
         for line in herdr_mcp_api::trail_text(&run, &events).lines() {
             out.push_str(&indent);
             out.push_str(line);
             out.push('\n');
         }
-        indent.push_str("    ");
     }
     Ok((!out.is_empty()).then_some(out))
 }
 
-/// [`start_with`] behind a named `Send` future: a child's executor runs
-/// [`Executor::hand_off`] too, and the recursion needs a type to stop at.
+/// [`start_with`] behind a named `Send` future: a child's executor starts
+/// children too, and the recursion needs a type to stop at.
 fn start_child(
     server: HerdrMcpServer,
     req: StartRunRequest,
@@ -619,19 +676,56 @@ async fn prune_runs(server: &HerdrMcpServer, only: Option<Option<Uuid>>) -> anyh
     Ok(())
 }
 
-/// A run being executed: its record so far (the fold of what it emitted).
+/// Where a node stands in the current pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Slot {
+    /// Every input is in; waiting for its turn (or for a resume).
+    Queued,
+    Running,
+    Done,
+    /// Every input was ruled out.
+    Skipped,
+}
+
+/// What a node's task came back with.
+enum Outcome {
+    Tool(Box<Result<rmcp::model::CallToolResult, (StatusCode, String)>>),
+    /// A retry's delay is over: start attempt `n`.
+    Retry(u32),
+    Waited,
+    Child(Uuid, Box<Result<RunRecord, tokio::task::JoinError>>),
+}
+
+/// A run being executed: its record so far (the fold of what it emitted)
+/// and where each node of its flow stands.
 struct Executor {
     server: HerdrMcpServer,
     run: RunRecord,
     next_seq: u64,
-    /// Steps started so far, every pass counted (for the gate's `max_steps`).
-    steps_run: u32,
+    /// Nodes started so far, every pass counted (for `max_steps`).
+    nodes_run: u32,
     /// Lines of `last_pane` saved when the run fails; 0: none.
     snapshot_lines: u32,
-    /// The pane the run touched last: a step's `pane_id`, or an agent a
-    /// step returned.
+    /// The pane the run touched last: a node's `pane_id`, or an agent a
+    /// node returned.
     last_pane: Option<String>,
     ctl: watch::Receiver<Control>,
+    shape: Shape,
+    /// Nodes not listed are pending: some input is still open.
+    state: HashMap<String, Slot>,
+    /// Forward edges (indexes into the flow's edges) that fired this pass,
+    /// and those ruled out (their node took another port, or was skipped).
+    fired: HashSet<usize>,
+    ruled_out: HashSet<usize>,
+    ready: VecDeque<String>,
+    /// Loop edges taken, `(from, to)`, waiting for `to`'s part of the flow
+    /// to settle.
+    loops: Vec<(String, String)>,
+    tasks: JoinSet<(String, Outcome)>,
+    /// Attempts started per tool node this pass.
+    attempts: HashMap<String, u32>,
+    /// Live child runs by the run node that started them.
+    children: HashMap<String, Uuid>,
 }
 
 impl Executor {
@@ -654,7 +748,7 @@ impl Executor {
 
     async fn execute(mut self) -> RunRecord {
         tracing::info!(origin = %self.run.origin, "run started");
-        let status = self.execute_steps().await;
+        let status = self.execute_flow().await;
         tracing::info!(
             status = status.as_str(),
             passes = self.run.pass,
@@ -667,8 +761,8 @@ impl Executor {
     }
 
     /// Save the last lines of the pane the run touched last into its log
-    /// (`step`: the step that failed).
-    async fn snapshot(&mut self, step: Option<String>) {
+    /// (`node`: the node that failed).
+    async fn snapshot(&mut self, node: Option<String>) {
         let Some(pane) = self.last_pane.clone() else {
             return;
         };
@@ -691,7 +785,7 @@ impl Executor {
             Ok(result) if result.is_error != Some(true) => {
                 let result = serde_json::to_value(&result).unwrap_or_default();
                 let text = herdr_mcp_api::tool_text(&result);
-                self.emit(RunEventKind::PaneSnapshot { step, pane, text })
+                self.emit(RunEventKind::PaneSnapshot { node, pane, text })
                     .await;
             }
             Ok(result) => {
@@ -705,130 +799,372 @@ impl Executor {
         }
     }
 
-    /// Run every step, then follow the gate (again from the first step on a
-    /// restart); returns the final status.
-    async fn execute_steps(&mut self) -> RunStatus {
+    /// Run the flow from its start until no path is left; the final status.
+    async fn execute_flow(&mut self) -> RunStatus {
+        let start = self
+            .run
+            .flow
+            .start()
+            .map(|n| n.id.clone())
+            .unwrap_or_default();
+        self.emit(RunEventKind::NodeFinished {
+            node: start.clone(),
+            result: Value::Null,
+            port: Port::Out,
+        })
+        .await;
+        self.fire(&start, Port::Out).await;
         loop {
-            if let Some(status) = self.execute_pass().await {
-                return status;
+            let control = *self.ctl.borrow_and_update();
+            // Every turn, not only on a change: a change seen here is not
+            // seen again by `changed()` below.
+            for child in self.children.values() {
+                self.server.runs.set(*child, control);
             }
-            let Some(gate) = self.run.gate.clone() else {
-                return RunStatus::Completed;
-            };
-            let vars = &self.run.variables;
-            let (rule, checks) = gate.evaluate(|p| resolve_json_path(vars, p));
-            let action = rule.map(|i| gate.rules[i].then.clone());
-            self.emit(RunEventKind::GateDecided {
-                rule,
-                action: action.clone(),
-                checks,
-            })
-            .await;
-            match action {
-                None | Some(GateAction::End) => return RunStatus::Completed,
-                Some(GateAction::Fail { message }) => {
-                    let error = if message.is_empty() {
-                        format!("gate rule {} failed the run", rule.map_or(0, |i| i + 1))
-                    } else {
-                        message
-                    };
-                    self.emit(RunEventKind::Error { error }).await;
-                    self.snapshot(None).await;
-                    return RunStatus::Failed;
-                }
-                Some(GateAction::Restart { delay_ms }) => {
-                    let delay = tokio::time::sleep(std::time::Duration::from_millis(delay_ms));
-                    tokio::select! {
-                        () = delay => {}
-                        () = cancelled(&mut self.ctl) => return RunStatus::Cancelled,
+            match control {
+                Control::Cancel => return self.stop(RunStatus::Cancelled).await,
+                Control::Pause => {
+                    if self.run.status != RunStatus::Paused {
+                        self.emit(RunEventKind::Status {
+                            status: RunStatus::Paused,
+                        })
+                        .await;
                     }
                 }
-                Some(GateAction::Run { collection, inputs }) => {
-                    return self.hand_off(collection, inputs).await;
+                Control::Run => {
+                    if self.run.status == RunStatus::Paused {
+                        self.emit(RunEventKind::Status {
+                            status: RunStatus::Running,
+                        })
+                        .await;
+                    }
+                    self.take_loops().await;
+                    while let Some(node) = self.ready.pop_front() {
+                        if let Some(end) = self.begin(&node).await {
+                            return self.stop(end).await;
+                        }
+                    }
+                    if self.tasks.is_empty() && self.loops.is_empty() {
+                        return RunStatus::Completed;
+                    }
+                }
+            }
+            tokio::select! {
+                Some(joined) = self.tasks.join_next() => {
+                    let end = match joined {
+                        Ok((node, outcome)) => self.settle(node, outcome).await,
+                        Err(e) => {
+                            let error = format!("a node's task died: {e}");
+                            self.emit(RunEventKind::Error { error }).await;
+                            Some(RunStatus::Failed)
+                        }
+                    };
+                    if let Some(end) = end {
+                        return self.stop(end).await;
+                    }
+                }
+                changed = self.ctl.changed() => {
+                    // Sender gone means the run was dropped from `Runs`.
+                    if changed.is_err() {
+                        return self.stop(RunStatus::Cancelled).await;
+                    }
                 }
             }
         }
     }
 
-    /// The gate's `run`: start `collection` as a child run with `inputs`
-    /// (placeholders filled from this run), pass pause / resume / cancel on
-    /// to it, and end as it ends.
-    async fn hand_off(&mut self, collection: Uuid, inputs: BTreeMap<String, Value>) -> RunStatus {
-        if self.ancestors().await.contains(&collection) {
+    /// End the run with `status`: whatever still runs is cancelled, child
+    /// runs too.
+    async fn stop(&mut self, status: RunStatus) -> RunStatus {
+        self.tasks.abort_all();
+        for child in self.children.values() {
+            self.server.runs.set(*child, Control::Cancel);
+        }
+        let running: Vec<String> = self.run.active.clone();
+        for node in running {
+            self.emit(RunEventKind::NodeCancelled { node }).await;
+        }
+        status
+    }
+
+    /// `node` finished and fired `port`: pass it on along that port's
+    /// edges and rule out its other ports'.
+    async fn fire(&mut self, node: &str, port: Port) {
+        self.state.insert(node.to_string(), Slot::Done);
+        let mut check = Vec::new();
+        for (i, e) in self.run.flow.edges.iter().enumerate() {
+            if e.from != node {
+                continue;
+            }
+            if self.shape.back.contains(&i) {
+                if e.port == port {
+                    self.loops.push((e.from.clone(), e.to.clone()));
+                }
+                continue;
+            }
+            if e.port == port {
+                self.fired.insert(i);
+            } else {
+                self.ruled_out.insert(i);
+            }
+            check.push(e.to.clone());
+        }
+        self.settle_inputs(check).await;
+    }
+
+    /// Queue each of `nodes` once all its inputs are in, or skip it (and
+    /// rule out its edges, on down) when every one was ruled out.
+    async fn settle_inputs(&mut self, mut nodes: Vec<String>) {
+        while let Some(node) = nodes.pop() {
+            if self.state.contains_key(&node) {
+                continue;
+            }
+            let inputs = self.shape.inputs.get(&node).map_or(&[][..], Vec::as_slice);
+            let open = inputs
+                .iter()
+                .any(|i| !self.fired.contains(i) && !self.ruled_out.contains(i));
+            if open {
+                continue;
+            }
+            if inputs.iter().any(|i| self.fired.contains(i)) {
+                self.state.insert(node.clone(), Slot::Queued);
+                self.ready.push_back(node);
+                continue;
+            }
+            self.state.insert(node.clone(), Slot::Skipped);
+            self.emit(RunEventKind::NodeSkipped { node: node.clone() })
+                .await;
+            for (i, e) in self.run.flow.edges.iter().enumerate() {
+                if e.from == node && !self.shape.back.contains(&i) {
+                    self.ruled_out.insert(i);
+                    nodes.push(e.to.clone());
+                }
+            }
+        }
+    }
+
+    /// Start the next pass for each loop taken whose part of the flow has
+    /// settled: that part is reset and its first node queued.
+    async fn take_loops(&mut self) {
+        let mut waiting = Vec::new();
+        for (from, to) in std::mem::take(&mut self.loops) {
+            let region: HashSet<String> = self
+                .shape
+                .region(&self.run.flow, &to)
+                .into_iter()
+                .map(str::to_string)
+                .collect();
+            let busy = region
+                .iter()
+                .any(|n| self.state.get(n) == Some(&Slot::Running));
+            if busy {
+                waiting.push((from, to));
+                continue;
+            }
+            for n in &region {
+                self.state.remove(n);
+                self.attempts.remove(n);
+            }
+            self.ready.retain(|n| !region.contains(n));
+            for (i, e) in self.run.flow.edges.iter().enumerate() {
+                if region.contains(&e.from) && region.contains(&e.to) {
+                    self.fired.remove(&i);
+                    self.ruled_out.remove(&i);
+                }
+            }
+            let pass = self.run.pass + 1;
+            self.emit(RunEventKind::Looped {
+                from,
+                to: to.clone(),
+                pass,
+            })
+            .await;
+            self.state.insert(to.clone(), Slot::Queued);
+            self.ready.push_back(to);
+        }
+        self.loops = waiting;
+    }
+
+    /// Start a queued node. `Some` when that ends the run.
+    async fn begin(&mut self, id: &str) -> Option<RunStatus> {
+        if self.state.get(id) != Some(&Slot::Queued) {
+            return None;
+        }
+        let max = self.run.flow.max_steps;
+        if self.nodes_run >= max {
             let error = format!(
-                "the gate hands off to collection {collection}, which is already running this \
-                 chain of hand-offs; use `restart` to loop"
+                "stopped after {} node runs (max_steps) on pass {}",
+                self.nodes_run, self.run.pass
             );
             self.emit(RunEventKind::Error { error }).await;
-            return RunStatus::Failed;
+            self.snapshot(None).await;
+            return Some(RunStatus::Failed);
         }
-        let variables = inputs
+        self.nodes_run += 1;
+        self.state.insert(id.to_string(), Slot::Running);
+        let node = self.run.flow.node(id).cloned()?;
+        match node.kind {
+            NodeKind::Start => self.fire(id, Port::Out).await,
+            NodeKind::Tool { .. } => {
+                let attempt = self.attempts.get(id).copied().unwrap_or(1);
+                self.start_tool(&node, attempt).await;
+            }
+            NodeKind::Branch { rules } => {
+                let vars = &self.run.variables;
+                let (port, checks) = decide(&rules, |p| resolve_json_path(vars, p));
+                self.emit(RunEventKind::Branched {
+                    node: id.to_string(),
+                    port,
+                    checks,
+                })
+                .await;
+                self.fire(id, port).await;
+            }
+            NodeKind::Wait { ms } => {
+                self.started(id, Value::Null, None, 1).await;
+                let node = id.to_string();
+                self.tasks.spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
+                    (node, Outcome::Waited)
+                });
+            }
+            NodeKind::Run { collection, inputs } => {
+                return self.start_child(id, collection, inputs).await;
+            }
+            NodeKind::Fail { message } => {
+                let error = if message.is_empty() {
+                    format!("node {id} failed the run")
+                } else {
+                    message
+                };
+                self.emit(RunEventKind::Error { error }).await;
+                self.snapshot(Some(id.to_string())).await;
+                return Some(RunStatus::Failed);
+            }
+        }
+        None
+    }
+
+    async fn started(&mut self, node: &str, params: Value, pane: Option<String>, attempt: u32) {
+        self.emit(RunEventKind::NodeStarted {
+            node: node.to_string(),
+            unresolved: unresolved_placeholders(&params),
+            params: crate::security::redact(&params),
+            pane,
+            attempt,
+        })
+        .await;
+    }
+
+    /// Attempt `attempt` of tool node `node`: fill its params from the
+    /// scope as it is now and call the tool in a task.
+    async fn start_tool(&mut self, node: &Node, attempt: u32) {
+        let NodeKind::Tool {
+            tool,
+            params,
+            timeout_ms,
+            ..
+        } = &node.kind
+        else {
+            return;
+        };
+        self.attempts.insert(node.id.clone(), attempt);
+        let mut params = params.clone();
+        resolve_variables(&mut params, &self.run.variables);
+        let pane = params
+            .get("pane_id")
+            .and_then(Value::as_str)
+            .filter(|p| !p.is_empty() && !p.contains("{{"))
+            .map(str::to_string);
+        if pane.is_some() {
+            self.last_pane.clone_from(&pane);
+        }
+        self.started(&node.id, params.clone(), pane, attempt).await;
+        let server = self.server.clone();
+        let (id, tool, timeout) = (node.id.clone(), tool.clone(), *timeout_ms);
+        let span = tracing::info_span!("node", node = %id, tool = %tool, attempt);
+        let call = async move {
+            let call = dispatch_tool(&server, &tool, params, crate::security::Origin::Run);
+            let result = match timeout {
+                Some(ms) => tokio::time::timeout(Duration::from_millis(ms), call)
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err((
+                            StatusCode::GATEWAY_TIMEOUT,
+                            format!("timed out after {ms}ms"),
+                        ))
+                    }),
+                None => call.await,
+            };
+            (id, Outcome::Tool(Box::new(result)))
+        };
+        self.tasks
+            .spawn(STEP_OF.scope(self.run.id, call).instrument(span));
+    }
+
+    /// Run node `id`: start `collection` as a child run with `inputs`
+    /// (placeholders filled from this run) and wait for it in a task.
+    async fn start_child(
+        &mut self,
+        id: &str,
+        collection: Uuid,
+        inputs: BTreeMap<String, Value>,
+    ) -> Option<RunStatus> {
+        let variables: HashMap<String, Value> = inputs
             .into_iter()
             .map(|(k, mut v)| {
                 resolve_variables(&mut v, &self.run.variables);
                 (k, v)
             })
             .collect();
+        self.started(id, serde_json::json!(variables), None, 1)
+            .await;
+        if self.ancestors().await.contains(&collection) {
+            let error = format!(
+                "collection {collection} is already running up this chain of run nodes; \
+                 loop with an edge back instead"
+            );
+            return self.failed(id, error, StatusCode::CONFLICT).await;
+        }
         let req = StartRunRequest {
             recipe_id: Some(collection),
             session_id: Some(self.run.session_id.clone()),
             variables,
             ..Default::default()
         };
-        let origin = RunOrigin::Gate {
+        let origin = RunOrigin::Node {
             run_id: self.run.id,
+            node: id.to_string(),
         };
         let initial = *self.ctl.borrow();
-        let (child, mut done) = match start_child(self.server.clone(), req, initial, origin).await {
+        let (child, done) = match start_child(self.server.clone(), req, initial, origin).await {
             Ok(started) => started,
             Err(e) => {
                 let error = format!("cannot start collection {collection}: {e}");
-                self.emit(RunEventKind::Error { error }).await;
-                return RunStatus::Failed;
+                return self.failed(id, error, StatusCode::BAD_REQUEST).await;
             }
         };
+        self.children.insert(id.to_string(), child.id);
         self.emit(RunEventKind::ChildStarted {
+            node: id.to_string(),
             child: child.id,
             collection,
             name: child.title().to_string(),
         })
         .await;
-        let finished = loop {
-            tokio::select! {
-                r = &mut done => break r,
-                Ok(()) = self.ctl.changed() => {
-                    let control = *self.ctl.borrow_and_update();
-                    self.server.runs.set(child.id, control);
-                    // The parent reads as its child does while it waits.
-                    let status = match control {
-                        Control::Pause => RunStatus::Paused,
-                        Control::Run => RunStatus::Running,
-                        Control::Cancel => continue,
-                    };
-                    if self.run.status != status {
-                        self.emit(RunEventKind::Status { status }).await;
-                    }
-                }
-            }
-        };
-        let (status, error) = match finished {
-            Ok(c) => (c.status, c.error),
-            Err(e) => (RunStatus::Failed, Some(e.to_string())),
-        };
-        if status == RunStatus::Failed {
-            let why = error.unwrap_or_else(|| "no error recorded".into());
-            let error = format!("{} (run {}) failed: {why}", child.title(), child.id);
-            self.emit(RunEventKind::Error { error }).await;
-        }
-        status
+        let node = id.to_string();
+        let child_id = child.id;
+        self.tasks
+            .spawn(async move { (node, Outcome::Child(child_id, Box::new(done.await))) });
+        None
     }
 
-    /// The collections of this run and of every run whose gate handed off
-    /// down to it.
+    /// The collections of this run and of every run whose run node started
+    /// it, on up.
     async fn ancestors(&self) -> Vec<Uuid> {
         let mut out: Vec<Uuid> = self.run.recipe_id.into_iter().collect();
         let mut origin = self.run.origin.clone();
-        while let RunOrigin::Gate { run_id } = origin {
+        while let RunOrigin::Node { run_id, .. } = origin {
             match self.server.persistence.load_run_header(&run_id).await {
                 Ok(Some(parent)) => {
                     out.extend(parent.recipe_id);
@@ -844,137 +1180,198 @@ impl Executor {
         out
     }
 
-    /// One pass through the steps. `Some` when the run ends during it.
-    async fn execute_pass(&mut self) -> Option<RunStatus> {
-        let steps = self.run.steps.clone();
-        for step in &steps {
-            if !self.wait_unpaused().await {
-                return Some(RunStatus::Cancelled);
+    /// A node's task came back. `Some` when that ends the run.
+    async fn settle(&mut self, id: String, outcome: Outcome) -> Option<RunStatus> {
+        match outcome {
+            Outcome::Waited => self.finished(&id, Value::Null, Port::Out).await,
+            Outcome::Retry(attempt) => {
+                // Queued like any node, so a pause holds the retry too.
+                self.attempts.insert(id.clone(), attempt);
+                self.state.insert(id.clone(), Slot::Queued);
+                self.ready.push_back(id);
+                None
             }
-            if let Some(gate) = &self.run.gate
-                && self.steps_run >= gate.max_steps
-            {
-                let error = format!(
-                    "stopped after {} requests (the gate's max_steps) on pass {}",
-                    self.steps_run, self.run.pass
-                );
-                self.emit(RunEventKind::Error { error }).await;
-                self.snapshot(None).await;
-                return Some(RunStatus::Failed);
+            Outcome::Tool(result) => self.tool_done(id, *result).await,
+            Outcome::Child(child, joined) => self.child_done(id, child, *joined).await,
+        }
+    }
+
+    /// Tool node `id`'s attempt came back.
+    async fn tool_done(
+        &mut self,
+        id: String,
+        result: Result<rmcp::model::CallToolResult, (StatusCode, String)>,
+    ) -> Option<RunStatus> {
+        match result {
+            Err((code, error)) => {
+                tracing::warn!(node = id, %code, "node failed: {error}");
+                self.failed(&id, error, code).await
             }
-            self.steps_run += 1;
-            let mut params = step.params.clone();
-            resolve_variables(&mut params, &self.run.variables);
-            let pane = params
-                .get("pane_id")
-                .and_then(Value::as_str)
-                .filter(|p| !p.is_empty() && !p.contains("{{"))
-                .map(str::to_string);
-            if pane.is_some() {
-                self.last_pane.clone_from(&pane);
-            }
-            self.emit(RunEventKind::StepStarted {
-                step: step.id.clone(),
-                params: crate::security::redact(&params),
-                unresolved: unresolved_placeholders(&params),
-                pane,
-            })
-            .await;
-            let span = tracing::info_span!("step", step = %step.id, tool = %step.tool);
-            let call = dispatch_tool(
-                &self.server,
-                &step.tool,
-                params,
-                crate::security::Origin::Run,
-            )
-            .instrument(span);
-            let call = STEP_OF.scope(self.run.id, call);
-            let outcome = tokio::select! {
-                r = call => Some(r),
-                () = cancelled(&mut self.ctl) => None,
-            };
-            let def = step;
-            let step = step.id.clone();
-            match outcome {
-                Some(Ok(result)) => {
-                    let result = serde_json::to_value(&result).unwrap_or_default();
-                    // An agent a step started is the pane to look at next.
-                    if let Some(p) = tool_payload(&result).get("pane_id").and_then(Value::as_str) {
-                        self.last_pane = Some(p.to_string());
-                    }
-                    self.emit(RunEventKind::StepFinished {
-                        step: step.clone(),
-                        result: result.clone(),
-                    })
-                    .await;
+            Ok(result) => {
+                let result = serde_json::to_value(&result).unwrap_or_default();
+                if herdr_mcp_api::tool_is_error(&result) {
                     // The tool ran and said it failed (bad params, herdr
-                    // refusing a method): the run fails like any other step
-                    // error; no gate can see past it.
-                    if herdr_mcp_api::tool_is_error(&result) {
-                        let text = herdr_mcp_api::tool_text(&result);
-                        let error = if text.is_empty() {
-                            format!("{} reported an error", def.tool)
-                        } else {
-                            text
-                        };
-                        tracing::warn!(step, "step failed: {error}");
-                        self.emit(RunEventKind::StepFailed {
-                            step: step.clone(),
-                            error,
-                            status_code: 422,
-                        })
+                    // refusing a method): a failure like any other.
+                    let text = herdr_mcp_api::tool_text(&result);
+                    let tool = self
+                        .run
+                        .flow
+                        .node(&id)
+                        .and_then(Node::tool_name)
+                        .unwrap_or("the tool");
+                    let error = if text.is_empty() {
+                        format!("{tool} reported an error")
+                    } else {
+                        text
+                    };
+                    return self
+                        .failed(&id, error, StatusCode::UNPROCESSABLE_ENTITY)
                         .await;
-                        self.snapshot(Some(step)).await;
-                        return Some(RunStatus::Failed);
-                    }
-                    if let Err(error) = self.extract(def, &result).await {
-                        self.emit(RunEventKind::StepFailed {
-                            step: step.clone(),
-                            error,
-                            status_code: 422,
-                        })
+                }
+                // An agent a node started is the pane to look at next.
+                if let Some(p) = tool_payload(&result).get("pane_id").and_then(Value::as_str) {
+                    self.last_pane = Some(p.to_string());
+                }
+                let extract = match self.run.flow.node(&id).map(|n| &n.kind) {
+                    Some(NodeKind::Tool { extract, .. }) => extract.clone(),
+                    _ => Vec::new(),
+                };
+                if let Err(error) = self.extract(&id, &extract, &result).await {
+                    return self
+                        .failed(&id, error, StatusCode::UNPROCESSABLE_ENTITY)
                         .await;
-                        self.snapshot(Some(step)).await;
-                        return Some(RunStatus::Failed);
-                    }
                 }
-                Some(Err((code, error))) => {
-                    tracing::warn!(step, %code, "step failed: {error}");
-                    self.emit(RunEventKind::StepFailed {
-                        step: step.clone(),
-                        error,
-                        status_code: code.as_u16(),
-                    })
-                    .await;
-                    self.snapshot(Some(step)).await;
-                    return Some(RunStatus::Failed);
-                }
-                None => {
-                    self.emit(RunEventKind::StepCancelled { step }).await;
-                    return Some(RunStatus::Cancelled);
-                }
+                self.finished(&id, result, Port::Out).await
             }
         }
+    }
+
+    /// Run node `id`'s child run `child` ended: its outcome is the node's
+    /// result.
+    async fn child_done(
+        &mut self,
+        id: String,
+        child: Uuid,
+        joined: Result<RunRecord, tokio::task::JoinError>,
+    ) -> Option<RunStatus> {
+        self.children.remove(&id);
+        let record = match joined {
+            Ok(record) => record,
+            Err(e) => {
+                let error = format!("child run {child} died: {e}");
+                return self
+                    .failed(&id, error, StatusCode::INTERNAL_SERVER_ERROR)
+                    .await;
+            }
+        };
+        let events = self
+            .server
+            .persistence
+            .load_run_events(&child, 0)
+            .await
+            .unwrap_or_default();
+        let variables: serde_json::Map<String, Value> = events
+            .into_iter()
+            .filter_map(|e| match e.kind {
+                RunEventKind::VariableSet { var, value, .. } => Some((var, value)),
+                _ => None,
+            })
+            .collect();
+        let result = serde_json::json!({
+            "run_id": record.id,
+            "status": record.status,
+            "error": record.error,
+            "variables": variables,
+        });
+        if record.status == RunStatus::Completed {
+            return self.finished(&id, result, Port::Out).await;
+        }
+        let why = record.error.as_deref().unwrap_or("no error recorded");
+        let error = format!(
+            "{} (run {}) {}: {why}",
+            record.title(),
+            record.id,
+            record.status.as_str()
+        );
+        self.failed_with(&id, error, StatusCode::BAD_GATEWAY, result)
+            .await
+    }
+
+    async fn finished(&mut self, id: &str, result: Value, port: Port) -> Option<RunStatus> {
+        self.emit(RunEventKind::NodeFinished {
+            node: id.to_string(),
+            result,
+            port,
+        })
+        .await;
+        self.fire(id, port).await;
         None
     }
 
-    /// Save each of `step`'s [`Extract`]s from its `result`, in order. `Err`
-    /// says which one failed and why.
-    async fn extract(&mut self, step: &RecipeStep, result: &Value) -> Result<(), String> {
-        if !step.extract.is_empty() && herdr_mcp_api::tool_is_error(result) {
-            return Err(format!(
-                "nothing extracted: the tool failed: {}",
-                herdr_mcp_api::tool_text(result)
-            ));
+    /// Attempt failed: retry when the node has attempts left, else take its
+    /// `error` port when it has an edge there, else fail the run.
+    async fn failed(&mut self, id: &str, error: String, code: StatusCode) -> Option<RunStatus> {
+        let result = serde_json::json!({ "error": error, "statusCode": code.as_u16() });
+        self.failed_with(id, error, code, result).await
+    }
+
+    async fn failed_with(
+        &mut self,
+        id: &str,
+        error: String,
+        code: StatusCode,
+        result: Value,
+    ) -> Option<RunStatus> {
+        let retry = match self.run.flow.node(id).map(|n| &n.kind) {
+            Some(NodeKind::Tool { retry, .. }) => *retry,
+            _ => herdr_mcp_api::Retry::default(),
+        };
+        let attempt = self.attempts.get(id).copied().unwrap_or(1);
+        let again = attempt <= retry.times;
+        self.emit(RunEventKind::NodeFailed {
+            node: id.to_string(),
+            error,
+            status_code: code.as_u16(),
+            retry_in_ms: again.then_some(retry.delay_ms),
+        })
+        .await;
+        if again {
+            let node = id.to_string();
+            self.tasks.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(retry.delay_ms)).await;
+                (node, Outcome::Retry(attempt + 1))
+            });
+            return None;
         }
-        for x in &step.extract {
+        let handled = self
+            .run
+            .flow
+            .edges
+            .iter()
+            .any(|e| e.from == id && e.port == Port::Error);
+        if handled {
+            return self.finished(id, result, Port::Error).await;
+        }
+        self.snapshot(Some(id.to_string())).await;
+        Some(RunStatus::Failed)
+    }
+
+    /// Save each of node `id`'s [`Extract`]s from its `result`, in order.
+    /// `Err` says which one failed and why.
+    async fn extract(
+        &mut self,
+        id: &str,
+        extract: &[Extract],
+        result: &Value,
+    ) -> Result<(), String> {
+        for x in extract {
             let value = extract_value(result, &x.path)
                 .ok_or_else(|| format!("extract {}: no `{}` in the result", x.var, x.path))?;
             self.save(x, &value)
                 .await
                 .map_err(|e| format!("extract {}: {e:#}", x.var))?;
             self.emit(RunEventKind::VariableSet {
-                step: step.id.clone(),
+                node: id.to_string(),
                 var: x.var.clone(),
                 scope: x.scope,
                 value,
@@ -1003,50 +1400,13 @@ impl Executor {
             }
         }
     }
-
-    /// Block while paused (recording pause/resume). False if cancelled.
-    async fn wait_unpaused(&mut self) -> bool {
-        loop {
-            let control = *self.ctl.borrow_and_update();
-            match control {
-                Control::Run => {
-                    if self.run.status == RunStatus::Paused {
-                        self.emit(RunEventKind::Status {
-                            status: RunStatus::Running,
-                        })
-                        .await;
-                    }
-                    return true;
-                }
-                Control::Cancel => return false,
-                Control::Pause => {
-                    if self.run.status != RunStatus::Paused {
-                        self.emit(RunEventKind::Status {
-                            status: RunStatus::Paused,
-                        })
-                        .await;
-                    }
-                    // Sender gone means the run was dropped from `Runs`: stop.
-                    if self.ctl.changed().await.is_err() {
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Resolves when the run is cancelled; never if its control channel closes.
-async fn cancelled(ctl: &mut watch::Receiver<Control>) {
-    if ctl.wait_for(|c| *c == Control::Cancel).await.is_err() {
-        std::future::pending::<()>().await;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{AgentRegistry, Persistence};
+    use herdr_mcp_api::RecipeStep;
     use std::time::Duration;
 
     /// Tests start runs as the API would.
@@ -1127,7 +1487,7 @@ mod tests {
             id: Uuid::new_v4(),
             name: "collection".into(),
             description: None,
-            steps,
+            flow: Flow::chain(steps),
             variables: vars
                 .iter()
                 .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
@@ -1137,41 +1497,10 @@ mod tests {
             is_template: false,
             category: None,
             triggers: Vec::new(),
-            gate: None,
             trail: Default::default(),
         };
         server.persistence.save_recipe(&recipe).await.unwrap();
         recipe.id
-    }
-
-    /// A saved recipe of `steps` with a gate of `rules`.
-    async fn save_gated(
-        server: &HerdrMcpServer,
-        steps: Vec<RecipeStep>,
-        rules: Vec<herdr_mcp_api::GateRule>,
-        max_steps: u32,
-    ) -> Uuid {
-        let id = save_recipe(server, steps, &[]).await;
-        let mut recipe = server.persistence.load_recipe(&id).await.unwrap().unwrap();
-        recipe.gate = Some(Gate { rules, max_steps });
-        server.persistence.save_recipe(&recipe).await.unwrap();
-        id
-    }
-
-    fn gate_rule(checks: Vec<herdr_mcp_api::Check>, then: GateAction) -> herdr_mcp_api::GateRule {
-        herdr_mcp_api::GateRule {
-            checks,
-            any: false,
-            then,
-        }
-    }
-
-    fn check(path: &str, op: herdr_mcp_api::Op, value: Value) -> herdr_mcp_api::Check {
-        herdr_mcp_api::Check {
-            path: path.into(),
-            op,
-            value,
-        }
     }
 
     async fn run_recipe(server: &HerdrMcpServer, id: Uuid) -> RunRecord {
@@ -1180,83 +1509,6 @@ mod tests {
             ..Default::default()
         };
         start_run(server, req).await.unwrap().1.await.unwrap()
-    }
-
-    /// The gate's decisions: the rule matched and its action, if any.
-    fn gate_events(events: &[RunEvent]) -> Vec<Option<(usize, GateAction)>> {
-        events
-            .iter()
-            .filter_map(|e| match &e.kind {
-                RunEventKind::GateDecided { rule, action, .. } => Some(rule.zip(action.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// A restart rule loops the collection until a later rule ends it;
-    /// `{{ run.pass }}` counts the passes.
-    #[tokio::test]
-    async fn gate_restarts_until_a_rule_ends_the_run() {
-        let tmp = tempfile::tempdir().unwrap();
-        let server = test_server(tmp.path());
-        let id = save_gated(
-            &server,
-            vec![var_set("count", "{{ run.pass }}", Vec::new())],
-            vec![
-                gate_rule(
-                    vec![check("count.value", herdr_mcp_api::Op::Lt, 3.into())],
-                    GateAction::Restart { delay_ms: 1 },
-                ),
-                gate_rule(Vec::new(), GateAction::End),
-            ],
-            herdr_mcp_api::gate::DEFAULT_MAX_STEPS,
-        )
-        .await;
-        let done = run_recipe(&server, id).await;
-        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
-        assert_eq!(done.pass, 3);
-        assert_eq!(done.variables["run.pass"], 3);
-        let count = herdr_mcp_api::tool_payload(&done.results["count"]).unwrap();
-        assert_eq!(count["value"], "3");
-        let events = server
-            .persistence
-            .load_run_events(&done.id, 0)
-            .await
-            .unwrap();
-        let restart = GateAction::Restart { delay_ms: 1 };
-        assert_eq!(
-            gate_events(&events),
-            [
-                Some((0, restart.clone())),
-                Some((0, restart)),
-                Some((1, GateAction::End))
-            ]
-        );
-        let first = events
-            .iter()
-            .find_map(|e| match &e.kind {
-                RunEventKind::GateDecided { checks, .. } => Some(checks.clone()),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].found, Some("1".into()));
-        assert!(first[0].held);
-        let trail = herdr_mcp_api::trail_text(&done, &events);
-        assert!(trail.contains("gate: rule 1 → restart 1ms"), "{trail}");
-        assert!(
-            trail.contains("rule 1: count.value lt 3 — found \"1\" ✔"),
-            "{trail}"
-        );
-        assert!(trail.contains("gate: rule 2 → end"), "{trail}");
-        // The folded log agrees with the live record.
-        let header = server
-            .persistence
-            .load_run_header(&done.id)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(fold(header, &events), done);
     }
 
     /// A step's start records its params as sent (secrets redacted), the
@@ -1301,7 +1553,7 @@ mod tests {
         let (params, unresolved, pane) = events
             .iter()
             .find_map(|e| match &e.kind {
-                RunEventKind::StepStarted {
+                RunEventKind::NodeStarted {
                     params,
                     unresolved,
                     pane,
@@ -1364,9 +1616,8 @@ mod tests {
             recipe_id: Some(id),
             name: None,
             session_id: "w1".into(),
-            steps: vec![],
+            flow: Flow::default(),
             origin: RunOrigin::Schedule,
-            gate: None,
             seed: HashMap::new(),
             started_at: Utc::now() - chrono::Duration::days(6),
         };
@@ -1375,117 +1626,6 @@ mod tests {
         prune_all(&server).await;
         assert_eq!(count(&server, Some(id)).await, 2);
         assert!(load(&server, old.id).await.unwrap().is_none());
-    }
-
-    /// A fail rule fails the run with its message; no rule matching
-    /// completes it.
-    #[tokio::test]
-    async fn gate_fail_rule_and_no_match() {
-        let tmp = tempfile::tempdir().unwrap();
-        let server = test_server(tmp.path());
-        let fail = |path: &str| {
-            vec![gate_rule(
-                vec![check(path, herdr_mcp_api::Op::Exists, Value::Null)],
-                GateAction::Fail {
-                    message: "pane gone".into(),
-                },
-            )]
-        };
-        let id = save_gated(
-            &server,
-            vec![var_set("a", "x", Vec::new())],
-            fail("a.value"),
-            10,
-        )
-        .await;
-        let done = run_recipe(&server, id).await;
-        assert_eq!(done.status, RunStatus::Failed);
-        assert_eq!(done.error.as_deref(), Some("pane gone"));
-        assert_eq!(done.failed_step, None);
-
-        let id = save_gated(
-            &server,
-            vec![var_set("a", "x", Vec::new())],
-            fail("a.nope"),
-            10,
-        )
-        .await;
-        let done = run_recipe(&server, id).await;
-        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
-        let events = server
-            .persistence
-            .load_run_events(&done.id, 0)
-            .await
-            .unwrap();
-        assert_eq!(gate_events(&events), [None]);
-    }
-
-    /// An endless restart loop fails once the gate's `max_steps` requests
-    /// have run.
-    #[tokio::test]
-    async fn gate_max_steps_stops_a_loop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let server = test_server(tmp.path());
-        let id = save_gated(
-            &server,
-            vec![var_set("a", "x", Vec::new()), var_set("b", "y", Vec::new())],
-            vec![gate_rule(Vec::new(), GateAction::Restart { delay_ms: 0 })],
-            5,
-        )
-        .await;
-        let done = run_recipe(&server, id).await;
-        assert_eq!(done.status, RunStatus::Failed);
-        assert_eq!(done.pass, 3);
-        let error = done.error.unwrap();
-        assert!(error.contains("after 5 requests"), "{error}");
-        let started = server
-            .persistence
-            .load_run_events(&done.id, 0)
-            .await
-            .unwrap()
-            .iter()
-            .filter(|e| matches!(e.kind, RunEventKind::StepStarted { .. }))
-            .count();
-        assert_eq!(started, 5);
-    }
-
-    /// Sending some requests of a gated collection ignores the gate; a
-    /// cancel during a restart delay stops the run at once.
-    #[tokio::test]
-    async fn gate_skipped_for_step_ids_and_cancel_interrupts_the_delay() {
-        let tmp = tempfile::tempdir().unwrap();
-        let server = test_server(tmp.path());
-        let id = save_gated(
-            &server,
-            vec![var_set("a", "x", Vec::new())],
-            vec![gate_rule(
-                Vec::new(),
-                GateAction::Restart { delay_ms: 60_000 },
-            )],
-            10,
-        )
-        .await;
-        let req = StartRunRequest {
-            recipe_id: Some(id),
-            step_ids: vec!["a".into()],
-            ..Default::default()
-        };
-        let sent = start_run(&server, req).await.unwrap().1.await.unwrap();
-        assert_eq!(sent.status, RunStatus::Completed);
-        assert_eq!(sent.gate, None);
-
-        let req = StartRunRequest {
-            recipe_id: Some(id),
-            ..Default::default()
-        };
-        let (first, handle) = start_run(&server, req).await.unwrap();
-        wait_record(&server, first.id, |r| r.pass == 2).await;
-        assert!(server.runs.control(first.id, RunAction::Cancel));
-        let done = tokio::time::timeout(Duration::from_secs(5), handle)
-            .await
-            .expect("cancel ends the delay")
-            .unwrap();
-        assert_eq!(done.status, RunStatus::Cancelled);
     }
 
     /// Extract rules save into globals and the recipe, and later steps of
@@ -1537,10 +1677,10 @@ mod tests {
         assert_eq!(sets, 2);
     }
 
-    /// `step_ids` sends single requests of a collection; unknown ids are
+    /// `node_ids` sends single requests of a collection; unknown ids are
     /// refused before anything runs.
     #[tokio::test]
-    async fn step_ids_run_only_those_steps() {
+    async fn node_ids_run_only_those_steps() {
         let tmp = tempfile::tempdir().unwrap();
         let server = test_server(tmp.path());
         let id = save_recipe(
@@ -1551,7 +1691,7 @@ mod tests {
         .await;
         let req = |ids: &[&str]| StartRunRequest {
             recipe_id: Some(id),
-            step_ids: ids.iter().map(|s| s.to_string()).collect(),
+            node_ids: ids.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         };
         let done = start_run(&server, req(&["b"]))
@@ -1564,7 +1704,7 @@ mod tests {
         assert_eq!(done.results.keys().collect::<Vec<_>>(), ["b"]);
         assert!(matches!(
             start_run(&server, req(&["b", "nope"])).await,
-            Err(StartError::UnknownStep(s)) if s == "nope"
+            Err(StartError::UnknownNode(s)) if s == "nope"
         ));
     }
 
@@ -1582,7 +1722,7 @@ mod tests {
         let (_, handle) = start_run(&server, run).await.unwrap();
         let done = handle.await.unwrap();
         assert_eq!(done.status, RunStatus::Failed);
-        assert_eq!(done.failed_step.as_deref(), Some("bad"));
+        assert_eq!(done.failed_node.as_deref(), Some("bad"));
         let error = done.error.unwrap();
         assert!(error.contains("deserialize"), "{error}");
         assert!(!done.results.contains_key("after"));
@@ -1607,7 +1747,7 @@ mod tests {
             let run = adhoc(vec![var_set("a", "1", vec![rule])]);
             let done = start_run(&server, run).await.unwrap().1.await.unwrap();
             assert_eq!(done.status, RunStatus::Failed);
-            assert_eq!(done.failed_step.as_deref(), Some("a"));
+            assert_eq!(done.failed_node.as_deref(), Some("a"));
             let error = done.error.unwrap_or_default();
             assert!(error.contains(want), "{error}");
         }
@@ -1658,12 +1798,13 @@ mod tests {
                         status: RunStatus::Running
                     }
                 ),
-                (1, RunEventKind::StepStarted { .. }),
-                (2, RunEventKind::StepFinished { .. }),
-                (3, RunEventKind::StepStarted { .. }),
-                (4, RunEventKind::StepFinished { .. }),
+                (1, RunEventKind::NodeFinished { .. }),
+                (2, RunEventKind::NodeStarted { .. }),
+                (3, RunEventKind::NodeFinished { .. }),
+                (4, RunEventKind::NodeStarted { .. }),
+                (5, RunEventKind::NodeFinished { .. }),
                 (
-                    5,
+                    6,
                     RunEventKind::Status {
                         status: RunStatus::Completed
                     }
@@ -1688,7 +1829,7 @@ mod tests {
         .unwrap();
         let done = handle.await.unwrap();
         assert_eq!(done.status, RunStatus::Failed);
-        assert_eq!(done.failed_step.as_deref(), Some("bad"));
+        assert_eq!(done.failed_node.as_deref(), Some("bad"));
         assert!(done.results.contains_key("ok") && !done.results.contains_key("never"));
     }
 
@@ -1701,7 +1842,7 @@ mod tests {
         let req = adhoc(vec![step("a", "list_templates")]);
         let (run, handle) = start_with(&server, req, Control::Pause).await.unwrap();
         let paused = wait_record(&server, run.id, |r| r.status == RunStatus::Paused).await;
-        assert_eq!(paused.current_step, None, "paused before the first step");
+        assert!(paused.active.is_empty(), "paused before the first node");
         assert!(paused.results.is_empty());
 
         assert!(server.runs.control(run.id, RunAction::Resume));
@@ -1752,11 +1893,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(renamed["name"], "r2");
-        assert_eq!(renamed["steps"][0]["id"], "a");
+        assert_eq!(renamed["flow"]["nodes"][1]["id"], "a");
         let list = call(&server, "recipe_list", serde_json::json!({}))
             .await
             .unwrap();
-        assert_eq!(list["recipes"][0]["steps"], serde_json::json!(["a"]));
+        assert_eq!(
+            list["recipes"][0]["nodes"],
+            serde_json::json!(["start", "a"])
+        );
 
         let run = call(
             &server,
@@ -1782,7 +1926,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(err.contains("name and steps"), "{err}");
+        assert!(err.contains("name and flow"), "{err}");
         let err = call(
             &server,
             "run_control",
@@ -1802,14 +1946,13 @@ mod tests {
             id: Uuid::new_v4(),
             name: "two".into(),
             description: None,
-            steps: vec![step("a", "list_templates")],
+            flow: Flow::chain(vec![step("a", "list_templates")]),
             variables: HashMap::from([("workspace_id".into(), serde_json::json!("w7"))]),
             created_at: now,
             updated_at: now,
             is_template: false,
             category: None,
             triggers: Vec::new(),
-            gate: None,
             trail: Default::default(),
         };
         server.persistence.save_recipe(&recipe).await.unwrap();
@@ -1845,14 +1988,13 @@ mod tests {
             id: Uuid::new_v4(),
             name: "cron".into(),
             description: None,
-            steps: vec![step("a", "list_templates")],
+            flow: Flow::chain(vec![step("a", "list_templates")]),
             variables: HashMap::new(),
             created_at: now,
             updated_at: now,
             is_template: false,
             category: None,
             triggers: Vec::new(),
-            gate: None,
             trail: Default::default(),
         };
         server.persistence.save_recipe(&recipe).await.unwrap();
@@ -1899,7 +2041,7 @@ mod tests {
             step("b", "list_templates"),
         ]);
         let (run, handle) = start_with(&server, req, Control::Pause).await.unwrap();
-        // Logged so far: running(0), paused(1).
+        // Logged so far: running(0), start finished(1), paused(2).
         wait_record(&server, run.id, |r| r.status == RunStatus::Paused).await;
         let stream = event_stream(server.clone(), Some(run.id), Some(1));
         tokio::pin!(stream);
@@ -1921,8 +2063,9 @@ mod tests {
                 break;
             }
         }
-        // running(2) a-started(3) a-finished(4) b-started(5) b-finished(6) completed(7)
-        assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6, 7]);
+        // paused(2) running(3) a-started(4) a-finished(5) b-started(6)
+        // b-finished(7) completed(8)
+        assert_eq!(seqs, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
@@ -1932,15 +2075,14 @@ mod tests {
             recipe_id: None,
             name: None,
             session_id: "w1".into(),
-            steps: vec![],
+            flow: Flow::default(),
             origin: Default::default(),
-            gate: None,
             pass: 1,
             status: RunStatus::Running,
-            current_step: None,
+            active: Vec::new(),
             results: HashMap::new(),
             variables: HashMap::new(),
-            failed_step: None,
+            failed_node: None,
             error: None,
             started_at: chrono::Utc::now(),
             finished_at: None,
@@ -1963,9 +2105,8 @@ mod tests {
             recipe_id: None,
             name: None,
             session_id: "w1".into(),
-            steps: vec![],
+            flow: Flow::default(),
             origin: Default::default(),
-            gate: None,
             seed: HashMap::new(),
             started_at: Utc::now(),
         };
@@ -1974,9 +2115,10 @@ mod tests {
             run_id: header.id,
             seq: 1,
             at: Utc::now(),
-            kind: RunEventKind::StepFinished {
-                step: "spawn".into(),
+            kind: RunEventKind::NodeFinished {
+                node: "spawn".into(),
                 result: serde_json::json!({"content": [{"type": "text", "text": handle}]}),
+                port: Port::Out,
             },
         };
         let run = fold(header, &[event]);
@@ -1998,162 +2140,6 @@ mod tests {
         assert_eq!(workspace_for(Some(" ".into()), &scope), "w3");
         assert_eq!(workspace_for(Some("w9".into()), &scope), "w9");
         assert_eq!(workspace_for(None, &HashMap::new()), "w1");
-    }
-
-    fn hand_off(collection: Uuid, inputs: &[(&str, &str)]) -> GateAction {
-        GateAction::Run {
-            collection,
-            inputs: inputs
-                .iter()
-                .map(|(k, v)| ((*k).into(), (*v).into()))
-                .collect(),
-        }
-    }
-
-    async fn set_gate(server: &HerdrMcpServer, id: Uuid, then: GateAction) {
-        let mut recipe = server.persistence.load_recipe(&id).await.unwrap().unwrap();
-        recipe.gate = Some(Gate {
-            rules: vec![gate_rule(Vec::new(), then)],
-            max_steps: 10,
-        });
-        server.persistence.save_recipe(&recipe).await.unwrap();
-    }
-
-    fn child_of(events: &[RunEvent]) -> Uuid {
-        events
-            .iter()
-            .find_map(|e| match e.kind {
-                RunEventKind::ChildStarted { child, .. } => Some(child),
-                _ => None,
-            })
-            .expect("a child run")
-    }
-
-    /// The gate's `run` starts the other collection as a child run that
-    /// sees its inputs but not the parent's variables; the parent ends as
-    /// the child ends, and the parent's trail carries the child's.
-    #[tokio::test]
-    async fn gate_hands_off_to_an_isolated_child_run() {
-        let tmp = tempfile::tempdir().unwrap();
-        let server = test_server(tmp.path());
-        let child = save_recipe(&server, vec![var_set("b", "{{who}}", Vec::new())], &[]).await;
-        let parent = save_recipe(
-            &server,
-            vec![var_set("a", "x", Vec::new())],
-            &[("secret", "s")],
-        )
-        .await;
-        set_gate(
-            &server,
-            parent,
-            hand_off(child, &[("who", "pass {{run.pass}}")]),
-        )
-        .await;
-
-        let done = run_recipe(&server, parent).await;
-        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
-        let events = server
-            .persistence
-            .load_run_events(&done.id, 0)
-            .await
-            .unwrap();
-        let kid = load(&server, child_of(&events)).await.unwrap().unwrap();
-        assert_eq!(kid.status, RunStatus::Completed);
-        assert_eq!(kid.recipe_id, Some(child));
-        assert_eq!(kid.origin, RunOrigin::Gate { run_id: done.id });
-        assert_eq!(kid.session_id, done.session_id);
-        assert_eq!(kid.variables["who"], "pass 1");
-        assert!(
-            !kid.variables.contains_key("secret"),
-            "the child's scope is its own"
-        );
-        assert!(!kid.variables.contains_key("a"));
-
-        let text = trail(&server, done.id).await.unwrap().unwrap();
-        assert!(
-            text.contains(&format!("⇢ collection · run {}", kid.id)),
-            "{text}"
-        );
-        assert!(
-            text.contains(&format!("\n    collection · run {} · completed", kid.id)),
-            "{text}"
-        );
-        assert!(
-            text.contains(&format!("by the gate of run {}", done.id)),
-            "{text}"
-        );
-    }
-
-    /// A child's failure fails the parent with the child's error; handing
-    /// back to a collection already up the chain fails instead of nesting
-    /// forever.
-    #[tokio::test]
-    async fn gate_hand_off_fails_up_and_stops_cycles() {
-        let tmp = tempfile::tempdir().unwrap();
-        let server = test_server(tmp.path());
-        let a = save_recipe(&server, vec![var_set("a", "x", Vec::new())], &[]).await;
-        let b = save_recipe(&server, vec![var_set("b", "y", Vec::new())], &[]).await;
-        set_gate(&server, a, hand_off(b, &[])).await;
-        set_gate(&server, b, hand_off(a, &[])).await;
-
-        let done = run_recipe(&server, a).await;
-        assert_eq!(done.status, RunStatus::Failed);
-        let error = done.error.unwrap();
-        assert!(
-            error.contains("failed: the gate hands off to collection"),
-            "{error}"
-        );
-        assert!(error.contains("use `restart` to loop"), "{error}");
-    }
-
-    /// Cancelling the parent while its child runs cancels the child too.
-    #[tokio::test]
-    async fn pause_and_cancel_reach_the_child() {
-        let tmp = tempfile::tempdir().unwrap();
-        let server = test_server(tmp.path());
-        let child = save_recipe(&server, vec![var_set("b", "y", Vec::new())], &[]).await;
-        set_gate(&server, child, GateAction::Restart { delay_ms: 60_000 }).await;
-        let parent = save_recipe(&server, vec![var_set("a", "x", Vec::new())], &[]).await;
-        set_gate(&server, parent, hand_off(child, &[])).await;
-
-        let req = StartRunRequest {
-            recipe_id: Some(parent),
-            ..Default::default()
-        };
-        let (first, handle) = start_run(&server, req).await.unwrap();
-        wait_record(&server, first.id, |_| true).await;
-        let mut kid = None;
-        for _ in 0..200 {
-            let events = server
-                .persistence
-                .load_run_events(&first.id, 0)
-                .await
-                .unwrap();
-            if events
-                .iter()
-                .any(|e| matches!(e.kind, RunEventKind::ChildStarted { .. }))
-            {
-                kid = Some(child_of(&events));
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let kid = kid.expect("the parent hands off");
-        wait_record(&server, kid, |r| r.pass == 2).await;
-        // The parent reads as paused while its child is.
-        assert!(server.runs.control(first.id, RunAction::Pause));
-        // (The child, sleeping out its restart delay, pauses at its next step.)
-        wait_record(&server, first.id, |r| r.status == RunStatus::Paused).await;
-        assert!(server.runs.control(first.id, RunAction::Resume));
-        wait_record(&server, first.id, |r| r.status == RunStatus::Running).await;
-        assert!(server.runs.control(first.id, RunAction::Cancel));
-        let done = tokio::time::timeout(Duration::from_secs(5), handle)
-            .await
-            .expect("the cancel reaches the child")
-            .unwrap();
-        assert_eq!(done.status, RunStatus::Cancelled);
-        let kid = load(&server, kid).await.unwrap().unwrap();
-        assert_eq!(kid.status, RunStatus::Cancelled);
     }
 
     /// A run that a step's `recipe_run` starts names that step's run as its
@@ -2181,5 +2167,418 @@ mod tests {
             .find(|r| r.recipe_id == Some(child))
             .expect("the step started the child");
         assert_eq!(kid.origin.parent(), Some(first.id));
+    }
+
+    // ── graph semantics ────────────────────────────────────────────────
+
+    fn flow(value: Value) -> Flow {
+        serde_json::from_value(value).unwrap()
+    }
+
+    async fn save_flow(server: &HerdrMcpServer, f: Flow) -> Uuid {
+        let id = save_recipe(server, Vec::new(), &[]).await;
+        let mut recipe = server.persistence.load_recipe(&id).await.unwrap().unwrap();
+        recipe.flow = f;
+        server.persistence.save_recipe(&recipe).await.unwrap();
+        id
+    }
+
+    async fn run_flow(server: &HerdrMcpServer, f: Flow) -> (RunRecord, Vec<RunEvent>) {
+        let req = StartRunRequest {
+            flow: Some(f),
+            ..Default::default()
+        };
+        let done = start_run(server, req).await.unwrap().1.await.unwrap();
+        let events = server
+            .persistence
+            .load_run_events(&done.id, 0)
+            .await
+            .unwrap();
+        (done, events)
+    }
+
+    fn kinds<'a>(
+        events: &'a [RunEvent],
+        f: impl Fn(&'a RunEventKind) -> Option<String>,
+    ) -> Vec<String> {
+        events.iter().filter_map(|e| f(&e.kind)).collect()
+    }
+
+    fn set(id: &str, value: &str) -> Value {
+        serde_json::json!({ "id": id, "type": "tool", "tool": "var_set",
+            "params": { "session_id": "w1", "key": id, "value": value } })
+    }
+
+    /// An edge back upstream loops; a branch ends the loop; `run.pass`
+    /// counts the passes; the log folds back to the live record.
+    #[tokio::test]
+    async fn a_loop_runs_until_its_branch_lets_go() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let f = flow(serde_json::json!({
+            "nodes": [
+                { "id": "start", "type": "start" },
+                set("count", "{{ run.pass }}"),
+                { "id": "more", "type": "branch", "rules": [
+                    { "checks": [{ "path": "count.value", "op": "lt", "value": 3 }] }] },
+                { "id": "nap", "type": "wait", "ms": 1 }
+            ],
+            "edges": [
+                { "from": "start", "to": "count" },
+                { "from": "count", "to": "more" },
+                { "from": "more", "port": "1", "to": "nap" },
+                { "from": "nap", "to": "count" }
+            ]
+        }));
+        let (done, events) = run_flow(&server, f).await;
+        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+        assert_eq!(done.pass, 3);
+        assert_eq!(done.variables["run.pass"], 3);
+        let count = herdr_mcp_api::tool_payload(&done.results["count"]).unwrap();
+        assert_eq!(count["value"], "3");
+        let ports = kinds(&events, |k| match k {
+            RunEventKind::Branched { port, .. } => Some(port.to_string()),
+            _ => None,
+        });
+        assert_eq!(ports, ["1", "1", "else"]);
+        let loops = kinds(&events, |k| match k {
+            RunEventKind::Looped { from, to, pass } => Some(format!("{from}>{to}#{pass}")),
+            _ => None,
+        });
+        assert_eq!(loops, ["nap>count#2", "nap>count#3"]);
+        let trail = herdr_mcp_api::trail_text(&done, &events);
+        assert!(trail.contains("more → 1"), "{trail}");
+        assert!(
+            trail.contains("rule 1: count.value lt 3 — found \"1\" ✔"),
+            "{trail}"
+        );
+        assert!(trail.contains("↺ nap → count · pass 2"), "{trail}");
+        let header = server
+            .persistence
+            .load_run_header(&done.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(fold(header, &events), done);
+    }
+
+    /// Two paths from the start run at once; the node they meet at waits
+    /// for both and runs once.
+    #[tokio::test]
+    async fn fan_out_runs_in_parallel_and_the_join_waits_for_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let f = flow(serde_json::json!({
+            "nodes": [
+                { "id": "start", "type": "start" },
+                { "id": "a", "type": "wait", "ms": 150 },
+                { "id": "b", "type": "wait", "ms": 150 },
+                set("join", "both")
+            ],
+            "edges": [
+                { "from": "start", "to": "a" },
+                { "from": "start", "to": "b" },
+                { "from": "a", "to": "join" },
+                { "from": "b", "to": "join" }
+            ]
+        }));
+        let began = std::time::Instant::now();
+        let (done, events) = run_flow(&server, f).await;
+        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+        assert!(
+            began.elapsed() < Duration::from_millis(290),
+            "{:?}",
+            began.elapsed()
+        );
+        let order = kinds(&events, |k| match k {
+            RunEventKind::NodeStarted { node, .. } => Some(node.clone()),
+            _ => None,
+        });
+        assert_eq!(order.iter().filter(|n| *n == "join").count(), 1);
+        assert_eq!(order.last().map(String::as_str), Some("join"));
+    }
+
+    /// The port a branch does not take is ruled out: the node behind it is
+    /// skipped and a join after both paths still runs.
+    #[tokio::test]
+    async fn an_untaken_port_skips_its_path_and_the_join_goes_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let f = flow(serde_json::json!({
+            "nodes": [
+                { "id": "start", "type": "start" },
+                { "id": "pick", "type": "branch", "rules": [{}] },
+                set("yes", "1"),
+                set("no", "1"),
+                set("after", "1")
+            ],
+            "edges": [
+                { "from": "start", "to": "pick" },
+                { "from": "pick", "port": "1", "to": "yes" },
+                { "from": "pick", "port": "else", "to": "no" },
+                { "from": "yes", "to": "after" },
+                { "from": "no", "to": "after" }
+            ]
+        }));
+        let (done, events) = run_flow(&server, f).await;
+        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+        let skipped = kinds(&events, |k| match k {
+            RunEventKind::NodeSkipped { node } => Some(node.clone()),
+            _ => None,
+        });
+        assert_eq!(skipped, ["no"]);
+        assert!(done.results.contains_key("after") && !done.results.contains_key("no"));
+        let states = herdr_mcp_api::run::node_states(&events);
+        assert_eq!(states["no"], herdr_mcp_api::run::NodeState::Skipped);
+    }
+
+    /// A failing tool is retried, then its `error` port takes the failure
+    /// and the run goes on; without that edge it fails the run.
+    #[tokio::test]
+    async fn retries_then_the_error_port_catches_the_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let nodes = serde_json::json!([
+            { "id": "start", "type": "start" },
+            { "id": "bad", "type": "tool", "tool": "no_such_tool", "retry": { "times": 2, "delay_ms": 1 } },
+            set("caught", "{{ bad.error }}")
+        ]);
+        let f = flow(serde_json::json!({ "nodes": nodes, "edges": [
+            { "from": "start", "to": "bad" },
+            { "from": "bad", "port": "error", "to": "caught" }
+        ]}));
+        let (done, events) = run_flow(&server, f).await;
+        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+        assert_eq!(done.failed_node, None);
+        let failed = kinds(&events, |k| match k {
+            RunEventKind::NodeFailed { retry_in_ms, .. } => Some(format!("{retry_in_ms:?}")),
+            _ => None,
+        });
+        assert_eq!(failed, ["Some(1)", "Some(1)", "None"]);
+        let attempts = kinds(&events, |k| match k {
+            RunEventKind::NodeStarted { node, attempt, .. } if node == "bad" => {
+                Some(attempt.to_string())
+            }
+            _ => None,
+        });
+        assert_eq!(attempts, ["1", "2", "3"]);
+        let caught = herdr_mcp_api::tool_payload(&done.results["caught"]).unwrap();
+        assert!(
+            caught["value"].as_str().unwrap().contains("Unknown tool"),
+            "{caught}"
+        );
+
+        let f = flow(serde_json::json!({ "nodes": nodes, "edges": [
+            { "from": "start", "to": "bad" },
+            { "from": "bad", "to": "caught" }
+        ]}));
+        let (done, _) = run_flow(&server, f).await;
+        assert_eq!(done.status, RunStatus::Failed);
+        assert_eq!(done.failed_node.as_deref(), Some("bad"));
+    }
+
+    /// `timeout_ms` fails an attempt that runs too long.
+    #[tokio::test]
+    async fn a_timeout_fails_the_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let slow = serde_json::json!({ "nodes": [
+            { "id": "start", "type": "start" },
+            { "id": "z", "type": "wait", "ms": 10_000 }
+        ], "edges": [{ "from": "start", "to": "z" }] });
+        let f = flow(serde_json::json!({
+            "nodes": [
+                { "id": "start", "type": "start" },
+                { "id": "slow", "type": "tool", "tool": "recipe_run",
+                  "params": { "flow": slow, "wait": true }, "timeout_ms": 50 }
+            ],
+            "edges": [{ "from": "start", "to": "slow" }]
+        }));
+        let (done, _) = tokio::time::timeout(Duration::from_secs(5), run_flow(&server, f))
+            .await
+            .expect("the timeout ends the node");
+        assert_eq!(done.status, RunStatus::Failed);
+        assert!(
+            done.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("timed out after 50ms"),
+            "{:?}",
+            done.error
+        );
+    }
+
+    /// `max_steps` stops a loop that never lets go; a fail node fails the
+    /// run with its message; a flow with problems does not start.
+    #[tokio::test]
+    async fn max_steps_fail_nodes_and_invalid_flows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let f = flow(serde_json::json!({
+            "nodes": [{ "id": "start", "type": "start" }, { "id": "spin", "type": "wait", "ms": 0 }],
+            "edges": [{ "from": "start", "to": "spin" }, { "from": "spin", "to": "spin" }],
+            "max_steps": 5
+        }));
+        let (done, _) = run_flow(&server, f).await;
+        assert_eq!(done.status, RunStatus::Failed);
+        assert!(
+            done.error.as_deref().unwrap().contains("after 5 node runs"),
+            "{:?}",
+            done.error
+        );
+        assert_eq!(done.pass, 6, "the sixth pass is refused");
+
+        let f = flow(serde_json::json!({
+            "nodes": [{ "id": "start", "type": "start" }, { "id": "no", "type": "fail", "message": "nope" }],
+            "edges": [{ "from": "start", "to": "no" }]
+        }));
+        let (done, _) = run_flow(&server, f).await;
+        assert_eq!(done.status, RunStatus::Failed);
+        assert_eq!(done.error.as_deref(), Some("nope"));
+
+        let f = flow(serde_json::json!({ "nodes": [], "edges": [] }));
+        let req = StartRunRequest {
+            flow: Some(f),
+            ..Default::default()
+        };
+        assert!(
+            matches!(start_run(&server, req).await, Err(StartError::Invalid(why)) if why.contains("one start node"))
+        );
+    }
+
+    /// A run node starts its collection as an isolated child (its own
+    /// variables, the inputs) and waits; the result carries what the child
+    /// extracted. A failing child takes the error port; a collection that
+    /// runs itself is refused.
+    #[tokio::test]
+    async fn a_run_node_waits_for_its_isolated_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let child = save_recipe(
+            &server,
+            vec![var_set(
+                "echo",
+                "{{ who }}:{{ secret }}",
+                vec![rule("value", "echoed", VarScope::Global)],
+            )],
+            &[],
+        )
+        .await;
+        let f = flow(serde_json::json!({
+            "nodes": [
+                { "id": "start", "type": "start" },
+                { "id": "kid", "type": "run", "collection": child, "inputs": { "who": "{{ name }}" } },
+                set("after", "{{ kid.variables.echoed }}")
+            ],
+            "edges": [{ "from": "start", "to": "kid" }, { "from": "kid", "to": "after" }]
+        }));
+        let req = StartRunRequest {
+            flow: Some(f),
+            variables: HashMap::from([
+                ("name".into(), "ann".into()),
+                ("secret".into(), "parent-only".into()),
+            ]),
+            ..Default::default()
+        };
+        let done = start_run(&server, req).await.unwrap().1.await.unwrap();
+        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+        assert_eq!(done.results["kid"]["status"], "completed");
+        let after = herdr_mcp_api::tool_payload(&done.results["after"]).unwrap();
+        assert_eq!(
+            after["value"], "ann:{{ secret }}",
+            "the child does not see the parent's scope"
+        );
+        let kid: Uuid = serde_json::from_value(done.results["kid"]["run_id"].clone()).unwrap();
+        let kid = load(&server, kid).await.unwrap().unwrap();
+        assert_eq!(
+            kid.origin,
+            RunOrigin::Node {
+                run_id: done.id,
+                node: "kid".into()
+            }
+        );
+        let trail = trail(&server, done.id).await.unwrap().unwrap();
+        assert!(trail.contains("\n    collection · run"), "{trail}");
+
+        // The child fails; the parent's error port takes it.
+        let broken = save_recipe(&server, vec![step("x", "no_such_tool")], &[]).await;
+        let f = flow(serde_json::json!({
+            "nodes": [
+                { "id": "start", "type": "start" },
+                { "id": "kid", "type": "run", "collection": broken },
+                set("caught", "{{ kid.status }}")
+            ],
+            "edges": [{ "from": "start", "to": "kid" }, { "from": "kid", "port": "error", "to": "caught" }]
+        }));
+        let (done, _) = run_flow(&server, f).await;
+        assert_eq!(done.status, RunStatus::Completed, "{:?}", done.error);
+        let caught = herdr_mcp_api::tool_payload(&done.results["caught"]).unwrap();
+        assert_eq!(caught["value"], "failed");
+
+        // A collection whose run node starts itself.
+        let me = save_recipe(&server, Vec::new(), &[]).await;
+        let f = flow(serde_json::json!({
+            "nodes": [{ "id": "start", "type": "start" }, { "id": "again", "type": "run", "collection": me }],
+            "edges": [{ "from": "start", "to": "again" }]
+        }));
+        let mut recipe = server.persistence.load_recipe(&me).await.unwrap().unwrap();
+        recipe.flow = f;
+        server.persistence.save_recipe(&recipe).await.unwrap();
+        let done = run_recipe(&server, me).await;
+        assert_eq!(done.status, RunStatus::Failed);
+        assert!(
+            done.error
+                .as_deref()
+                .unwrap()
+                .contains("already running up this chain"),
+            "{:?}",
+            done.error
+        );
+    }
+
+    /// Pause and cancel reach a child run and the nodes in flight.
+    #[tokio::test]
+    async fn pause_and_cancel_reach_children_and_nodes_in_flight() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        let slow = save_flow(
+            &server,
+            flow(serde_json::json!({
+                "nodes": [{ "id": "start", "type": "start" }, { "id": "z", "type": "wait", "ms": 60_000 }],
+                "edges": [{ "from": "start", "to": "z" }]
+            })),
+        )
+        .await;
+        let f = flow(serde_json::json!({
+            "nodes": [
+                { "id": "start", "type": "start" },
+                { "id": "kid", "type": "run", "collection": slow },
+                { "id": "nap", "type": "wait", "ms": 60_000 }
+            ],
+            "edges": [{ "from": "start", "to": "kid" }, { "from": "start", "to": "nap" }]
+        }));
+        let req = StartRunRequest {
+            flow: Some(f),
+            ..Default::default()
+        };
+        let (run, handle) = start_run(&server, req).await.unwrap();
+        wait_record(&server, run.id, |r| r.active.len() == 2).await;
+        let kids = list(&server, None).await.unwrap();
+        let kid = kids
+            .iter()
+            .find(|r| r.origin.parent() == Some(run.id))
+            .expect("the child run")
+            .id;
+        assert!(server.runs.control(run.id, RunAction::Pause));
+        wait_record(&server, kid, |r| r.status == RunStatus::Paused).await;
+        assert!(server.runs.control(run.id, RunAction::Cancel));
+        let done = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("cancel ends the waits")
+            .unwrap();
+        assert_eq!(done.status, RunStatus::Cancelled);
+        let kid = wait_record(&server, kid, |r| r.status.is_finished()).await;
+        assert_eq!(kid.status, RunStatus::Cancelled);
+        assert!(done.results["nap"]["error"] == "cancelled");
     }
 }

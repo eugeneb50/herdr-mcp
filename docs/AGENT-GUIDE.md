@@ -65,58 +65,106 @@ watch starts and would count as new. Ask for it in a form you didn't type
 
 ## Recipes
 
-A recipe is a saved list of tool calls run in order; a failing step stops
-the run and fails it. A step fails when its tool can't be called or its
-result has `isError: true` (bad params, herdr refusing a method). A
-`http_request` that gets a 4xx/5xx is not a failure unless `check` says
-so: test its `status` with a gate rule. Steps refer to earlier results and variables with `{{ … }}`:
+A recipe (the web UI calls it a collection) is a saved flow of tool calls.
+The simplest is a straight line: save `steps` (`{id, tool, params,
+extract?}`) and they run one after another. Nodes refer to earlier results
+and variables with `{{ … }}`:
 
-- `{{ stepId.path }}`: an earlier step's result, followed with dots and
+- `{{ nodeId.path }}`: an earlier node's result, followed with dots and
   `[n]` (`{{ ws.result.root_pane.pane_id }}`).
 - `{{ name }}`: a recipe variable, a variable passed to the run, or a
   global variable.
+- `{{ run.pass }}`: 1, plus one per loop taken.
 
-A step can also `extract` part of its result into a variable for later
-runs. A recipe's optional `gate` decides what a full run does after its last
-step: rules are checked in order and the first whose `checks` hold ends the
-run, fails it, restarts it from step 1 (a loop until some condition), or
-hands off to another saved recipe:
+A tool node can also `extract` part of its result into a variable for later
+runs. A node fails when its tool can't be called or its result has
+`isError: true` (bad params, herdr refusing a method). A `http_request`
+that gets a 4xx/5xx is not a failure unless `check` says so: test its
+`status` with a branch.
+
+### Flows
+
+For branches, parallel paths, loops, retries and child runs, save a `flow`
+instead of `steps`: nodes, and edges from a node's port to another node.
+
+| Node `type` | Fields | Ports |
+|---|---|---|
+| `start` | (exactly one) | `out` |
+| `tool` | `tool`, `params`, `extract`, `retry: {times, delay_ms}`, `timeout_ms` | `out`, `error` |
+| `branch` | `rules: [{checks, any}]` | `1`…`n` (the first rule that holds), `else` |
+| `run` | `collection` (a recipe id), `inputs` | `out`, `error` |
+| `wait` | `ms` | `out` |
+| `fail` | `message` | none |
+
+An edge is `{"from": "a", "port": "error", "to": "b"}`; `port` defaults to
+`out`. How a run moves:
+
+- Every edge out of the port a node fires runs its target, so two edges
+  from one port run both nodes at once.
+- A node with several edges in is a join: it waits until each of them has
+  fired or can no longer fire (a branch upstream took another port).
+- A port with no edge ends that path; the run completes when no path is
+  left. A failure with no `error` edge fails the run.
+- An edge back to a node upstream is a loop: taking it runs that part of
+  the flow again and adds one to `run.pass`. `max_steps` (default 1000)
+  caps the node runs one run may make, retries and loop passes counted.
+- `retry` tries a failing tool again; after the last attempt the `error`
+  port fires (or the run fails). `timeout_ms` fails an attempt that takes
+  longer.
+- A `run` node starts another recipe as a child run in the same workspace
+  and waits for it. The child sees its own variables, the globals and
+  `inputs` (their `{{ }}` filled from this run), not this run's variables.
+  Its result is `{run_id, status, error, variables}` (`variables`: what
+  the child extracted); `error` fires when the child did not complete. A
+  recipe already up the chain can't be started again; loop with an edge.
+
+A check reads `path` like a placeholder and compares it with `value`. Ops:
+`eq`, `ne`, `lt`, `gt`, `contains`, `exists`, `missing`. A rule's checks
+must all hold (`any: true`: one); a rule with no checks always holds.
+
+Poll a pane until the agent says done, give up after ten passes:
 
 ```json
-"gate": { "rules": [
-  { "checks": [{ "path": "read.text", "op": "missing" }], "then": { "action": "restart", "delay_ms": 2000 } },
-  { "checks": [{ "path": "read.text", "op": "contains", "value": "error" }], "then": { "action": "fail", "message": "agent errored" } },
-  { "checks": [{ "path": "read.text", "op": "contains", "value": "deploy" }], "then": { "action": "run", "collection": "<recipe id>", "inputs": { "pane": "{{ spawn.pane_id }}" } } },
-  { "then": { "action": "end" } }
-], "max_steps": 200 }
+{ "nodes": [
+    { "id": "start", "type": "start" },
+    { "id": "read", "type": "tool", "tool": "read_pane",
+      "params": { "label": "worker", "lines": 20 }, "retry": { "times": 2, "delay_ms": 500 } },
+    { "id": "done", "type": "branch", "rules": [
+      { "checks": [{ "path": "read.text", "op": "contains", "value": "DONE" }] },
+      { "checks": [{ "path": "run.pass", "op": "gt", "value": 10 }] } ] },
+    { "id": "nap", "type": "wait", "ms": 5000 },
+    { "id": "stuck", "type": "fail", "message": "the worker never said DONE" } ],
+  "edges": [
+    { "from": "start", "to": "read" },
+    { "from": "read", "to": "done" },
+    { "from": "done", "port": "2", "to": "stuck" },
+    { "from": "done", "port": "else", "to": "nap" },
+    { "from": "nap", "to": "read" } ] }
 ```
 
-Ops: `eq`, `ne`, `lt`, `gt`, `contains`, `exists`, `missing`. `{{ run.pass }}`
-counts passes; `max_steps` caps the requests one run may execute. `run`
-starts the other recipe as a child run in the same workspace: it sees its
-own variables, the globals and `inputs` (their `{{ }}` filled from this
-run), not this run's variables. This run ends as the child ends (a failed
-child fails it). Handing back to a recipe already up the chain fails; use
-`restart` to loop.
+Port `1` has no edge, so DONE ends the run `completed`. The web UI draws
+and edits the same flow on a canvas and keeps each node's `at` position;
+leave `at` out and it lays the nodes out.
 
 When a run fails, `run_get` with `trail: true` returns its trail as text:
-each step's params as sent, unresolved placeholders, results, variables set,
-which gate rule fired and the values its checks found, the last lines of
-the pane the run touched last, and, indented under it, the trail of the
-child run its gate handed off to. A recipe's `trail` sets how long its runs are
-kept (`keep_runs`, `keep_days`) and how many pane lines a failure saves
-(`snapshot_lines`); unset fields use the global `runs.*` settings. Run state is persisted: a run survives your session, and the user
-sees it live in the TUI's and the web's Runs tab.
+each node's params as sent, unresolved placeholders, results, retries,
+variables set, the port each branch took and the values its checks found,
+loops, the last lines of the pane the run touched last, and, indented under
+it, the trails of the child runs its run nodes started. A recipe's `trail`
+sets how long its runs are kept (`keep_runs`, `keep_days`) and how many
+pane lines a failure saves (`snapshot_lines`); unset fields use the global
+`runs.*` settings. Run state is persisted: a run survives your session, and
+the user sees it live in the TUI's and the web's Runs tab.
 
 ### Tools
 
 | Tool | Does |
 |---|---|
 | `recipe_list` / `recipe_get` | Find saved recipes / read one |
-| `recipe_save` | Create (no `recipe_id`; `name` + `steps`) or update one |
-| `recipe_run` | Run a saved recipe or ad-hoc `steps`; `variables` override the recipe's; `wait: true` returns the finished run |
-| `run_get` | A run's status and every step's result or error |
-| `run_control` | `pause`, `resume` or `cancel` (cancel also stops a step in flight) |
+| `recipe_save` | Create (no `recipe_id`; `name` + `steps` or `flow`) or update one |
+| `recipe_run` | Run a saved recipe or an ad-hoc `steps` / `flow`; `variables` override the recipe's; `node_ids` runs only those tool nodes; `wait: true` returns the finished run |
+| `run_get` | A run's status and every node's result or error |
+| `run_control` | `pause`, `resume` or `cancel` (cancel also stops nodes in flight and child runs) |
 | `list_templates` / `instantiate_template` | Start from a bundled recipe |
 | `schedule_recipe` | Run a saved recipe on a cron |
 
@@ -128,12 +176,12 @@ call doesn't time out.
 - `http_request` calls any HTTP API: `{"method": "POST", "url": "…",
   "headers": {"Authorization": "Bearer {{token}}"}, "json": {…}}`. A
   non-2xx status comes back as a result (`status`, `ok`); pass
-  `check: true` to make it fail the step instead.
+  `check: true` to make it fail the node instead.
 - `llm_call` asks a model: `{"model": "openai/gpt-4o-mini", "prompt":
   "Summarise: {{read.output}}"}` goes to OpenRouter with
   `OPENROUTER_API_KEY`; set `base_url` for OpenAI, Ollama
   (`http://localhost:11434/v1`) or any OpenAI-compatible server. The
-  reply is `{{step.text}}`. `llm_models` lists model ids.
+  reply is `{{node.text}}`. `llm_models` lists model ids.
 
 ## Worked example: opencode relay
 
@@ -164,7 +212,7 @@ Save it once, then launch it with your own directory and prompts:
 }
 ```
 
-Then `run_get` until `status` is `completed` (or `failed`: the failed step
+Then `run_get` until `status` is `completed` (or `failed`: the failed node
 says why). To steer opencode beyond prompts, `send_keys` takes keys like
 `Escape` or `Ctrl+c`, and `read_pane` shows its screen.
 

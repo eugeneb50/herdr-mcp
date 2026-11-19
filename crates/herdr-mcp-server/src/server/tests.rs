@@ -926,7 +926,11 @@ esac
         name: None,
     };
     let filled = api.instantiate_template("git-status", &req).await.unwrap();
-    assert!(filled.steps[0].params.to_string().contains("w1:p3"));
+    assert!(
+        serde_json::to_string(&filled.flow)
+            .unwrap()
+            .contains("w1:p3")
+    );
     assert!(
         api.list_recipes()
             .await
@@ -993,9 +997,9 @@ esac
     assert_eq!(run.status, herdr_mcp_api::RunStatus::Completed);
     assert_eq!(run.results.len(), 2);
     let events = api.run_events(run.id, 0).await.unwrap();
-    assert_eq!(events.len(), 6);
+    assert_eq!(events.len(), 7);
     assert!(events.last().unwrap().kind.is_terminal());
-    assert_eq!(api.run_events(run.id, 5).await.unwrap().len(), 1);
+    assert_eq!(api.run_events(run.id, 6).await.unwrap().len(), 1);
     assert!(matches!(
         api.run_events(uuid::Uuid::new_v4(), 0).await,
         Err(ApiError::Status { status: 404, .. })
@@ -1082,17 +1086,16 @@ esac
         .create_recipe(&CreateRecipeRequest {
             name: "r1".into(),
             description: None,
-            steps: vec![RecipeStep {
+            flow: herdr_mcp_api::Flow::chain(vec![RecipeStep {
                 id: "s1".into(),
                 tool: "status".into(),
                 params: serde_json::json!({}),
                 description: None,
                 extract: Vec::new(),
-            }],
+            }]),
             variables: HashMap::new(),
             category: None,
             triggers: Vec::new(),
-            gate: None,
             trail: Default::default(),
         })
         .await

@@ -1,5 +1,6 @@
 //! Past and live runs: a list to pick from, and the picked run's trail (what
-//! each step sent and got, the gate's checks, errors, pane snapshots).
+//! each node sent and got, why each branch took its port, loops, errors,
+//! pane snapshots).
 
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
@@ -15,9 +16,9 @@ const THROTTLE_MS: u32 = 300;
 /// (re)connect, when some may have been missed: what the list and a live
 /// run's trail re-read on.
 #[derive(Clone, Copy)]
-struct Seen(Signal<u64>);
+pub(super) struct Seen(Signal<u64>);
 
-fn use_run_events() -> Seen {
+pub(super) fn use_run_events() -> Seen {
     let mut seen = use_signal(|| 0u64);
     let mut source: Signal<Option<web_sys::EventSource>> = use_signal(|| None);
     use_hook(move || {
@@ -38,7 +39,7 @@ fn use_run_events() -> Seen {
 
 /// Waits until `seen` moves past `read` (at most every [`THROTTLE_MS`]),
 /// then records it.
-async fn changed(seen: Seen, read: &mut Option<u64>) {
+pub(super) async fn changed(seen: Seen, read: &mut Option<u64>) {
     loop {
         let now = *seen.0.peek();
         if *read != Some(now) {
@@ -130,7 +131,7 @@ pub fn Runs() -> Element {
 
     rsx! {
         p { class: "field-desc",
-            "Every run of a collection, request send, schedule or trigger, newest first. Pick one to read its trail: what each request sent and got, why the gate chose its rule, errors, the last lines of the pane a failed run used, and, indented under it, the trail of the collection its gate handed off to. How long runs are kept is set per collection (Run history) or in Settings › runs."
+            "Every run of a collection, request send, schedule or trigger, newest first. Pick one to read its trail: what each node sent and got, why each branch took its port, loops, errors, the last lines of the pane a failed run used, and, indented under it, the trails of the child runs its run nodes started. How long runs are kept is set per collection (Run history) or in Settings › runs."
         }
         div { class: "btn-row",
             select {
@@ -187,8 +188,7 @@ pub fn Runs() -> Element {
     }
 }
 
-/// `child_runs`: the runs this one started (its gate's hand-off, `recipe_run`
-/// steps); `on_open` picks one, or the parent.
+/// `child_runs`: the runs this one started (run nodes, `recipe_run` calls); `on_open` picks one, or the parent.
 #[component]
 fn RunDetail(
     run: RunRecord,
@@ -199,7 +199,7 @@ fn RunDetail(
     let seen: Seen = use_context();
     let id = run.id;
     let mut events: Signal<Vec<RunEvent>> = use_signal(Vec::new);
-    // With the trail of the child run its gate handed off to.
+    // With the trails of its child runs.
     let mut trail = use_signal(String::new);
     let mut msg: Signal<Option<Result<String, String>>> = use_signal(|| None);
 
@@ -300,7 +300,7 @@ fn RunDetail(
                 if let Some(parent) = run.origin.parent() {
                     button {
                         class: "btn",
-                        title: "The run whose gate or step started this one",
+                        title: "The run whose node started this one",
                         onclick: move |_| on_open.call(parent),
                         "Open parent run"
                     }

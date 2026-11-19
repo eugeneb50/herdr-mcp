@@ -5,14 +5,14 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::{Gate, RecipeTrigger};
+use crate::{Flow, RecipeTrigger};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
-    pub steps: Vec<RecipeStep>,
+    pub flow: Flow,
     pub variables: HashMap<String, serde_json::Value>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -21,9 +21,6 @@ pub struct Recipe {
     /// herdr events that start a run of this recipe.
     #[serde(default)]
     pub triggers: Vec<RecipeTrigger>,
-    /// What a full run does after the last request (end, restart, fail).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gate: Option<Gate>,
     /// How long its runs are kept, and its failure snapshots.
     #[serde(default, skip_serializing_if = "RunTrail::is_default")]
     pub trail: RunTrail,
@@ -53,8 +50,9 @@ impl RunTrail {
     }
 }
 
-/// One request in a collection (recipe): a tool call, plus the variables
-/// its result sets for later requests.
+/// A tool call plus the variables its result sets: a template's request,
+/// or one of the `steps` a run or save takes as a straight line
+/// ([`Flow::chain`]).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RecipeStep {
     /// Unique within the recipe; later steps read this one's result as
@@ -132,15 +130,14 @@ pub struct CreateRecipeRequest {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
-    pub steps: Vec<RecipeStep>,
+    #[serde(default)]
+    pub flow: Flow,
     #[serde(default)]
     pub variables: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub category: Option<String>,
     #[serde(default)]
     pub triggers: Vec<RecipeTrigger>,
-    #[serde(default)]
-    pub gate: Option<Gate>,
     #[serde(default)]
     pub trail: RunTrail,
 }
@@ -150,13 +147,11 @@ pub struct CreateRecipeRequest {
 pub struct UpdateRecipeRequest {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub steps: Option<Vec<RecipeStep>>,
+    pub flow: Option<Flow>,
     pub variables: Option<HashMap<String, serde_json::Value>>,
     pub triggers: Option<Vec<RecipeTrigger>>,
     /// The folder the playground files it under; `""` clears it.
     pub category: Option<String>,
-    /// A gate without rules clears it.
-    pub gate: Option<Gate>,
     /// Replaces the collection's run-history settings.
     pub trail: Option<RunTrail>,
 }

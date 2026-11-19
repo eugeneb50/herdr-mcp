@@ -434,7 +434,9 @@ pub(super) fn internal(e: impl ToString) -> (StatusCode, String) {
 pub(super) fn start_error_to_http(e: crate::runs::StartError) -> (StatusCode, String) {
     let code = match e {
         crate::runs::StartError::RecipeNotFound => StatusCode::NOT_FOUND,
-        crate::runs::StartError::UnknownStep(_) => StatusCode::BAD_REQUEST,
+        crate::runs::StartError::UnknownNode(_) | crate::runs::StartError::Invalid(_) => {
+            StatusCode::BAD_REQUEST
+        }
         crate::runs::StartError::Persist(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (code, e.to_string())
@@ -782,7 +784,7 @@ pub(super) async fn get_run_handler(
 }
 
 /// `GET /api/runs/{id}/trail` — the run's trail as text, the trail of the
-/// child run its gate handed off to indented under it.
+/// child run its run nodes started indented under it.
 pub(super) async fn run_trail_handler(
     State(AppState { server, .. }): State<AppState>,
     Path(id): Path<uuid::Uuid>,

@@ -168,13 +168,13 @@ mod tests {
             id: uuid::Uuid::new_v4(),
             name: "split on new pane".into(),
             description: None,
-            steps: vec![RecipeStep {
+            flow: herdr_mcp_api::Flow::chain(vec![RecipeStep {
                 id: "split".into(),
                 tool: "split_pane".into(),
                 params: json!({"pane_id": "{{herdr.pane.pane_id}}", "direction": "down", "no_focus": true}),
                 description: None,
                 extract: Vec::new(),
-            }],
+            }]),
             variables: Default::default(),
             created_at: now,
             updated_at: now,
@@ -188,7 +188,6 @@ mod tests {
                     .cloned()
                     .unwrap(),
             }],
-            gate: None,
             trail: Default::default(),
         };
         persistence.save_recipe(&recipe).await.unwrap();

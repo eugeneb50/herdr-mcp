@@ -1,30 +1,35 @@
-//! Collections, Postman style. A collection is a saved recipe and its
-//! requests are the recipe's steps: send one request (a run of just that
-//! step, `step_ids`) or run the whole collection. Extract rules save part of
-//! a result as a global or collection variable for the next request. Every
-//! `{{ }}` resolves on the server, in the one scope runs use: the preview
-//! asks `/api/variables/resolve`, sends and runs go through `/api/runs`.
+//! Collections. A collection is a saved recipe whose flow is drawn on a
+//! canvas: add nodes, wire their ports, pick one to edit it. A tool node is
+//! a request: send it alone (a run of just that node, `node_ids`) or run
+//! the whole flow and watch its nodes light up. Extract rules save part of
+//! a result as a global or collection variable. Every `{{ }}` resolves on
+//! the server, in the one scope runs use: the preview asks
+//! `/api/variables/resolve`, sends and runs go through `/api/runs`.
 
 use dioxus::prelude::*;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use super::builders::{HttpBuilder, LlmWizard};
-use super::flow::{GateEditor, TrailEditor};
+use super::canvas::{Canvas, CanvasEdit};
+use super::flow::{NodeEditor, TrailEditor};
 use super::forms::{DynamicForm, ResponseViewer};
 use super::recipes::{RunResults, TemplateForm, TriggerEditor};
-use crate::client::use_api;
+use super::runs::{changed, use_run_events};
+use crate::client::{ApiClient, use_api};
 use crate::components::variables::{GlobalsTable, user_entries};
 use herdr_mcp_api::playground::{
-    HERDR_API, HTTP_REQUEST, LLM_CALL, ToolInfo, add_request, collections, delete_step,
-    display_value, folders, fresh_collection_name, method_groups, methods, parse_value, raw_values,
-    request_method, request_params, request_schema, request_values, result_paths,
-    save_collection_var, save_step, send_summary, set_steps, sorted_vars, tool_groups, tool_label,
-    tool_list, var_name,
+    HERDR_API, HTTP_REQUEST, LLM_CALL, NODE_W, ToolInfo, add_node, collections, connect,
+    display_value, edit_flow, folders, fresh_collection_name, fresh_node_id, layout, method_groups,
+    methods, parse_value, raw_values, remove_node, replace_node, request_method, request_params,
+    request_schema, request_values, result_paths, save_collection_var, send_summary, sorted_vars,
+    tool_groups, tool_list, var_name,
 };
 use herdr_mcp_api::{
-    CreateRecipeRequest, Extract, Recipe, RecipeStep, RecipeTemplate, ResolveRequest, RunRecord,
-    StartRunRequest, UpdateRecipeRequest, Uuid, VarScope,
+    CreateRecipeRequest, Extract, Flow, Node, NodeKind, NodeState, Point, Recipe, RecipeStep,
+    RecipeTemplate, ResolveRequest, Retry, Rule, RunAction, RunRecord, StartRunRequest,
+    UpdateRecipeRequest, Uuid, VarScope, node_states,
 };
 
 /// What the main panel shows.
@@ -33,7 +38,6 @@ pub enum Pick {
     Nothing,
     Globals,
     Collection(Uuid),
-    Request(Uuid, String),
 }
 
 #[component]
@@ -74,7 +78,7 @@ pub fn Collections() -> Element {
                 match current {
                     Pick::Nothing => rsx! {
                         p { class: "muted",
-                            "Pick a collection or a request on the left, or start a new collection."
+                            "Pick a collection on the left, or start a new collection."
                         }
                     },
                     Pick::Globals => rsx! { GlobalsView {} },
@@ -84,24 +88,12 @@ pub fn Collections() -> Element {
                                 key: "{id}",
                                 recipe,
                                 collections: collections(&list).into_iter().filter(|(c, _)| *c != id).collect::<Vec<_>>(),
+                                tools: tools.clone(),
                                 pick,
                                 refresh,
                             }
                         },
                         None => rsx! { p { class: "muted", "That collection is gone." } },
-                    },
-                    Pick::Request(id, step) => match find(id) {
-                        Some(recipe) if recipe.steps.iter().any(|s| s.id == step) => rsx! {
-                            RequestEditor {
-                                key: "{id}/{step}",
-                                recipe,
-                                step_id: step.clone(),
-                                tools,
-                                pick,
-                                refresh,
-                            }
-                        },
-                        _ => rsx! { p { class: "muted", "That request is gone." } },
                     },
                 }
             }
@@ -119,17 +111,16 @@ fn Sidebar(recipes: Vec<Recipe>, pick: Signal<Pick>, refresh: Signal<u32>) -> El
     let mut filling: Signal<Option<RecipeTemplate>> = use_signal(|| None);
     let mut error: Signal<Option<String>> = use_signal(|| None);
 
-    let create = move |(name, steps): (String, Vec<RecipeStep>)| {
+    let create = move |(name, flow): (String, Flow)| {
         let client = client();
         spawn(async move {
             let req = CreateRecipeRequest {
                 name,
                 description: None,
-                steps,
+                flow,
                 variables: HashMap::new(),
                 category: None,
                 triggers: Vec::new(),
-                gate: None,
                 trail: Default::default(),
             };
             match client.create_recipe(&req).await {
@@ -154,7 +145,7 @@ fn Sidebar(recipes: Vec<Recipe>, pick: Signal<Pick>, refresh: Signal<u32>) -> El
             }
             button {
                 class: "btn btn-block",
-                onclick: move |_| create((new_name.clone(), Vec::new())),
+                onclick: move |_| create((new_name.clone(), Flow::default())),
                 "+ New collection"
             }
             if let Some(e) = error.read().as_deref() {
@@ -178,20 +169,6 @@ fn Sidebar(recipes: Vec<Recipe>, pick: Signal<Pick>, refresh: Signal<u32>) -> El
                                     span { class: "pill", title: "triggers", "⚡ {triggers}" }
                                 }
                             }
-                            for s in r.steps.iter().cloned() {
-                                {
-                                    let target = Pick::Request(id, s.id.clone());
-                                    rsx! {
-                                        button {
-                                            key: "{id}/{s.id}",
-                                            class: "tree-item tree-req{sel(target.clone())}",
-                                            onclick: move |_| pick.set(target.clone()),
-                                            span { class: "mono", "{s.id}" }
-                                            span { class: "muted mono", "{tool_label(&s)}" }
-                                        }
-                                    }
-                                }
-                            }
                         }
                     }
                 }
@@ -202,7 +179,7 @@ fn Sidebar(recipes: Vec<Recipe>, pick: Signal<Pick>, refresh: Signal<u32>) -> El
                     TemplateForm {
                         key: "{tpl.id}",
                         template: tpl,
-                        on_load: move |made: (String, Vec<RecipeStep>)| {
+                        on_load: move |made: (String, Flow)| {
                             filling.set(None);
                             create(made);
                         },
@@ -269,10 +246,41 @@ fn GlobalsView() -> Element {
     }
 }
 
+type FlowEdit = Rc<dyn Fn(&mut Flow) -> Result<(), String>>;
+
+/// Apply `edit` to the canvas's copy of the flow now, then to the saved
+/// flow; a failed save reloads the saved one.
+async fn change(
+    client: ApiClient,
+    id: Uuid,
+    mut flow: Signal<Flow>,
+    edit: FlowEdit,
+) -> Result<(), String> {
+    edit(&mut flow.write())?;
+    let saved = edit_flow(&client, id, |f| edit(f)).await;
+    if saved.is_err()
+        && let Ok(r) = client.get_recipe(id).await
+    {
+        flow.set(r.flow);
+    }
+    saved
+}
+
+fn tool_kind(tool: &str, params: Value) -> NodeKind {
+    NodeKind::Tool {
+        tool: tool.into(),
+        params,
+        extract: Vec::new(),
+        retry: Retry::default(),
+        timeout_ms: None,
+    }
+}
+
 #[component]
 fn CollectionView(
     recipe: Recipe,
     collections: Vec<(Uuid, String)>,
+    tools: Vec<ToolInfo>,
     pick: Signal<Pick>,
     refresh: Signal<u32>,
 ) -> Element {
@@ -282,18 +290,98 @@ fn CollectionView(
     let mut folder = use_signal(|| recipe.category.clone().unwrap_or_default());
     let mut vars: Signal<Vec<(String, String)>> = use_signal(|| sorted_vars(&recipe.variables));
     let mut triggers = use_signal(|| recipe.triggers.clone());
-    let gate = use_signal(|| {
-        recipe.gate.clone().unwrap_or(herdr_mcp_api::Gate {
-            rules: Vec::new(),
-            max_steps: herdr_mcp_api::gate::DEFAULT_MAX_STEPS,
-        })
-    });
     let trail = use_signal(|| recipe.trail);
+    let flow = use_signal(|| recipe.flow.clone());
+    let mut selected: Signal<Option<String>> = use_signal(|| None);
+    // The run "Run collection" started, while it goes; its node states.
+    let mut live: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut states: Signal<HashMap<String, NodeState>> = use_signal(HashMap::new);
     let mut run: Signal<Option<Value>> = use_signal(|| None);
-    let mut busy = use_signal(|| false);
     let mut msg: Signal<Option<Result<String, String>>> = use_signal(|| None);
-    let steps = recipe.steps.clone();
+    let seen = use_run_events();
 
+    use_future(move || async move {
+        let client = client();
+        let mut read = None;
+        loop {
+            changed(seen, &mut read).await;
+            let Some(run_id) = *live.peek() else {
+                continue;
+            };
+            let Ok(events) = client.run_events(run_id, 0).await else {
+                continue;
+            };
+            states.set(node_states(&events));
+            if events.iter().any(|e| e.kind.is_terminal()) {
+                live.set(None);
+                if let Ok(r) = client.get_run(run_id).await {
+                    run.set(Some(serde_json::to_value(r).unwrap_or_default()));
+                }
+                // Extract rules may have written collection variables.
+                if let Ok(r) = client.get_recipe(id).await {
+                    vars.set(sorted_vars(&r.variables));
+                }
+            }
+        }
+    });
+
+    let apply = move |edit: FlowEdit| {
+        let client = client();
+        spawn(async move {
+            match change(client, id, flow, edit).await {
+                Ok(()) => msg.set(None),
+                Err(e) => msg.set(Some(Err(e))),
+            }
+        });
+    };
+    let on_canvas = move |edit: CanvasEdit| {
+        apply(match edit {
+            CanvasEdit::Move(node, at) => Rc::new(move |f: &mut Flow| {
+                if let Some(n) = f.nodes.iter_mut().find(|n| n.id == node) {
+                    n.at = Some(at);
+                }
+                Ok(())
+            }),
+            CanvasEdit::Connect(from, port, to) => Rc::new(move |f: &mut Flow| {
+                connect(f, &from, port, &to);
+                Ok(())
+            }),
+            CanvasEdit::Disconnect(edge) => Rc::new(move |f: &mut Flow| {
+                f.edges.retain(|e| *e != edge);
+                Ok(())
+            }),
+            CanvasEdit::Remove(node) => Rc::new(move |f: &mut Flow| {
+                remove_node(f, &node);
+                Ok(())
+            }),
+        });
+    };
+    // A new node goes right of the picked one, wired from its first port.
+    let mut add = move |prefix: &'static str, kind: NodeKind| {
+        let f = flow.read().clone();
+        let after = selected().and_then(|s| {
+            let port = *f.node(&s)?.kind.ports().first()?;
+            Some((s, port))
+        });
+        let at = layout(&f);
+        let place = match &after {
+            Some((s, _)) => Point {
+                x: at[s].x + NODE_W + 80.0,
+                y: at[s].y,
+            },
+            None => Point {
+                x: at.values().map(|p| p.x).fold(0.0, f32::max) + NODE_W + 80.0,
+                y: 0.0,
+            },
+        };
+        let node_id = fresh_node_id(&f, prefix);
+        selected.set(Some(node_id));
+        apply(Rc::new(move |f: &mut Flow| {
+            let after = after.as_ref().map(|(s, p)| (s.as_str(), *p));
+            add_node(f, prefix, kind.clone(), place, after);
+            Ok(())
+        }));
+    };
     let save = move |_| {
         let client = client();
         spawn(async move {
@@ -308,8 +396,6 @@ fn CollectionView(
                 category: Some(folder.read().trim().to_string()),
                 variables: Some(variables),
                 triggers: Some(triggers.read().clone()),
-                // No rules clears the gate.
-                gate: Some(gate.read().clone()),
                 trail: Some(*trail.read()),
                 ..Default::default()
             };
@@ -322,45 +408,29 @@ fn CollectionView(
             }
         });
     };
-    let reorder = move |next: Vec<RecipeStep>| {
-        let client = client();
-        spawn(async move {
-            match set_steps(&client, id, next).await {
-                Ok(()) => refresh += 1,
-                Err(e) => msg.set(Some(Err(e))),
-            }
-        });
-    };
-    let new_request = move |tool: &'static str, params: Value| {
-        let client = client();
-        spawn(async move {
-            match add_request(&client, id, tool, params).await {
-                Ok(step) => {
-                    pick.set(Pick::Request(id, step));
-                    refresh += 1;
-                }
-                Err(e) => msg.set(Some(Err(e))),
-            }
-        });
-    };
     let run_all = move |_| {
         let client = client();
         spawn(async move {
-            busy.set(true);
             msg.set(None);
+            run.set(None);
+            states.set(HashMap::new());
             let req = StartRunRequest {
                 recipe_id: Some(id),
                 ..Default::default()
             };
-            match client.run_and_wait(&req).await {
-                Ok(r) => run.set(Some(serde_json::to_value(r).unwrap_or_default())),
-                Err(e) => msg.set(Some(Err(format!("run failed: {e}")))),
+            match client.start_run(&req).await {
+                Ok(r) => live.set(Some(r.id)),
+                Err(e) => msg.set(Some(Err(format!("run failed to start: {e}")))),
             }
-            // Extract rules may have written collection variables.
-            if let Ok(r) = client.get_recipe(id).await {
-                vars.set(sorted_vars(&r.variables));
+        });
+    };
+    let control = move |action: RunAction| {
+        let Some(run_id) = live() else { return };
+        let client = client();
+        spawn(async move {
+            if let Err(e) = client.control_run(run_id, action).await {
+                msg.set(Some(Err(format!("{} failed: {e}", action.as_str()))));
             }
-            busy.set(false);
         });
     };
     let delete = move |_| {
@@ -381,6 +451,20 @@ fn CollectionView(
             }
         });
     };
+
+    let f = flow.read().clone();
+    let problems = f.problems();
+    let max_steps = f.max_steps;
+    let paths: Vec<String> = f
+        .nodes
+        .iter()
+        .filter(|n| !matches!(n.kind, NodeKind::Start))
+        .map(|n| n.id.clone())
+        .chain(["run.pass".to_string()])
+        .collect();
+    let order: Vec<String> = f.tools().map(|n| n.id.clone()).collect();
+    let picked = selected().and_then(|s| f.node(&s).cloned());
+    let first_other = collections.first().map(|(c, _)| *c);
 
     rsx! {
         div { class: "card",
@@ -405,84 +489,103 @@ fn CollectionView(
                     }
                 }
             }
-            div { class: "var-group-title", "Requests · {steps.len()}" }
-            if steps.is_empty() {
-                p { class: "muted", "No requests yet." }
-            }
-            for (i, s) in steps.iter().cloned().enumerate() {
-                {
-                    let target = Pick::Request(id, s.id.clone());
-                    let (up, down, gone) = (steps.clone(), steps.clone(), steps.clone());
-                    let total = steps.len();
-                    rsx! {
-                        div { key: "{s.id}", class: "req-row",
-                            button {
-                                class: "tree-item",
-                                onclick: move |_| pick.set(target.clone()),
-                                span { class: "mono accent", "{s.id}" }
-                                span { class: "muted mono", "{tool_label(&s)}" }
-                                if !s.extract.is_empty() {
-                                    span { class: "pill", "→ {s.extract.len()} var(s)" }
-                                }
-                            }
-                            button {
-                                class: "link-btn",
-                                disabled: i == 0,
-                                onclick: move |_| {
-                                    let mut next = up.clone();
-                                    next.swap(i, i - 1);
-                                    reorder(next);
-                                },
-                                "↑"
-                            }
-                            button {
-                                class: "link-btn",
-                                disabled: i + 1 >= total,
-                                onclick: move |_| {
-                                    let mut next = down.clone();
-                                    next.swap(i, i + 1);
-                                    reorder(next);
-                                },
-                                "↓"
-                            }
-                            button {
-                                class: "link-btn link-danger",
-                                onclick: move |_| {
-                                    let mut next = gone.clone();
-                                    next.remove(i);
-                                    reorder(next);
-                                },
-                                "✕"
-                            }
-                        }
-                    }
-                }
-            }
             div { class: "btn-row",
-                button {
-                    class: "btn",
-                    onclick: move |_| new_request("list_panes", serde_json::json!({})),
-                    "+ Request"
-                }
+                button { class: "btn", onclick: move |_| add("request", tool_kind("list_panes", json!({}))), "+ Request" }
                 button {
                     class: "btn",
                     title: "A custom HTTP request: method, URL, query, headers, body",
-                    onclick: move |_| new_request(HTTP_REQUEST, serde_json::json!({ "method": "GET", "url": "https://" })),
+                    onclick: move |_| add("http", tool_kind(HTTP_REQUEST, json!({ "method": "GET", "url": "https://" }))),
                     "+ HTTP"
                 }
                 button {
                     class: "btn",
                     title: "An OpenRouter / OpenAI-compatible model call",
-                    onclick: move |_| new_request(LLM_CALL, serde_json::json!({ "model": "" })),
+                    onclick: move |_| add("llm", tool_kind(LLM_CALL, json!({ "model": "" }))),
                     "+ LLM"
                 }
                 button {
+                    class: "btn",
+                    title: "Check rules and take the port of the first that holds",
+                    onclick: move |_| add("branch", NodeKind::Branch { rules: vec![Rule { checks: Vec::new(), any: false }] }),
+                    "+ Branch"
+                }
+                button {
+                    class: "btn",
+                    title: "Run another collection as a child run and wait for it",
+                    disabled: first_other.is_none(),
+                    onclick: move |_| {
+                        if let Some(collection) = first_other {
+                            add("run", NodeKind::Run { collection, inputs: Default::default() });
+                        }
+                    },
+                    "+ Run"
+                }
+                button { class: "btn", onclick: move |_| add("wait", NodeKind::Wait { ms: 1000 }), "+ Wait" }
+                button { class: "btn", onclick: move |_| add("fail", NodeKind::Fail { message: String::new() }), "+ Fail" }
+                span { class: "spacer" }
+                if live().is_some() {
+                    button { class: "btn", onclick: move |_| control(RunAction::Pause), "Pause" }
+                    button { class: "btn", onclick: move |_| control(RunAction::Resume), "Resume" }
+                    button { class: "btn link-danger", onclick: move |_| control(RunAction::Cancel), "Cancel" }
+                }
+                button {
                     class: "btn btn-primary",
-                    disabled: busy() || steps.is_empty(),
+                    disabled: live().is_some() || !problems.is_empty() || f.nodes.len() < 2,
                     onclick: run_all,
-                    if busy() { "Running…" } else { "Run collection" }
+                    if live().is_some() { "Running…" } else { "Run collection" }
                 }
             }
+            Canvas {
+                flow: f.clone(),
+                collections: collections.clone(),
+                states: states(),
+                selected,
+                on_edit: on_canvas,
+            }
+            for p in problems.iter() {
+                p { key: "{p}", class: "send-status send-error", "{p}" }
+            }
+            match &*msg.read() {
+                Some(Ok(m)) => rsx! { span { class: "send-status", "{m}" } },
+                Some(Err(m)) => rsx! { p { class: "send-status send-error", "{m}" } },
+                None => rsx! {},
+            }
+        }
+        match picked {
+            Some(node) if node.step().is_some() => rsx! {
+                RequestEditor {
+                    key: "{node.id}",
+                    rid: id,
+                    node,
+                    flow,
+                    tools,
+                    selected,
+                }
+            },
+            Some(node) => {
+                let (old, gone) = (node.id.clone(), node.id.clone());
+                rsx! {
+                NodeEditor {
+                    key: "{node.id}",
+                    node,
+                    collections: collections.clone(),
+                    paths,
+                    on_save: move |next: Node| {
+                        let old = old.clone();
+                        selected.set(Some(next.id.clone()));
+                        apply(Rc::new(move |f: &mut Flow| replace_node(f, &old, next.clone())));
+                    },
+                    on_delete: move |_| {
+                        selected.set(None);
+                        on_canvas(CanvasEdit::Remove(gone.clone()));
+                    },
+                }
+                }
+            }
+            None => rsx! {},
+        }
+        if let Some(data) = run.read().clone() {
+            RunResults { data, order }
         }
         div { class: "card",
             div { class: "var-group-title", "Collection variables" }
@@ -521,15 +624,24 @@ fn CollectionView(
                 onclick: move |_| vars.write().push((String::new(), String::new())),
                 "+ Variable"
             }
-        }
-        GateEditor {
-            gate,
-            collections,
-            paths: steps
-                .iter()
-                .map(|s| s.id.clone())
-                .chain(["run.pass".to_string()])
-                .collect::<Vec<_>>(),
+            div { class: "btn-row",
+                label { class: "form-label", "Max node runs per run" }
+                input {
+                    class: "input input-narrow",
+                    r#type: "number",
+                    min: "1",
+                    title: "Every loop pass and retry counts; a run that would go over fails.",
+                    value: "{max_steps}",
+                    onchange: move |e| {
+                        if let Ok(n) = e.value().trim().parse::<u32>() {
+                            apply(Rc::new(move |f: &mut Flow| {
+                                f.max_steps = n.max(1);
+                                Ok(())
+                            }));
+                        }
+                    },
+                }
+            }
         }
         TriggerEditor {
             triggers: triggers.read().clone(),
@@ -537,42 +649,45 @@ fn CollectionView(
         }
         TrailEditor { trail }
         div { class: "btn-row",
-            button { class: "btn btn-primary", onclick: save, "Save collection" }
-            button { class: "btn link-danger", onclick: delete, "Delete collection" }
-            match &*msg.read() {
-                Some(Ok(m)) => rsx! { span { class: "send-status", "{m}" } },
-                Some(Err(m)) => rsx! { span { class: "send-status send-error", "{m}" } },
-                None => rsx! {},
+            button {
+                class: "btn btn-primary",
+                title: "Name, folder, variables, triggers and run history; the flow saves as you edit it",
+                onclick: save,
+                "Save collection"
             }
-        }
-        if let Some(data) = run.read().clone() {
-            RunResults { data, order: steps.iter().map(|s| s.id.clone()).collect() }
+            button { class: "btn link-danger", onclick: delete, "Delete collection" }
         }
     }
 }
 
+/// A tool node: its request, retry and timeout; Send saves it, then runs
+/// it alone (`node_ids`).
 #[component]
 fn RequestEditor(
-    recipe: Recipe,
-    step_id: String,
+    rid: Uuid,
+    node: Node,
+    flow: Signal<Flow>,
     tools: Vec<ToolInfo>,
-    pick: Signal<Pick>,
-    refresh: Signal<u32>,
+    selected: Signal<Option<String>>,
 ) -> Element {
     let client = use_api();
-    let rid = recipe.id;
-    let step = recipe
-        .steps
-        .iter()
-        .find(|s| s.id == step_id)
-        .cloned()
-        .unwrap_or_default();
+    let step = node.step().unwrap_or_default();
+    let (retry0, timeout0) = match &node.kind {
+        NodeKind::Tool {
+            retry, timeout_ms, ..
+        } => (*retry, *timeout_ms),
+        _ => (Retry::default(), None),
+    };
+    let node_id = node.id.clone();
+    let at = node.at;
     let mut id = use_signal(|| step.id.clone());
     let mut description = use_signal(|| step.description.clone().unwrap_or_default());
     let mut tool = use_signal(|| step.tool.clone());
     let mut method = use_signal(|| request_method(&step));
     let mut values = use_signal(|| request_values(&step));
     let mut extract = use_signal(|| step.extract.clone());
+    let mut retry = use_signal(|| retry0);
+    let mut timeout = use_signal(|| timeout0);
     let mut filter = use_signal(String::new);
     // HTTP and LLM requests open in their builder; this shows the plain fields.
     let mut raw_form = use_signal(|| false);
@@ -630,36 +745,48 @@ fn RequestEditor(
         &resolved
     });
 
-    let current_step = move || RecipeStep {
-        id: id.read().trim().to_string(),
-        tool: tool.read().clone(),
-        params: built(),
-        description: Some(description.read().trim().to_string()).filter(|d| !d.is_empty()),
-        extract: extract
-            .read()
-            .iter()
-            .filter(|x| !x.var.trim().is_empty())
-            .cloned()
-            .collect(),
+    let current = move || {
+        let mut n = Node::tool(RecipeStep {
+            id: id.read().trim().to_string(),
+            tool: tool.read().clone(),
+            params: built(),
+            description: Some(description.read().trim().to_string()).filter(|d| !d.is_empty()),
+            extract: extract
+                .read()
+                .iter()
+                .filter(|x| !x.var.trim().is_empty())
+                .cloned()
+                .collect(),
+        });
+        n.at = at;
+        if let NodeKind::Tool {
+            retry: r,
+            timeout_ms,
+            ..
+        } = &mut n.kind
+        {
+            *r = *retry.read();
+            *timeout_ms = *timeout.read();
+        }
+        n
     };
-    let old_id = step_id.clone();
-    // Save; true when the request kept its name (a rename re-opens it).
+    // Save; true when the node kept its id (a rename re-opens it).
     let save = move || {
         let client = client();
-        let old_id = old_id.clone();
-        let next = current_step();
+        let old_id = node_id.clone();
+        let next = current();
         async move {
             let new_id = next.id.clone();
-            match save_step(&client, rid, &old_id, next).await {
+            let edit: FlowEdit = Rc::new(move |f| replace_node(f, &old_id, next.clone()));
+            match change(client, rid, flow, edit).await {
                 Err(e) => {
                     error.set(Some(e));
                     false
                 }
                 Ok(()) => {
                     error.set(None);
-                    refresh += 1;
-                    if new_id != old_id {
-                        pick.set(Pick::Request(rid, new_id));
+                    if *selected.peek() != Some(new_id.clone()) {
+                        selected.set(Some(new_id));
                         return false;
                     }
                     true
@@ -686,35 +813,15 @@ fn RequestEditor(
                 if save().await {
                     let req = StartRunRequest {
                         recipe_id: Some(rid),
-                        step_ids: vec![id.read().trim().to_string()],
+                        node_ids: vec![id.read().trim().to_string()],
                         ..Default::default()
                     };
                     match client.run_and_wait(&req).await {
                         Ok(run) => response.set(Some(run)),
                         Err(e) => error.set(Some(format!("send failed: {e}"))),
                     }
-                    // Extract rules may have written collection variables;
-                    // the save's refresh fetched the list before they did.
-                    refresh += 1;
                 }
                 busy.set(false);
-            });
-        }
-    };
-    let delete = {
-        let old_id = step_id.clone();
-        move |_| {
-            let client = client();
-            let old_id = old_id.clone();
-            spawn(async move {
-                let result = delete_step(&client, rid, &old_id).await;
-                match result {
-                    Ok(()) => {
-                        pick.set(Pick::Collection(rid));
-                        refresh += 1;
-                    }
-                    Err(e) => error.set(Some(e)),
-                }
             });
         }
     };
@@ -725,16 +832,9 @@ fn RequestEditor(
         .find(|t| t.name == *tool.read())
         .map(|t| t.description.clone())
         .unwrap_or_default();
+    let number = |v: u64| if v == 0 { String::new() } else { v.to_string() };
 
     rsx! {
-        div { class: "crumb",
-            button {
-                class: "link-btn",
-                onclick: move |_| pick.set(Pick::Collection(rid)),
-                "{recipe.name}"
-            }
-            " › {step_id}"
-        }
         div { class: "runner-grid",
             div { class: "runner-left",
                 div { class: "form-row",
@@ -825,13 +925,13 @@ fn RequestEditor(
                 }
                 if *tool.read() == HTTP_REQUEST && !raw_form() {
                     HttpBuilder {
-                        key: "{rid}/{step_id}/http",
+                        key: "{rid}/{node.id}/http",
                         values: values.read().clone(),
                         on_change: move |next| values.set(next),
                     }
                 } else if *tool.read() == LLM_CALL && !raw_form() {
                     LlmWizard {
-                        key: "{rid}/{step_id}/llm",
+                        key: "{rid}/{node.id}/llm",
                         values: values.read().clone(),
                         on_change: move |next| values.set(next),
                     }
@@ -853,7 +953,7 @@ fn RequestEditor(
                         for u in unresolved.iter() {
                             code { key: "{u}", "{{{{{u}}}}} " }
                         }
-                        "(another request's result only exists while a run is going; extract it into a variable to chain separate sends)."
+                        "(another node's result only exists while a run is going; extract it into a variable to chain separate sends)."
                     }
                 }
                 details { class: "details",
@@ -861,6 +961,37 @@ fn RequestEditor(
                     pre { class: "mono pre-wrap code-block",
                         "{serde_json::to_string_pretty(&resolved).unwrap_or_default()}"
                     }
+                }
+                div { class: "btn-row",
+                    label { class: "form-label", "Retries" }
+                    input {
+                        class: "input input-narrow",
+                        r#type: "number",
+                        min: "0",
+                        title: "Attempts after the first when the call fails",
+                        value: "{number(retry.read().times.into())}",
+                        onchange: move |e| retry.write().times = e.value().trim().parse().unwrap_or(0),
+                    }
+                    label { class: "form-label", "every" }
+                    input {
+                        class: "input input-narrow",
+                        r#type: "number",
+                        min: "0",
+                        value: "{number(retry.read().delay_ms)}",
+                        onchange: move |e| retry.write().delay_ms = e.value().trim().parse().unwrap_or(0),
+                    }
+                    span { class: "muted", "ms" }
+                    label { class: "form-label", "Timeout" }
+                    input {
+                        class: "input input-narrow",
+                        r#type: "number",
+                        min: "0",
+                        placeholder: "none",
+                        title: "Each attempt fails after this long",
+                        value: "{number(timeout().unwrap_or(0))}",
+                        onchange: move |e| timeout.set(e.value().trim().parse().ok().filter(|ms| *ms > 0)),
+                    }
+                    span { class: "muted", "ms" }
                 }
                 ExtractEditor {
                     rules: extract.read().clone(),
@@ -871,11 +1002,31 @@ fn RequestEditor(
                         class: "btn btn-primary",
                         disabled: busy(),
                         onclick: send,
-                        title: "Saves the request, then runs it",
+                        title: "Saves the node, then runs it alone",
                         if busy() { "Sending…" } else { "Send" }
                     }
                     button { class: "btn", onclick: on_save, "Save" }
-                    button { class: "btn link-danger", onclick: delete, "Delete" }
+                    button {
+                        class: "btn link-danger",
+                        onclick: {
+                            let gone = node.id.clone();
+                            move |_| {
+                                let gone = gone.clone();
+                                selected.set(None);
+                                let edit: FlowEdit = Rc::new(move |f| {
+                                    remove_node(f, &gone);
+                                    Ok(())
+                                });
+                                let client = client();
+                                spawn(async move {
+                                    if let Err(e) = change(client, rid, flow, edit).await {
+                                        error.set(Some(e));
+                                    }
+                                });
+                            }
+                        },
+                        "Delete"
+                    }
                 }
                 if let Some(e) = error.read().as_deref() {
                     div { class: "alert alert-error mono pre-wrap", "{e}" }
@@ -893,7 +1044,7 @@ fn RequestEditor(
                             step_id: id.read().trim().to_string(),
                             rules: extract.read().clone(),
                             // Keep the value as a collection variable now, and
-                            // the rule (saved with the request) for later sends.
+                            // the rule (saved with the node) for later sends.
                             on_extract: {
                                 let save = save.clone();
                                 move |(path, value): (String, Value)| {
@@ -910,10 +1061,7 @@ fn RequestEditor(
                                             return;
                                         }
                                         match save_collection_var(&client, rid, None, &var, value).await {
-                                            Ok(()) => {
-                                                notice.set(Some(format!("{path} saved as collection variable {var}")));
-                                                refresh += 1;
-                                            }
+                                            Ok(()) => notice.set(Some(format!("{path} saved as collection variable {var}"))),
                                             Err(e) => error.set(Some(format!("could not save {var}: {e}"))),
                                         }
                                     });

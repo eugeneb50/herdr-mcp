@@ -429,7 +429,8 @@ pub struct RecipeGetParams {
 }
 
 /// Parameters for `recipe_save`: no `recipe_id` creates a recipe (`name`
-/// and `steps` required); with one, the fields given replace the saved ones.
+/// and `flow` or `steps` required); with one, the fields given replace the
+/// saved ones.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 #[serde(deny_unknown_fields)]
@@ -437,8 +438,12 @@ pub struct RecipeSaveParams {
     pub recipe_id: Option<String>,
     pub name: Option<String>,
     pub description: Option<String>,
-    /// Run in order; a failing step stops the run. Each step's `params` may
-    /// use `{{ stepId.path }}` (an earlier step's result) and `{{ var }}`.
+    /// The recipe as a graph: nodes (start, tool, branch, run, wait, fail)
+    /// and edges between their ports; see the agent guide's Flows section.
+    pub flow: Option<herdr_mcp_api::Flow>,
+    /// Shorthand for a flow that runs these tool calls one after another
+    /// (a failing step stops the run). Each step's `params` may use
+    /// `{{ stepId.path }}` (an earlier step's result) and `{{ var }}`.
     pub steps: Option<Vec<herdr_mcp_api::RecipeStep>>,
     /// The recipe's own variables (`{{ name }}` in its steps).
     pub variables: Option<HashMap<String, serde_json::Value>>,
@@ -446,11 +451,6 @@ pub struct RecipeSaveParams {
     pub triggers: Option<Vec<herdr_mcp_api::RecipeTrigger>>,
     /// Playground folder; "" clears it.
     pub category: Option<String>,
-    /// What a full run does after the last step: rules checked in order,
-    /// the first match decides (end, restart from step 1, fail, or run
-    /// another recipe as a child run and end as it ends). A gate with no
-    /// rules removes it.
-    pub gate: Option<herdr_mcp_api::Gate>,
     /// How long this recipe's runs are kept (`keep_runs` newest, or
     /// `keep_days`) and the pane lines a failed run saves
     /// (`snapshot_lines`); unset fields use the global `runs.*` settings,
@@ -463,9 +463,11 @@ pub struct RecipeSaveParams {
 #[must_use]
 #[serde(deny_unknown_fields)]
 pub struct RecipeRunParams {
-    /// A saved recipe to run (or pass ad-hoc `steps`).
+    /// A saved recipe to run (or pass an ad-hoc `flow` or `steps`).
     pub recipe_id: Option<String>,
-    /// Ad-hoc steps, run without saving a recipe.
+    /// An ad-hoc flow, run without saving a recipe.
+    pub flow: Option<herdr_mcp_api::Flow>,
+    /// Ad-hoc steps run one after another, without saving a recipe.
     pub steps: Option<Vec<herdr_mcp_api::RecipeStep>>,
     /// Name for an ad-hoc run.
     pub name: Option<String>,
@@ -474,9 +476,9 @@ pub struct RecipeRunParams {
     /// Added to the run's scope over the recipe's own variables.
     #[serde(default)]
     pub variables: HashMap<String, serde_json::Value>,
-    /// Run only these steps, in recipe order.
+    /// Run only these tool nodes, one after another in flow order.
     #[serde(default)]
-    pub step_ids: Vec<String>,
+    pub node_ids: Vec<String>,
     /// Wait for the run to finish and return its final record (default
     /// false: return at once; poll `run_get`).
     #[serde(default)]
@@ -490,8 +492,8 @@ pub struct RecipeRunParams {
 pub struct RunGetParams {
     pub run_id: String,
     /// Return the run's trail as text instead of its record: every event
-    /// with its time, what each step sent and got, why the gate chose its
-    /// rule, errors and pane snapshots. Use it to find out why a run failed.
+    /// with its time, what each node sent and got, the port each branch took
+    /// and why, loops, errors and pane snapshots. Use it to find out why a run failed.
     #[serde(default)]
     pub trail: bool,
 }
