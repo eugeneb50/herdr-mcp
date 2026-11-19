@@ -22,7 +22,7 @@ use crate::server::{
 const REPORT_SOURCE: &str = "herdr-mcp";
 
 /// Quote one word for the pane's shell (`pane run` types a command line).
-fn shell_quote(word: &str) -> String {
+pub(crate) fn shell_quote(word: &str) -> String {
     let safe = !word.is_empty()
         && word
             .chars()

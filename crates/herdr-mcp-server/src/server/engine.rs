@@ -82,9 +82,21 @@ pub(crate) fn resolve_variables(
         serde_json::Value::String(s) => {
             *s = VARIABLE_RE
                 .replace_all(s, |caps: &regex::Captures| {
-                    let path = caps[1].trim();
+                    let body = caps[1].trim();
+                    let (path, shell) = match body.split_once('|') {
+                        Some((path, filter)) if filter.trim() == "sh" => (path.trim(), true),
+                        Some(_) => return caps[0].to_string(),
+                        None => (body, false),
+                    };
                     match resolve_json_path(results, path) {
-                        Some(v) => json_value_to_string(&v),
+                        Some(v) => {
+                            let value = json_value_to_string(&v);
+                            if shell {
+                                crate::agents::shell_quote(&value)
+                            } else {
+                                value
+                            }
+                        }
                         None => caps[0].to_string(),
                     }
                 })
@@ -183,5 +195,64 @@ pub(crate) fn json_value_to_string(v: &serde_json::Value) -> String {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn shell_filter_quotes_untrusted_command_value() {
+        let results = HashMap::from([(
+            "worker".to_string(),
+            json!({"output": "hi; echo INJECTED-$((6*7))"}),
+        )]);
+        let mut command = json!("printf '%s\\n' {{ worker.output | sh }}");
+        resolve_variables(&mut command, &results);
+        assert_eq!(
+            command,
+            json!("printf '%s\\n' 'hi; echo INJECTED-$((6*7))'")
+        );
+    }
+
+    #[test]
+    fn shell_filter_produces_one_literal_shell_argument() {
+        for input in [
+            "two words",
+            "it's",
+            "$(printf INJECTED)",
+            "",
+            "hi; echo INJECTED-$((6*7))",
+        ] {
+            let values = HashMap::from([("value".to_string(), json!(input))]);
+            let mut command = json!("printf '%s' {{ value | sh }}");
+            resolve_variables(&mut command, &values);
+            let output = std::process::Command::new("sh")
+                .args(["-c", command.as_str().unwrap()])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), input);
+        }
+    }
+
+    #[test]
+    fn plain_placeholders_remain_raw_and_unknown_filters_unresolved() {
+        let values = HashMap::from([("value".to_string(), json!("hi; echo INJECTED-$((6*7))"))]);
+        let mut command =
+            json!("echo {{ value }}; echo {{ value | unknown }}; echo {{ missing | sh }}");
+        resolve_variables(&mut command, &values);
+        assert_eq!(
+            command,
+            json!(
+                "echo hi; echo INJECTED-$((6*7)); echo {{ value | unknown }}; echo {{ missing | sh }}"
+            )
+        );
+        assert_eq!(
+            unresolved_placeholders(&command),
+            ["{{ value | unknown }}", "{{ missing | sh }}"]
+        );
     }
 }
