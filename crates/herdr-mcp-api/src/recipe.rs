@@ -100,12 +100,9 @@ pub struct RecipeTemplate {
     pub description: String,
     pub category: String,
     pub variables: Vec<TemplateVariable>,
-    pub steps: Vec<RecipeStep>,
-    /// When set, `instantiate` builds the recipe's flow from this instead of
-    /// `Flow::chain(steps)`. `{{ template.x }}` placeholders in tool node
-    /// params are substituted like steps.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flow: Option<Flow>,
+    /// `{{ template.x }}` placeholders in tool node params are filled in by
+    /// `instantiate`.
+    pub flow: Flow,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -4,10 +4,8 @@ use uuid::Uuid;
 
 use crate::variables::{Recipe, RecipeStep};
 
-pub use herdr_mcp_api::{
-    Check, Edge, Flow, Node, NodeKind, Op, Point, Port, RecipeTemplate, Retry, Rule,
-    TemplateVariable,
-};
+use herdr_mcp_api::{Check, Edge, Flow, Node, NodeKind, Op, Point, Port, Retry, Rule};
+pub use herdr_mcp_api::{RecipeTemplate, TemplateVariable};
 
 /// Get the bundled template library.
 pub fn bundled_templates() -> Vec<RecipeTemplate> {
@@ -31,7 +29,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     required: true,
                 },
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "list".to_string(),
                     tool: "list_panes".to_string(),
@@ -49,8 +47,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("Notify the agent".to_string()),
                     extract: Vec::new(),
                 },
-            ],
-            flow: None,
+            ]),
         },
         RecipeTemplate {
             id: "git-status".to_string(),
@@ -58,7 +55,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
             description: "Run git status in a shell pane and capture what it printed".to_string(),
             category: "git".to_string(),
             variables: vec![var("pane_id", "Shell pane in the repository", None)],
-            steps: vec![step(
+            flow: Flow::chain(vec![step(
                 "status",
                 "pane_exec",
                 serde_json::json!({
@@ -66,8 +63,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     "command": "git status --short --branch"
                 }),
                 "Run git status; {{status.output}} holds the result",
-            )],
-            flow: None,
+            )]),
         },
         RecipeTemplate {
             id: "restart-agent".to_string(),
@@ -80,7 +76,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 default_value: None,
                 required: true,
             }],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "close".to_string(),
                     tool: "close_pane".to_string(),
@@ -100,8 +96,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("Start a fresh agent (profile or herdr agent kind)".to_string()),
                     extract: Vec::new(),
                 },
-            ],
-            flow: None,
+            ]),
         },
         RecipeTemplate {
             id: "build-and-test".to_string(),
@@ -113,7 +108,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 var("build", "Build command", Some("make build")),
                 var("test", "Test command", Some("make test")),
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 step(
                     "build",
                     "pane_exec",
@@ -136,8 +131,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     }),
                     "Test (fails the run on a non-zero exit)",
                 ),
-            ],
-            flow: None,
+            ]),
         },
         RecipeTemplate {
             id: "pane-to-agent".to_string(),
@@ -149,7 +143,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 var("agent_pane", "Agent pane to ask", None),
                 var("question", "What to ask about it", Some("What is going on here?")),
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 step(
                     "read",
                     "read_pane",
@@ -178,8 +172,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     }),
                     "Submit",
                 ),
-            ],
-            flow: None,
+            ]),
         },
         RecipeTemplate {
             id: "run-and-ask".to_string(),
@@ -196,7 +189,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     Some("Explain any failures above and propose a fix."),
                 ),
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 step(
                     "run",
                     "pane_exec",
@@ -225,8 +218,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     }),
                     "Submit",
                 ),
-            ],
-            flow: None,
+            ]),
         },
         RecipeTemplate {
             id: "health-check".to_string(),
@@ -234,7 +226,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
             description: "Check server status, workspaces, panes".to_string(),
             category: "monitoring".to_string(),
             variables: vec![],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "status".to_string(),
                     tool: "status".to_string(),
@@ -263,8 +255,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("List agents".to_string()),
                     extract: Vec::new(),
                 },
-            ],
-            flow: None,
+            ]),
         },
         RecipeTemplate {
             id: "a2a-pane-inventory".to_string(),
@@ -285,7 +276,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     required: true,
                 },
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "panes".to_string(),
                     tool: "list_panes".to_string(),
@@ -324,8 +315,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("Store agent labels/ids".to_string()),
                     extract: Vec::new(),
                 },
-            ],
-            flow: None,
+            ]),
         },
         RecipeTemplate {
             id: "a2a-ping".to_string(),
@@ -346,7 +336,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     required: false,
                 },
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "send".to_string(),
                     tool: "agent_message".to_string(),
@@ -366,8 +356,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("Read its output".to_string()),
                     extract: Vec::new(),
                 },
-            ],
-            flow: None,
+            ]),
         },
         RecipeTemplate {
             id: "a2a-fanout-collect".to_string(),
@@ -400,7 +389,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     required: false,
                 },
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "send_a".to_string(),
                     tool: "agent_message".to_string(),
@@ -450,8 +439,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("Store collected output".to_string()),
                     extract: Vec::new(),
                 },
-            ],
-            flow: None,
+            ]),
         },
         RecipeTemplate {
             id: "agent-fanout-review".to_string(),
@@ -463,8 +451,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 var("agent", "Agent profile to start for each review", None),
                 var("task", "Review task / prompt", None),
             ],
-            steps: vec![],
-            flow: Some(Flow {
+            flow: Flow {
                 nodes: vec![
                     Node {
                         id: "start".to_string(),
@@ -518,7 +505,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     edge("c", Port::Out, "summarise"),
                 ],
                 max_steps: Flow::default().max_steps,
-            }),
+            },
         },
         RecipeTemplate {
             id: "agent-relay".to_string(),
@@ -530,8 +517,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 var("agent", "Agent profile to use for both roles", None),
                 var("task", "Writing task", None),
             ],
-            steps: vec![],
-            flow: Some(Flow {
+            flow: Flow {
                 nodes: vec![
                     Node {
                         id: "start".to_string(),
@@ -563,7 +549,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     edge("writer", Port::Out, "reviewer"),
                 ],
                 max_steps: Flow::default().max_steps,
-            }),
+            },
         },
         RecipeTemplate {
             id: "agent-supervisor-loop".to_string(),
@@ -575,8 +561,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 var("agent", "Agent profile to start as the worker", None),
                 var("task", "Task for the worker", None),
             ],
-            steps: vec![],
-            flow: Some(Flow {
+            flow: Flow {
                 nodes: vec![
                     Node {
                         id: "start".to_string(),
@@ -615,7 +600,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     edge("branch", Port::Else, "worker"),
                 ],
                 max_steps: 20,
-            }),
+            },
         },
     ]
 }
@@ -701,24 +686,12 @@ pub fn instantiate(
         vars.insert(key, value);
     }
 
-    let flow = match &template.flow {
-        Some(flow) => {
-            let mut flow = flow.clone();
-            for node in &mut flow.nodes {
-                if let NodeKind::Tool { params, .. } = &mut node.kind {
-                    substitute_template_vars(params, &vars);
-                }
-            }
-            flow
+    let mut flow = template.flow.clone();
+    for node in &mut flow.nodes {
+        if let NodeKind::Tool { params, .. } = &mut node.kind {
+            substitute_template_vars(params, &vars);
         }
-        None => {
-            let mut steps = template.steps.clone();
-            for step in &mut steps {
-                substitute_template_vars(&mut step.params, &vars);
-            }
-            Flow::chain(steps)
-        }
-    };
+    }
 
     let now = Utc::now();
     Some(Recipe {

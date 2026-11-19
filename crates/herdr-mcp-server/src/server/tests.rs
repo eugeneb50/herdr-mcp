@@ -539,7 +539,7 @@ fn bundled_templates_use_real_tools() {
         })
         .collect();
     for t in tmpl::list_templates() {
-        for step in &t.steps {
+        for step in t.flow.nodes.iter().filter_map(herdr_mcp_api::Node::step) {
             let at = format!("template {} step {}", t.id, step.id);
             let schema = tools
                 .get(&step.tool)
