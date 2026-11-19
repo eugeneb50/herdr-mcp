@@ -14,7 +14,8 @@ use herdr_mcp_api::AgentProfile;
 use rmcp::ErrorData as McpError;
 
 use crate::server::{
-    agent_submit_args, agent_wait_args, as_strs, extract_pane_id, herdr_cli, to_mcp_err,
+    FINISHED, agent_status_of, agent_submit_args, agent_wait_args, as_strs, extract_pane_id,
+    herdr_cli, to_mcp_err, user_err,
 };
 
 /// `--source` value herdr-mcp reports agent state under.
@@ -179,20 +180,42 @@ pub async fn spawn(
         }
     };
 
+    // Label first: the pane keeps its name even if the start below fails.
+    herdr(&["pane".into(), "rename".into(), pane.clone(), name.into()]).await?;
     match &profile.kind {
         Some(kind) => {
             let args: Vec<String> = profile.args.iter().chain(extra).cloned().collect();
             let timeout = knobs.number(settings::AGENT_START_MS);
-            herdr(&start_args(kind, name, &pane, timeout, &args)).await?;
+            if let Err(e) = herdr(&start_args(kind, name, &pane, timeout, &args)).await {
+                // herdr calls an agent that stopped on a trust or update
+                // prompt "not ready"; it is running, waiting for a human.
+                if pane_status(&pane).await.as_deref() != Some("blocked") {
+                    return Err(user_err(format!(
+                        "{} (pane {pane} is left open)",
+                        e.message
+                    )));
+                }
+            }
         }
         None => {
             let line = command_line(profile, extra);
             herdr(&["pane".into(), "run".into(), pane.clone(), line]).await?;
+            // herdr knows no agent here until one is reported: say so now,
+            // not on the watcher's first tick, so a wait right after finds it.
+            report(&pane, &profile.id, Activity::Working).await?;
             watch(pane.clone(), profile, knobs);
         }
     }
-    let _ = herdr(&["pane".into(), "rename".into(), pane.clone(), name.into()]).await;
     Ok(pane)
+}
+
+/// The agent status herdr reports for `pane`.
+async fn pane_status(pane: &str) -> Option<String> {
+    let panes = crate::panes::panes(&Default::default()).await.ok()?;
+    panes
+        .into_iter()
+        .find(|p| p.pane_id == pane)
+        .map(|p| p.agent_status)
 }
 
 /// Busy / ready, as reported to herdr for `command` agents.
@@ -261,6 +284,22 @@ impl QuietDetector {
     }
 }
 
+/// Tell herdr what `agent` in `pane` is doing (`pane report-agent`).
+async fn report(pane: &str, agent: &str, activity: Activity) -> Result<String, McpError> {
+    herdr_cli(&[
+        "pane",
+        "report-agent",
+        pane,
+        "--source",
+        REPORT_SOURCE,
+        "--agent",
+        agent,
+        "--state",
+        activity.as_str(),
+    ])
+    .await
+}
+
 /// Watch a `command` agent's pane and report its activity to herdr until
 /// the pane goes away. Reported under the profile id, which the registry
 /// picks up as the pane's agent, so later prompts find the same profile.
@@ -293,21 +332,10 @@ fn watch(pane: String, profile: &AgentProfile, knobs: &Settings) {
                     continue;
                 }
             };
-            if let Some(activity) = detector.observe(&snapshot, Instant::now()) {
-                let report = [
-                    "pane",
-                    "report-agent",
-                    &pane,
-                    "--source",
-                    REPORT_SOURCE,
-                    "--agent",
-                    &agent,
-                    "--state",
-                    activity.as_str(),
-                ];
-                if let Err(e) = herdr_cli(&report).await {
-                    tracing::debug!("agent watcher for {pane}: report failed: {}", e.message);
-                }
+            if let Some(activity) = detector.observe(&snapshot, Instant::now())
+                && let Err(e) = report(&pane, &agent, activity).await
+            {
+                tracing::debug!("agent watcher for {pane}: report failed: {}", e.message);
             }
         }
     });
@@ -344,18 +372,26 @@ pub async fn prompt(
     pane: &str,
     text: &str,
     timeout_ms: u32,
-) -> Result<String, McpError> {
+) -> Result<(String, &'static str), McpError> {
+    let mut status = "idle";
     if profile.is_native() {
         let ms = timeout_ms.to_string();
         let mut args = agent_submit_args(pane, text);
         args.extend(["--wait".into(), "--timeout".into(), ms]);
-        herdr(&args).await?;
+        // herdr's wait also ends on `blocked`: the reply is then the
+        // question on screen, for a human to answer.
+        status = agent_status_of(&herdr(&args).await?).unwrap_or(status);
+        if status == "blocked" {
+            let screen = herdr_cli(&["pane", "read", pane, "--source", "visible"]).await?;
+            return Ok((screen, status));
+        }
     } else {
         submit(profile, pane, text).await?;
         // Let the watcher see it start, so the idle wait isn't satisfied by
         // the state from before the prompt.
-        let _ = herdr(&agent_wait_args(pane, "working", Some(5000))).await;
-        herdr(&agent_wait_args(pane, "idle", Some(timeout_ms))).await?;
+        let _ = herdr(&agent_wait_args(pane, &["working"], Some(5000))).await;
+        let done = herdr(&agent_wait_args(pane, &FINISHED, Some(timeout_ms))).await?;
+        status = agent_status_of(&done).unwrap_or(status);
     }
     let lines = profile.reply_lines.to_string();
     let read = [
@@ -369,7 +405,8 @@ pub async fn prompt(
     ];
     let fallback =
         usize::try_from(knobs.number(settings::REPLY_FALLBACK_LINES)).unwrap_or(usize::MAX);
-    Ok(extract_reply(&herdr_cli(&read).await?, text, fallback))
+    let reply = extract_reply(&herdr_cli(&read).await?, text, fallback);
+    Ok((reply, status))
 }
 
 /// Stop the agent's current turn (`interrupt` keys) or quit it (`stop`).

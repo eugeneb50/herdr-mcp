@@ -416,7 +416,7 @@ impl App {
 
     /// Refresh sessions and the shown session's panes. herdr's pane list is
     /// what exists; the registry (`GET /api/agents`, this server's session
-    /// only) adds role and output by pane id.
+    /// only) adds output by pane id.
     async fn refresh_herdr(&mut self) {
         self.herdr.last_error = None;
         let Some(http) = self.http.clone() else {

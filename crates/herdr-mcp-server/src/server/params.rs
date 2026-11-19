@@ -223,15 +223,12 @@ pub struct PaneWatchParams {
     pub timeout_ms: Option<u32>,
 }
 
-/// Parameters for the `agent_spawn` a2a step. Starts an agent, registers its
-/// role→pane mapping, optionally waits for dependencies (`needs`) to go idle,
-/// and captures its work product on idle.
+/// Parameters for the `agent_spawn` a2a step. Starts an agent in a pane
+/// labelled `label` (or returns the live agent already there), optionally
+/// after its `needs` go idle, and captures its work product on idle.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 pub struct AgentSpawnParams {
-    /// Human role used for `{{role.output}}` interpolation (e.g. "agentA").
-    #[serde(default)]
-    pub role: String,
     /// Name of the agent to start.
     pub agent: String,
     /// Arguments to pass to the agent (after '--').
@@ -245,14 +242,14 @@ pub struct AgentSpawnParams {
     pub tab_id: Option<String>,
     /// `right` or `down`; default right for a wide pane, down for a tall one.
     pub split: Option<String>,
-    /// Targets (role or pane id) that must be idle before this agent starts.
+    /// Targets (label or pane id) that must be idle before this agent starts.
     #[serde(default)]
     pub needs: Vec<String>,
     /// Wait for this agent to reach idle before returning (default true).
     #[serde(default = "default_true_bool")]
     pub wait_idle: bool,
-    /// Optional friendly label for this agent (addressable via `agent_message`
-    /// `target`). Renames the pane and stores the label in the registry.
+    /// The pane's label: the agent's name for targets and `{{label.output}}`,
+    /// unique in the session. Default `<agent>-<6 hex>`.
     #[serde(default)]
     pub label: Option<String>,
     /// Start the agent in this existing pane (e.g. a new workspace's
@@ -266,7 +263,7 @@ pub struct AgentSpawnParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 pub struct AgentMessageParams {
-    /// Target agent: role or pane id.
+    /// Target agent: pane label or pane id.
     pub target: String,
     /// Text to send to the agent's stream.
     pub text: String,
@@ -276,7 +273,7 @@ pub struct AgentMessageParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 pub struct AgentPromptParams {
-    /// Target agent: role, label or pane id.
+    /// Target agent: pane label or pane id.
     pub target: String,
     /// Prompt text.
     pub text: String,
@@ -288,7 +285,7 @@ pub struct AgentPromptParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 pub struct AgentInterruptParams {
-    /// Target agent: role, label or pane id.
+    /// Target agent: pane label or pane id.
     pub target: String,
     /// Quit the agent (profile `stop` keys) instead of stopping its turn.
     #[serde(default)]
@@ -299,7 +296,7 @@ pub struct AgentInterruptParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 pub struct AgentReadParams {
-    /// Target agent: role or pane id.
+    /// Target agent: pane label or pane id.
     pub target: String,
     pub source: Option<String>,
     pub lines: Option<u32>,
@@ -309,11 +306,11 @@ pub struct AgentReadParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq)]
 #[must_use]
 pub struct AgentWaitParams {
-    /// Role, label or pane id.
+    /// Pane label or pane id.
     pub target: String,
-    /// Target status: "idle", "working", "blocked", "done" (default "idle").
-    #[serde(default = "default_idle")]
-    pub status: String,
+    /// Status to wait for: "idle", "working", "blocked", "done" or
+    /// "unknown". Default: the turn is over (idle, done or blocked).
+    pub status: Option<String>,
     pub timeout_ms: Option<u32>,
 }
 
@@ -590,7 +587,4 @@ pub struct WorkspaceQuery {
 
 fn default_true_bool() -> bool {
     true
-}
-fn default_idle() -> String {
-    "idle".to_string()
 }

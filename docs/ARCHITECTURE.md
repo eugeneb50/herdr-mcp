@@ -207,12 +207,12 @@ engine, always acts on the server's own session.
 
 | Tool | Parameters | Description |
 |---|---|---|
-| `agent_spawn` | `role`, `agent`, `args`, `cwd?`, `workspace_id?`, `tab_id?`, `split?`, `needs`, `wait_idle`, `label?`, `in_pane?` | Spawn agent (in a new split, or in the existing `in_pane`), register role→pane, wait for deps, capture output |
+| `agent_spawn` | `agent`, `label?`, `args`, `cwd?`, `workspace_id?`, `tab_id?`, `split?`, `needs`, `wait_idle`, `in_pane?` | Spawn agent (in a new split, or in the existing `in_pane`) under a unique label, or return the live agent with that label; wait for deps, capture output |
 | `agent_prompt` | `target`, `text`, `timeout_ms?` | Prompt an agent and wait for its turn to finish; returns its reply |
 | `agent_interrupt` | `target`, `hard` | Stop the agent's turn (profile `interrupt` keys) or quit it (`hard`) |
 | `agent_message` | `target`, `text` | Send a message to an agent and submit it |
 | `agent_read` | `target`, `source?`, `lines?` | Read + store as work product |
-| `agent_wait` | `target`, `status?`, `timeout_ms?` | Wait for an agent status; `target` is a role, label or pane id |
+| `agent_wait` | `target`, `status?`, `timeout_ms?` | Wait for an agent status; `target` is a pane label or pane id |
 | `agent_list` | `workspace_id?` | List registry agents |
 
 ### 4.7 Session Variables (2)
@@ -407,11 +407,11 @@ Variables use `{{ path }}` syntax with dot/bracket navigation:
 {{ ls.panes[0].pane_id }}            a node's result (or the JSON its tool returned)
 {{ ls }} / {{ ls.text }}             the text a node's tool returned
 {{ run.pass }}                       1, plus one per loop taken
-{{ pane_id.output }} {{ role.output }}
+{{ pane_id.output }} {{ label.output }}
 ```
 
 **Scope** (`runs::scope`, lowest priority first): live agent handles by pane
-id and role (every workspace's, then the run's), `template.session_id` /
+id and label (every workspace's, then the run's), `template.session_id` /
 `template.workspace_id` (the run's workspace), globals (`/api/variables`),
 the recipe's `variables`, the run request's `variables`. Step results and
 extracted variables go on top as the run proceeds. `POST
@@ -578,7 +578,7 @@ type text:
   talks to that bridge.
 - Panes come from herdr via `GET /api/herdr/panes` (the shown session),
   joined by pane id with the registry (`GET /api/agents`, own session only)
-  for role and captured output. Writes (Send, paste-to-pane) refuse while
+  for captured output. Writes (Send, paste-to-pane) refuse while
   another session is shown.
 - **Mouse support**: Tab strip clicks, scroll wheel on lists, right-click
   context menu with copy actions.
@@ -602,14 +602,12 @@ pub struct AgentRegistry {
 ```
 
 **AgentHandle fields:** `pane_id`, `workspace_id`, `tab_id`, `agent`,
-`role`, `label`, `status`, `output`, `updated_at`
+`label`, `status`, `output`, `updated_at`. The label is the agent's one
+name; herdr keeps it across restarts, so nothing herdr-mcp holds is lost.
 
-**Resolution order:** pane_id (exact match) → role → label (optionally
-scoped to workspace)
-
-**Registry operations:** `upsert`, `set_status`, `set_output`, `get`,
-`set_label`, `resolve`, `list_for_ws`, `inner_snapshot`,
-`seed`
+**Registry operations:** `upsert`, `retain` (each pane list drops the panes
+that closed), `set_status`, `set_output`, `get`, `list_for_ws`,
+`inner_snapshot`, `seed`
 
 ### 8.2 Event Subscriber (`HerdrClient`)
 
@@ -652,12 +650,12 @@ re-trigger itself.
 
 ### 8.4 Label Resolution
 
-`registry.resolve(ws, target)` matches by:
-1. **pane_id** (exact key match)
-2. **role** (filtering by workspace if provided)
-3. **label** (filtering by workspace if provided)
-
-Used by `agent_spawn`, `agent_message`, `agent_read`, `agent_wait`.
+An a2a `target` (and `agent_spawn`'s `needs`) is read against herdr's live
+`pane list`, not the registry: a **pane id**, else the one pane whose
+**label** is exactly it (none or several is an error listing the labels).
+A closed pane is not in the list, so it never matches. `agent_spawn`
+checks its label the same way: a live pane with it running the same agent
+is returned (`reused`), any other agent there is an error.
 
 ---
 

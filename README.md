@@ -78,7 +78,7 @@ herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 - **Cron scheduler** — schedule recipe runs on cron expressions
 - **Web playground** — Dioxus (Rust → wasm) UI served by the bridge: collections drawn and edited as flows on a canvas (tool, herdr API, HTTP and LLM requests wired to branches, loops, waits and child runs) with extract rules, triggers, live run colouring and a map of what starts what; runs, variables, herdr events
 - **TUI monitor** — what `herdr-mcp` opens in a terminal: a monitor and quick-action console (mouse + keyboard) with Send, Overview, Runs (run a collection, rerun, cancel, open a run's pane) and herdr's Events. Collections, variables and settings are edited in the web UI (`Alt+w` opens it)
-- **Live agent registry** — Unix socket event subscriber tracks panes and agent status in real time; role/label resolution for a2a primitives
+- **Live agent registry** — Unix socket event subscriber tracks panes and agent status in real time; a2a primitives address agents by their unique pane label
 - **Shell-out core** — talks to herdr through its CLI (`tokio::process::Command`, real argv) and socket; no other runtime dependencies
 
 ---
@@ -585,12 +585,12 @@ Agents: [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md) shows how to combine them.
 ### A2A primitives (7)
 | Tool | Description |
 |------|-------------|
-| `agent_spawn` | Start an agent from a profile in a new pane (or `in_pane`) and register it under a role |
+| `agent_spawn` | Start an agent from a profile in a new pane (or `in_pane`) under a unique label; the live agent with that label is reused |
 | `agent_prompt` | Prompt an agent and wait for its reply |
 | `agent_interrupt` | Stop an agent's turn, or quit it |
 | `agent_message` | Send a message to an agent and submit it |
 | `agent_read` | Read an agent's output and store it as its work product |
-| `agent_wait` | Wait for an agent status (role, label or pane id) |
+| `agent_wait` | Wait for an agent status (label or pane id) |
 | `agent_list` | List registry agents |
 
 ### HTTP (1) / LLM (2)

@@ -4,7 +4,7 @@
 //! lifecycle state, and emits `pane.agent_status_changed` events over its
 //! local socket. This module keeps a live `pane_id -> agent` registry fed by
 //! that event stream, and exposes it so recipe steps and MCP tools can address
-//! agents by role or pane id and pass one agent's output (work product) to the
+//! agents by label or pane id and pass one agent's output (work product) to the
 //! next — the a2a primitive.
 //!
 //! Transport mirrors llmtrim-herdr's `herdr-rpc`: one newline-terminated JSON
@@ -69,42 +69,49 @@ impl AgentRegistry {
         Self::default()
     }
 
-    /// Register or update an agent handle at the given pane, preserving any
-    /// previously captured output/role.
+    /// Register or update an agent handle at the given pane, keeping its
+    /// captured output; empty `tab_id`, `agent` or `label` leave the old value.
     pub async fn upsert(
         &self,
         pane_id: &str,
         workspace_id: &str,
         tab_id: &str,
         agent: &str,
-        role: &str,
+        label: &str,
     ) {
         let now = chrono::Utc::now().timestamp();
         let mut map = self.inner.write().await;
-        let mut handle = map.remove(pane_id).unwrap_or_else(|| AgentHandle {
-            pane_id: pane_id.to_string(),
-            workspace_id: workspace_id.to_string(),
-            tab_id: String::new(),
-            agent: String::new(),
-            role: String::new(),
-            label: String::new(),
-            status: String::new(),
-            output: String::new(),
-            updated_at: now,
-        });
-        handle.pane_id = pane_id.to_string();
+        let handle = map
+            .entry(pane_id.to_string())
+            .or_insert_with(|| AgentHandle {
+                pane_id: pane_id.to_string(),
+                workspace_id: String::new(),
+                tab_id: String::new(),
+                agent: String::new(),
+                label: String::new(),
+                status: String::new(),
+                output: String::new(),
+                updated_at: now,
+            });
         handle.workspace_id = workspace_id.to_string();
-        if !tab_id.is_empty() {
-            handle.tab_id = tab_id.to_string();
-        }
-        if !agent.is_empty() {
-            handle.agent = agent.to_string();
-        }
-        if !role.is_empty() {
-            handle.role = role.to_string();
+        for (field, value) in [
+            (&mut handle.tab_id, tab_id),
+            (&mut handle.agent, agent),
+            (&mut handle.label, label),
+        ] {
+            if !value.is_empty() {
+                *field = value.to_string();
+            }
         }
         handle.updated_at = now;
-        map.insert(pane_id.to_string(), handle);
+    }
+
+    /// Forget every pane not in `live` (closed since the last pane list).
+    pub async fn retain(&self, live: &std::collections::HashSet<&str>) {
+        self.inner
+            .write()
+            .await
+            .retain(|pane, _| live.contains(pane.as_str()));
     }
 
     pub async fn set_status(&self, pane_id: &str, status: &str) {
@@ -127,30 +134,6 @@ impl AgentRegistry {
         self.inner.read().await.get(pane_id).cloned()
     }
 
-    /// Set (or clear) the pane label.
-    pub async fn set_label(&self, pane_id: &str, label: &str) {
-        let mut map = self.inner.write().await;
-        if let Some(h) = map.get_mut(pane_id) {
-            h.label = label.to_string();
-            h.updated_at = chrono::Utc::now().timestamp();
-        }
-    }
-
-    /// Resolve a target (role, pane id, or label) to a pane id within a workspace.
-    /// When `ws` is empty, resolution spans all workspaces (used by the a2a tools
-    /// that address agents purely by role/label).
-    pub async fn resolve(&self, ws: &str, target: &str) -> Option<String> {
-        let map = self.inner.read().await;
-        if map.contains_key(target) {
-            return Some(target.to_string());
-        }
-        map.values()
-            .find(|h| {
-                (ws.is_empty() || h.workspace_id == ws) && (h.role == target || h.label == target)
-            })
-            .map(|h| h.pane_id.clone())
-    }
-
     pub async fn list_for_ws(&self, ws: &str) -> Vec<AgentHandle> {
         self.inner
             .read()
@@ -167,7 +150,7 @@ impl AgentRegistry {
     }
 
     /// Agent handles as variables — `{{pane_id.output}}` and
-    /// `{{role.output}}` both resolve to the handle — for one workspace, or
+    /// `{{label.output}}` both resolve to the handle — for one workspace, or
     /// every workspace when `ws` is `None`.
     pub async fn seed(&self, ws: Option<&str>) -> HashMap<String, serde_json::Value> {
         let handles = match ws {
@@ -181,13 +164,13 @@ impl AgentRegistry {
                 "workspace_id": h.workspace_id,
                 "tab_id": h.tab_id,
                 "agent": h.agent,
-                "role": h.role,
+                "label": h.label,
                 "status": h.status,
                 "output": h.output,
             });
             out.insert(h.pane_id.clone(), obj.clone());
-            if !h.role.is_empty() {
-                out.insert(h.role.clone(), obj);
+            if !h.label.is_empty() {
+                out.insert(h.label.clone(), obj);
             }
         }
         out
@@ -499,8 +482,8 @@ impl HerdrClient {
     /// Build a `events.subscribe` request: every global event herdr's schema
     /// lists, plus `pane.agent_status_changed` for each live pane (herdr
     /// scopes that one to a pane). As a side effect this seeds the registry
-    /// from the live `pane list` so the a2a tools can resolve targets by
-    /// pane id / role / label without waiting for the first event.
+    /// from the live `pane list` (dropping closed panes), so agent_list and
+    /// `{{label.output}}` reflect the panes there are.
     async fn build_subscribe_request(&self) -> serde_json::Value {
         let mut subscriptions: Vec<serde_json::Value> = match herdr_schema().await {
             Some(schema) => global_subscriptions(&schema)
@@ -515,15 +498,14 @@ impl HerdrClient {
 
         match crate::panes::panes(&Default::default()).await {
             Ok(panes) => {
+                let live = panes.iter().map(|p| p.pane_id.as_str()).collect();
+                self.registry.retain(&live).await;
                 for p in &panes {
                     let agent = p.agent.as_deref().unwrap_or("");
                     let label = p.label.as_deref().unwrap_or("");
                     self.registry
                         .upsert(&p.pane_id, &p.workspace_id, &p.tab_id, agent, label)
                         .await;
-                    if !label.is_empty() {
-                        self.registry.set_label(&p.pane_id, label).await;
-                    }
                     if !p.agent_status.is_empty() {
                         self.registry.set_status(&p.pane_id, &p.agent_status).await;
                     }
@@ -682,54 +664,17 @@ mod tests {
         let h = reg.get("p1").await.unwrap();
         assert_eq!(h.pane_id, "p1");
         assert_eq!(h.agent, "claude");
+        assert_eq!(h.label, "agentA");
     }
 
     #[tokio::test]
-    async fn test_upsert_preserves_role() {
+    async fn retain_drops_closed_panes() {
         let reg = make_registry();
-        reg.upsert("p1", "w1", "", "claude", "agentA").await;
-        let h = reg.get("p1").await.unwrap();
-        assert_eq!(h.role, "agentA");
-    }
-
-    #[tokio::test]
-    async fn test_resolve_by_pane_id() {
-        let reg = make_registry();
-        reg.upsert("p1", "w1", "", "claude", "").await;
-        assert_eq!(reg.resolve("w1", "p1").await, Some("p1".into()));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_by_role() {
-        let reg = make_registry();
-        reg.upsert("p1", "w1", "", "claude", "agentA").await;
-        assert_eq!(reg.resolve("w1", "agentA").await, Some("p1".into()));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_by_label() {
-        let reg = make_registry();
-        reg.upsert("p1", "w1", "", "claude", "agentA").await;
-        reg.set_label("p1", "my-label").await;
-        assert_eq!(reg.resolve("w1", "my-label").await, Some("p1".into()));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_empty_ws_spans_all() {
-        let reg = make_registry();
-        reg.upsert("p1", "w1", "", "claude", "agentA").await;
-        assert_eq!(reg.resolve("", "agentA").await, Some("p1".into()));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_scoped_ws() {
-        let reg = make_registry();
-        reg.upsert("p1", "w1", "", "claude", "agentA").await;
-        reg.upsert("p2", "w2", "", "gpt", "agentA").await;
-        // role "agentA" exists in both; w2 scope resolves to p2
-        assert_eq!(reg.resolve("w2", "agentA").await, Some("p2".into()));
-        // w1 scope resolves to p1
-        assert_eq!(reg.resolve("w1", "agentA").await, Some("p1".into()));
+        reg.upsert("p1", "w1", "", "claude", "a").await;
+        reg.upsert("p2", "w1", "", "codex", "b").await;
+        reg.retain(&["p2"].into_iter().collect()).await;
+        assert!(reg.get("p1").await.is_none());
+        assert_eq!(reg.get("p2").await.unwrap().label, "b");
     }
 
     #[tokio::test]
@@ -746,14 +691,6 @@ mod tests {
         reg.upsert("p1", "w1", "", "claude", "").await;
         reg.set_output("p1", "the work product".into()).await;
         assert_eq!(reg.get("p1").await.unwrap().output, "the work product");
-    }
-
-    #[tokio::test]
-    async fn test_set_label() {
-        let reg = make_registry();
-        reg.upsert("p1", "w1", "", "claude", "").await;
-        reg.set_label("p1", "labelX").await;
-        assert_eq!(reg.get("p1").await.unwrap().label, "labelX");
     }
 
     #[tokio::test]
@@ -789,9 +726,9 @@ mod tests {
     async fn test_upsert_update_existing() {
         let reg = make_registry();
         reg.upsert("p1", "w1", "", "claude", "agentA").await;
-        reg.upsert("p1", "w1", "", "gpt", "agentB").await;
+        reg.upsert("p1", "w1", "", "gpt", "").await;
         let h = reg.get("p1").await.unwrap();
         assert_eq!(h.agent, "gpt");
-        assert_eq!(h.role, "agentB");
+        assert_eq!(h.label, "agentA");
     }
 }

@@ -1,7 +1,6 @@
 //! Overview page, the observation deck: herdr's panes (`GET /api/herdr/panes`)
 //! in any running session (`GET /api/herdr/sessions`), filtered by the server,
-//! as a collapsible workspace → tab tree under the deck. In the bridge's own
-//! session each pane also shows its registry role (`GET /api/agents`). Ticking a pane watches it: the
+//! as a collapsible workspace → tab tree under the deck. Ticking a pane watches it: the
 //! deck shows each watched pane's screen or scrollback (`read_pane`), re-read
 //! with the pane list on every tick of the refresh interval.
 
@@ -157,25 +156,6 @@ pub fn Overview() -> Element {
             client.list_panes(&filter).await
         }
     });
-    // Registry roles exist only for the bridge's own session.
-    let roles = use_resource(move || {
-        let client = client();
-        let own = session.read().is_empty();
-        async move {
-            let _ = refresh.read();
-            let agents = if own {
-                client.list_agents(None).await.unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-            agents
-                .into_iter()
-                .filter(|a| !a.role.is_empty())
-                .map(|a| (a.pane_id, a.role))
-                .collect::<HashMap<_, _>>()
-        }
-    });
-    let roles = roles.read_unchecked().clone().unwrap_or_default();
     // Each watched pane's herdr record, from its session's unfiltered list.
     let known = use_resource(move || {
         let client = client();
@@ -340,7 +320,6 @@ pub fn Overview() -> Element {
                                                 th { "label" }
                                                 th { "agent" }
                                                 th { "status" }
-                                                th { "role" }
                                                 th { "cwd" }
                                             }
                                         }
@@ -365,9 +344,6 @@ pub fn Overview() -> Element {
                                                     td { "{cell(p.label.as_deref().unwrap_or_default())}" }
                                                     td { "{cell(p.agent.as_deref().unwrap_or_default())}" }
                                                     td { span { class: "pill", "{cell(&p.agent_status)}" } }
-                                                    td { class: "mono",
-                                                        "{cell(roles.get(&p.pane_id).map(String::as_str).unwrap_or_default())}"
-                                                    }
                                                     td { class: "mono muted", "{cell(p.cwd.as_deref().unwrap_or_default())}" }
                                                 }
                                             }

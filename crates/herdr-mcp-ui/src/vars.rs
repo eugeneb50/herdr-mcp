@@ -42,8 +42,7 @@ pub fn auto_panes(auto: &HashMap<String, Value>) -> Vec<HerdrPane> {
 }
 
 /// herdr pane labels — what the tools' `label` parameter resolves — with
-/// the pane id each names, sorted by label. Registry roles are left out: a
-/// `label` that is only a role does not resolve.
+/// the pane id each names, sorted by label.
 pub fn pane_names(auto: &HashMap<String, Value>) -> Vec<(String, String)> {
     let names: BTreeMap<_, _> = auto
         .values()

@@ -3,8 +3,9 @@
 //!
 //! The CLI logs every call. `pane split` answers with a new pane in tab
 //! `w1:t2` and, like herdr, announces it with a `pane.created` event on the
-//! socket. Setting `HERDR_BIN` is process-wide: tests using this need their
-//! own process (nextest).
+//! socket; `pane list` answers with the panes [`FakeHerdr::set_panes`] gave.
+//! Setting `HERDR_BIN` is process-wide, so one fake lives at a time: each
+//! holds a process lock until dropped.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -17,10 +18,14 @@ use tokio::sync::broadcast;
 pub struct FakeHerdr {
     dir: tempfile::TempDir,
     events: broadcast::Sender<String>,
+    _one_at_a_time: tokio::sync::MutexGuard<'static, ()>,
 }
+
+static IN_USE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 impl FakeHerdr {
     pub async fn start() -> Self {
+        let one_at_a_time = IN_USE.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("calls.log");
         let bin = dir.path().join("herdr");
@@ -39,7 +44,11 @@ impl FakeHerdr {
             }
         });
         tokio::spawn(announce_splits(log, events.clone()));
-        Self { dir, events }
+        Self {
+            dir,
+            events,
+            _one_at_a_time: one_at_a_time,
+        }
     }
 
     pub fn socket(&self) -> PathBuf {
@@ -52,6 +61,12 @@ impl FakeHerdr {
         let _ = self
             .events
             .send(json!({ "event": event, "data": data }).to_string());
+    }
+
+    /// The panes `pane list` reports from now on.
+    pub fn set_panes(&self, panes: Value) {
+        let list = json!({ "result": { "panes": panes } });
+        std::fs::write(self.dir.path().join("panes.json"), list.to_string()).unwrap();
     }
 
     /// The CLI calls so far, one line of arguments each.
@@ -76,6 +91,8 @@ pub async fn wait_for(mut ready: impl FnMut() -> bool) {
 }
 
 fn script(log: &Path) -> String {
+    let panes = log.with_file_name("panes.json");
+    let panes = panes.display();
     let log = log.display();
     format!(
         r#"#!/bin/sh
@@ -84,7 +101,8 @@ case "$1 $2" in
 "pane split")
   n=$(grep -c '^pane split' "{log}")
   echo "{{\"result\":{{\"pane\":{{\"pane_id\":\"w1:p$((n + 1))\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t2\"}}}}}}" ;;
-"pane list") echo '{{"result":{{"panes":[]}}}}' ;;
+"pane list") if [ -f "{panes}" ]; then cat "{panes}"; else echo '{{"result":{{"panes":[]}}}}'; fi ;;
+"pane rename") echo '{{"result":{{}}}}' ;;
 *) echo "fake herdr: no $*" >&2; exit 1 ;;
 esac
 "#
@@ -269,5 +287,70 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("no trigger_checked entry: {names:?}");
+    }
+
+    /// A label names one agent: spawning it again returns the live pane,
+    /// another agent under it is refused, and targets resolve from herdr's
+    /// live pane list (a closed pane is not there to match).
+    #[tokio::test]
+    async fn labels_name_one_live_agent() {
+        use crate::security::Origin;
+        use crate::server::dispatch_tool;
+
+        let herdr = FakeHerdr::start().await;
+        let data = tempfile::tempdir().unwrap();
+        let server = crate::HerdrMcpServer::new(
+            crate::Persistence::new(data.path().to_path_buf()),
+            crate::AgentRegistry::new(),
+        );
+        herdr.set_panes(json!([
+            {"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1",
+             "agent": "claude", "agent_status": "idle", "label": "rev"},
+            {"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t1", "label": "bare"},
+        ]));
+        let spawn = |args: Value| dispatch_tool(&server, "agent_spawn", args, Origin::Api);
+
+        let out = spawn(json!({"agent": "claude", "label": "rev"}))
+            .await
+            .unwrap();
+        let out = herdr_mcp_api::tool_payload(&serde_json::to_value(out).unwrap()).unwrap();
+        assert_eq!(out["pane_id"], "w1:p1");
+        assert_eq!(out["reused"], true);
+
+        let (_, err) = spawn(json!({"agent": "codex", "label": "rev"}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("label `rev` is already pane w1:p1 (claude)"),
+            "{err}"
+        );
+        // A plain shell pane is no agent of any profile, `shell` included.
+        let (_, err) = spawn(json!({"agent": "shell", "label": "bare"}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("label `bare` is already pane w1:p2 (no agent)"),
+            "{err}"
+        );
+
+        let (_, err) = spawn(json!({"agent": "shell", "needs": ["ghost"]}))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("needs: No pane found with label 'ghost'"),
+            "{err}"
+        );
+        assert!(
+            !herdr.calls().iter().any(|c| c.starts_with("pane split")),
+            "{:?}",
+            herdr.calls()
+        );
+
+        herdr.set_panes(json!([]));
+        let read = json!({"target": "rev"});
+        let (_, err) = dispatch_tool(&server, "agent_read", read, Origin::Api)
+            .await
+            .unwrap_err();
+        assert!(err.contains("No pane found with label 'rev'"), "{err}");
     }
 }

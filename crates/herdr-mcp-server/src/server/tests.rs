@@ -95,8 +95,8 @@ fn pane_vars_overlays_handles_on_live_panes() {
         ),
         ("w1:p2".to_string(), json!({"pane_id": "w1:p2"})),
     ]);
-    let handle = json!({"pane_id": "w1:p1", "role": "builder", "agent": "", "output": "ok"});
-    let closed = json!({"pane_id": "w1:p9", "role": "gone", "tab_id": "w1:t9"});
+    let handle = json!({"pane_id": "w1:p1", "label": "builder", "agent": "", "output": "ok"});
+    let closed = json!({"pane_id": "w1:p9", "label": "gone", "tab_id": "w1:t9"});
     let handles = HashMap::from([
         ("w1:p1".to_string(), handle.clone()),
         ("builder".to_string(), handle),
@@ -106,7 +106,7 @@ fn pane_vars_overlays_handles_on_live_panes() {
     let vars = pane_vars(panes, handles);
     let want = json!({
         "pane_id": "w1:p1", "label": "builder", "cwd": "/w", "agent": "claude",
-        "role": "builder", "output": "ok"
+        "output": "ok"
     });
     assert_eq!(vars["w1:p1"], want);
     assert_eq!(vars["builder"], want);
@@ -308,16 +308,6 @@ fn clipboard_test_server() -> HerdrMcpServer {
         Persistence::new(tmp.path().join("data")),
         AgentRegistry::new(),
     )
-}
-
-#[tokio::test]
-async fn agent_spawn_fails_on_unknown_need_before_spawning() {
-    let server = clipboard_test_server();
-    let args = serde_json::json!({"agent": "shell", "needs": ["ghost"]});
-    let (_, err) = dispatch_tool(&server, "agent_spawn", args, Origin::Api)
-        .await
-        .unwrap_err();
-    assert!(err.contains("needs: no agent 'ghost'"), "{err}");
 }
 
 /// Two saves at once (two rows, or the web UI and the TUI) both land,
@@ -603,7 +593,7 @@ fn herdr_09_argv() {
         ["agent", "prompt", "w1:p2", "hi"]
     );
     assert_eq!(
-        agent_wait_args("rev", "idle", Some(5000)),
+        agent_wait_args("rev", &["idle"], Some(5000)),
         [
             "agent",
             "wait",

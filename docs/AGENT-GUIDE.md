@@ -31,7 +31,14 @@ one (`data_dir` in `~/.config/herdr-mcp/config.toml`).
   re-read them (`list_panes`) after structural changes.
 - Prefer **labels**. `create_workspace`, `create_tab` and `agent_spawn`
   take one, and pane tools accept `label` instead of `pane_id`. The a2a
-  tools (`agent_*`) take a `target`: a role, label or pane id.
+  tools (`agent_*`) take a `target`: a pane label or pane id.
+- **A label names one agent.** Give every agent you spawn a unique label.
+  `agent_spawn` with a label already on a live pane returns that agent
+  (`reused: true`) when it runs the same agent, and refuses otherwise, so
+  re-running a flow reuses its agents instead of piling up panes.
+- `agent_spawn` and `agent_prompt` can come back `blocked`: the agent is
+  waiting on a trust prompt, approval or question (its screen is the
+  `output`). Show it to the user; don't answer it yourself.
 - `list_panes` shows each pane's agent and its status (`idle`, `working`,
   `blocked`, `done`).
 - **Your own pane is the default.** When your MCP client runs inside a

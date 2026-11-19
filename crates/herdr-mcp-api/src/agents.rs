@@ -11,10 +11,8 @@ pub struct AgentHandle {
     pub tab_id: String,
     #[serde(default)]
     pub agent: String,
-    /// Human-assigned role used for `{{role.output}}` interpolation (e.g. "agentA").
-    #[serde(default)]
-    pub role: String,
-    /// Human-assigned pane label (set via `herdr pane rename`), used for targeting.
+    /// The pane's label: the agent's one name, unique in the session.
+    /// Targets and `{{label.output}}` use it; herdr keeps it across restarts.
     #[serde(default)]
     pub label: String,
     #[serde(default)]
