@@ -1,0 +1,22 @@
+[package]
+name = "herdr-queue"
+version.workspace = true
+edition.workspace = true
+
+[features]
+schemars = ["dep:schemars"]
+
+[dependencies]
+clap = { workspace = true, features = ["env"] }
+rusqlite.workspace = true
+schemars = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true
