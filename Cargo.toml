@@ -7,6 +7,7 @@ members = [
     "crates/herdr-mcp-server",
     "crates/herdr-mcp-cli",
     "crates/herdr-mcp-ui",
+    "crates/herdr-queue",
 ]
 
 [workspace.package]

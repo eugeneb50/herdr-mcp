@@ -1997,6 +1997,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "herdr-queue"
+version = "0.2.0"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "rusqlite",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
