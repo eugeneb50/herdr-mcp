@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::variables::{Recipe, RecipeStep};
 
+use herdr_mcp_api::{Check, Edge, Flow, Node, NodeKind, Op, Point, Port, Retry, Rule};
 pub use herdr_mcp_api::{RecipeTemplate, TemplateVariable};
 
 /// Get the bundled template library.
@@ -28,7 +29,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     required: true,
                 },
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "list".to_string(),
                     tool: "list_panes".to_string(),
@@ -46,7 +47,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("Notify the agent".to_string()),
                     extract: Vec::new(),
                 },
-            ],
+            ]),
         },
         RecipeTemplate {
             id: "git-status".to_string(),
@@ -54,7 +55,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
             description: "Run git status in a shell pane and capture what it printed".to_string(),
             category: "git".to_string(),
             variables: vec![var("pane_id", "Shell pane in the repository", None)],
-            steps: vec![step(
+            flow: Flow::chain(vec![step(
                 "status",
                 "pane_exec",
                 serde_json::json!({
@@ -62,7 +63,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     "command": "git status --short --branch"
                 }),
                 "Run git status; {{status.output}} holds the result",
-            )],
+            )]),
         },
         RecipeTemplate {
             id: "restart-agent".to_string(),
@@ -75,7 +76,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 default_value: None,
                 required: true,
             }],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "close".to_string(),
                     tool: "close_pane".to_string(),
@@ -95,7 +96,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("Start a fresh agent (profile or herdr agent kind)".to_string()),
                     extract: Vec::new(),
                 },
-            ],
+            ]),
         },
         RecipeTemplate {
             id: "build-and-test".to_string(),
@@ -107,7 +108,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 var("build", "Build command", Some("make build")),
                 var("test", "Test command", Some("make test")),
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 step(
                     "build",
                     "pane_exec",
@@ -130,7 +131,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     }),
                     "Test (fails the run on a non-zero exit)",
                 ),
-            ],
+            ]),
         },
         RecipeTemplate {
             id: "pane-to-agent".to_string(),
@@ -142,7 +143,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                 var("agent_pane", "Agent pane to ask", None),
                 var("question", "What to ask about it", Some("What is going on here?")),
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 step(
                     "read",
                     "read_pane",
@@ -171,7 +172,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     }),
                     "Submit",
                 ),
-            ],
+            ]),
         },
         RecipeTemplate {
             id: "run-and-ask".to_string(),
@@ -188,7 +189,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     Some("Explain any failures above and propose a fix."),
                 ),
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 step(
                     "run",
                     "pane_exec",
@@ -217,7 +218,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     }),
                     "Submit",
                 ),
-            ],
+            ]),
         },
         RecipeTemplate {
             id: "health-check".to_string(),
@@ -225,7 +226,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
             description: "Check server status, workspaces, panes".to_string(),
             category: "monitoring".to_string(),
             variables: vec![],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "status".to_string(),
                     tool: "status".to_string(),
@@ -254,7 +255,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("List agents".to_string()),
                     extract: Vec::new(),
                 },
-            ],
+            ]),
         },
         RecipeTemplate {
             id: "a2a-pane-inventory".to_string(),
@@ -275,7 +276,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     required: true,
                 },
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "panes".to_string(),
                     tool: "list_panes".to_string(),
@@ -314,7 +315,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("Store agent labels/ids".to_string()),
                     extract: Vec::new(),
                 },
-            ],
+            ]),
         },
         RecipeTemplate {
             id: "a2a-ping".to_string(),
@@ -335,7 +336,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     required: false,
                 },
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "send".to_string(),
                     tool: "agent_message".to_string(),
@@ -355,7 +356,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("Read its output".to_string()),
                     extract: Vec::new(),
                 },
-            ],
+            ]),
         },
         RecipeTemplate {
             id: "a2a-fanout-collect".to_string(),
@@ -388,7 +389,7 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     required: false,
                 },
             ],
-            steps: vec![
+            flow: Flow::chain(vec![
                 RecipeStep {
                     id: "send_a".to_string(),
                     tool: "agent_message".to_string(),
@@ -438,7 +439,168 @@ pub fn bundled_templates() -> Vec<RecipeTemplate> {
                     description: Some("Store collected output".to_string()),
                     extract: Vec::new(),
                 },
+            ]),
+        },
+        RecipeTemplate {
+            id: "agent-fanout-review".to_string(),
+            name: "Agent Fan-out Review".to_string(),
+            description: "Ask N agents to review a task in parallel, then summarise their reviews".to_string(),
+            category: "agents".to_string(),
+            variables: vec![
+                var("prefix", "Label prefix for the reviewer panes", None),
+                var("agent", "Agent profile to start for each review", None),
+                var("task", "Review task / prompt", None),
             ],
+            flow: Flow {
+                nodes: vec![
+                    Node {
+                        id: "start".to_string(),
+                        description: None,
+                        at: Some(Point { x: 0.0, y: 0.0 }),
+                        kind: NodeKind::Start,
+                    },
+                    agent_node(
+                        "a",
+                        300.0,
+                        -120.0,
+                        "Reviewer A",
+                        "{{ template.prefix }}-a",
+                        "{{ template.agent }}",
+                        "{{ template.task }}",
+                    ),
+                    agent_node(
+                        "b",
+                        300.0,
+                        0.0,
+                        "Reviewer B",
+                        "{{ template.prefix }}-b",
+                        "{{ template.agent }}",
+                        "{{ template.task }}",
+                    ),
+                    agent_node(
+                        "c",
+                        300.0,
+                        120.0,
+                        "Reviewer C",
+                        "{{ template.prefix }}-c",
+                        "{{ template.agent }}",
+                        "{{ template.task }}",
+                    ),
+                    agent_node(
+                        "summarise",
+                        600.0,
+                        0.0,
+                        "Summarise the reviews",
+                        "{{ template.prefix }}-summary",
+                        "{{ template.agent }}",
+                        "Summarise these reviews: {{ a.output }} {{ b.output }} {{ c.output }}",
+                    ),
+                ],
+                edges: vec![
+                    edge("start", Port::Out, "a"),
+                    edge("start", Port::Out, "b"),
+                    edge("start", Port::Out, "c"),
+                    edge("a", Port::Out, "summarise"),
+                    edge("b", Port::Out, "summarise"),
+                    edge("c", Port::Out, "summarise"),
+                ],
+                max_steps: Flow::default().max_steps,
+            },
+        },
+        RecipeTemplate {
+            id: "agent-relay".to_string(),
+            name: "Agent Relay".to_string(),
+            description: "Have a writer draft an answer, then a reviewer revise it".to_string(),
+            category: "agents".to_string(),
+            variables: vec![
+                var("prefix", "Label prefix for the two agent panes", None),
+                var("agent", "Agent profile to use for both roles", None),
+                var("task", "Writing task", None),
+            ],
+            flow: Flow {
+                nodes: vec![
+                    Node {
+                        id: "start".to_string(),
+                        description: None,
+                        at: Some(Point { x: 0.0, y: 0.0 }),
+                        kind: NodeKind::Start,
+                    },
+                    agent_node(
+                        "writer",
+                        300.0,
+                        0.0,
+                        "Draft an answer",
+                        "{{ template.prefix }}-writer",
+                        "{{ template.agent }}",
+                        "{{ template.task }}",
+                    ),
+                    agent_node(
+                        "reviewer",
+                        600.0,
+                        0.0,
+                        "Revise the draft",
+                        "{{ template.prefix }}-reviewer",
+                        "{{ template.agent }}",
+                        "Revise this draft:\n\n{{ writer.output }}\n\n---\n{{ template.task }}",
+                    ),
+                ],
+                edges: vec![
+                    edge("start", Port::Out, "writer"),
+                    edge("writer", Port::Out, "reviewer"),
+                ],
+                max_steps: Flow::default().max_steps,
+            },
+        },
+        RecipeTemplate {
+            id: "agent-supervisor-loop".to_string(),
+            name: "Agent Supervisor Loop".to_string(),
+            description: "Have a worker revise its output until it replies TASK_COMPLETE".to_string(),
+            category: "agents".to_string(),
+            variables: vec![
+                var("label", "Label for the worker pane", None),
+                var("agent", "Agent profile to start as the worker", None),
+                var("task", "Task for the worker", None),
+            ],
+            flow: Flow {
+                nodes: vec![
+                    Node {
+                        id: "start".to_string(),
+                        description: None,
+                        at: Some(Point { x: 0.0, y: 0.0 }),
+                        kind: NodeKind::Start,
+                    },
+                    agent_node(
+                        "worker",
+                        300.0,
+                        0.0,
+                        "Do the task",
+                        "{{ template.label }}",
+                        "{{ template.agent }}",
+                        "{{ template.task }}\n\nWhen the task is finished, end your reply with TASK_COMPLETE.",
+                    ),
+                    Node {
+                        id: "branch".to_string(),
+                        description: Some("Stop when the worker replies TASK_COMPLETE".to_string()),
+                        at: Some(Point { x: 600.0, y: 0.0 }),
+                        kind: NodeKind::Branch {
+                            rules: vec![Rule {
+                                checks: vec![Check {
+                                    path: "worker.output".to_string(),
+                                    op: Op::Contains,
+                                    value: serde_json::json!("TASK_COMPLETE"),
+                                }],
+                                any: false,
+                            }],
+                        },
+                    },
+                ],
+                edges: vec![
+                    edge("start", Port::Out, "worker"),
+                    edge("worker", Port::Out, "branch"),
+                    edge("branch", Port::Else, "worker"),
+                ],
+                max_steps: 20,
+            },
         },
     ]
 }
@@ -459,6 +621,41 @@ fn step(id: &str, tool: &str, params: serde_json::Value, description: &str) -> R
         params,
         description: Some(description.to_string()),
         extract: Vec::new(),
+    }
+}
+
+fn agent_node(
+    id: &str,
+    x: f32,
+    y: f32,
+    description: &str,
+    target: &str,
+    agent: &str,
+    text: &str,
+) -> Node {
+    Node {
+        id: id.to_string(),
+        description: Some(description.to_string()),
+        at: Some(Point { x, y }),
+        kind: NodeKind::Tool {
+            tool: "agent_prompt".to_string(),
+            params: serde_json::json!({
+                "target": target,
+                "agent": agent,
+                "text": text
+            }),
+            extract: Vec::new(),
+            retry: Retry::default(),
+            timeout_ms: None,
+        },
+    }
+}
+
+fn edge(from: &str, port: Port, to: &str) -> Edge {
+    Edge {
+        from: from.to_string(),
+        port,
+        to: to.to_string(),
     }
 }
 
@@ -489,9 +686,11 @@ pub fn instantiate(
         vars.insert(key, value);
     }
 
-    let mut steps = template.steps.clone();
-    for step in &mut steps {
-        substitute_template_vars(&mut step.params, &vars);
+    let mut flow = template.flow.clone();
+    for node in &mut flow.nodes {
+        if let NodeKind::Tool { params, .. } = &mut node.kind {
+            substitute_template_vars(params, &vars);
+        }
     }
 
     let now = Utc::now();
@@ -499,7 +698,7 @@ pub fn instantiate(
         id: Uuid::new_v4(),
         name: name.unwrap_or_else(|| template.name.clone()),
         description: Some(template.description.clone()),
-        flow: herdr_mcp_api::Flow::chain(steps),
+        flow,
         variables: vars,
         created_at: now,
         updated_at: now,
@@ -549,6 +748,7 @@ fn substitute_template_vars(
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
 
     fn steps(recipe: &Recipe) -> Vec<RecipeStep> {
         recipe
@@ -576,6 +776,9 @@ mod tests {
         assert!(find_template("a2a-fanout-collect").is_some());
         assert!(find_template("pane-to-agent").is_some());
         assert!(find_template("run-and-ask").is_some());
+        assert!(find_template("agent-fanout-review").is_some());
+        assert!(find_template("agent-relay").is_some());
+        assert!(find_template("agent-supervisor-loop").is_some());
     }
 
     #[test]
@@ -723,5 +926,151 @@ mod tests {
         assert_eq!(steps(&recipe).len(), 5);
         assert!(steps(&recipe).into_iter().any(|s| s.tool == "agent_read"));
         assert!(steps(&recipe).into_iter().any(|s| s.tool == "var_set"));
+    }
+
+    #[test]
+    fn test_instantiate_agent_fanout_review() {
+        let mut vars = HashMap::new();
+        vars.insert("prefix".to_string(), json!("rev"));
+        vars.insert("agent".to_string(), json!("claude"));
+        vars.insert("task".to_string(), json!("review the change"));
+        let recipe = instantiate("agent-fanout-review", vars, None).expect("should instantiate");
+        assert!(
+            recipe.flow.problems().is_empty(),
+            "{:?}",
+            recipe.flow.problems()
+        );
+        let review_a = recipe.flow.node("a").unwrap();
+        match &review_a.kind {
+            NodeKind::Tool { params, .. } => {
+                assert_eq!(params["target"].as_str(), Some("rev-a"));
+                assert_eq!(params["agent"].as_str(), Some("claude"));
+                assert_eq!(params["text"].as_str(), Some("review the change"));
+            }
+            _ => panic!("a is not a tool node"),
+        }
+        // runtime placeholders ({{ a.output }}) are preserved, not template-substituted
+        let summarise = recipe.flow.node("summarise").unwrap();
+        match &summarise.kind {
+            NodeKind::Tool { params, .. } => {
+                assert_eq!(params["target"].as_str(), Some("rev-summary"));
+                assert_eq!(params["agent"].as_str(), Some("claude"));
+                let text = params["text"].as_str().unwrap();
+                assert!(text.contains("{{ a.output }}"));
+                assert!(text.contains("{{ b.output }}"));
+                assert!(text.contains("{{ c.output }}"));
+            }
+            _ => panic!("summarise is not a tool node"),
+        }
+        let tools: Vec<&str> = recipe.flow.tools().map(|n| n.id.as_str()).collect();
+        assert_eq!(tools, ["a", "b", "c", "summarise"]);
+        assert_eq!(
+            recipe
+                .flow
+                .edges
+                .iter()
+                .filter(|e| e.from == "start")
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn test_instantiate_agent_relay() {
+        let mut vars = HashMap::new();
+        vars.insert("prefix".to_string(), json!("pref"));
+        vars.insert("agent".to_string(), json!("codex"));
+        vars.insert("task".to_string(), json!("draft the reply"));
+        let recipe = instantiate("agent-relay", vars, None).expect("should instantiate");
+        assert!(
+            recipe.flow.problems().is_empty(),
+            "{:?}",
+            recipe.flow.problems()
+        );
+        let writer = recipe.flow.node("writer").unwrap();
+        match &writer.kind {
+            NodeKind::Tool { params, .. } => {
+                assert_eq!(params["target"].as_str(), Some("pref-writer"));
+                assert_eq!(params["agent"].as_str(), Some("codex"));
+                assert_eq!(params["text"].as_str(), Some("draft the reply"));
+            }
+            _ => panic!("writer is not a tool node"),
+        }
+        let reviewer = recipe.flow.node("reviewer").unwrap();
+        match &reviewer.kind {
+            NodeKind::Tool { params, .. } => {
+                assert_eq!(params["target"].as_str(), Some("pref-reviewer"));
+                assert_eq!(params["agent"].as_str(), Some("codex"));
+                assert!(
+                    params["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("{{ writer.output }}")
+                );
+            }
+            _ => panic!("reviewer is not a tool node"),
+        }
+        assert_eq!(recipe.flow.edges.len(), 2);
+    }
+
+    #[test]
+    fn test_instantiate_agent_supervisor_loop() {
+        let mut vars = HashMap::new();
+        vars.insert("label".to_string(), json!("sup"));
+        vars.insert("agent".to_string(), json!("claude"));
+        vars.insert("task".to_string(), json!("solve it"));
+        let recipe = instantiate("agent-supervisor-loop", vars, None).expect("should instantiate");
+        assert!(
+            recipe.flow.problems().is_empty(),
+            "{:?}",
+            recipe.flow.problems()
+        );
+        let worker = recipe.flow.node("worker").unwrap();
+        match &worker.kind {
+            NodeKind::Tool { params, .. } => {
+                assert_eq!(params["target"].as_str(), Some("sup"));
+                assert_eq!(params["agent"].as_str(), Some("claude"));
+                assert!(params["text"].as_str().unwrap().contains("solve it"));
+                assert!(
+                    !params["text"]
+                        .as_str()
+                        .unwrap()
+                        .contains("{{ worker.output }}")
+                );
+            }
+            _ => panic!("worker is not a tool node"),
+        }
+        let branch = recipe.flow.node("branch").unwrap();
+        match &branch.kind {
+            NodeKind::Branch { rules } => {
+                assert_eq!(rules.len(), 1);
+                assert_eq!(rules[0].checks.len(), 1);
+                assert_eq!(rules[0].checks[0].path, "worker.output");
+                assert!(matches!(rules[0].checks[0].op, Op::Contains));
+                assert_eq!(rules[0].checks[0].value, json!("TASK_COMPLETE"));
+            }
+            _ => panic!("branch is not a branch node"),
+        }
+        // port 1 ends (no edge); port else loops back to worker
+        let branch_edges: Vec<_> = recipe
+            .flow
+            .edges
+            .iter()
+            .filter(|e| e.from == "branch")
+            .collect();
+        assert_eq!(branch_edges.len(), 1);
+        assert_eq!(branch_edges[0].to, "worker");
+        assert_eq!(branch_edges[0].port, Port::Else);
+        // worker runs at least once: start -> worker
+        let start_edges: Vec<_> = recipe
+            .flow
+            .edges
+            .iter()
+            .filter(|e| e.from == "start")
+            .collect();
+        assert_eq!(start_edges.len(), 1);
+        assert_eq!(start_edges[0].to, "worker");
+        // bounded loop: a run that never replies TASK_COMPLETE stops after 20 steps
+        assert_eq!(recipe.flow.max_steps, 20);
     }
 }

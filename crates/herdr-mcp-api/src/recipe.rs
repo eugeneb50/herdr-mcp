@@ -100,7 +100,9 @@ pub struct RecipeTemplate {
     pub description: String,
     pub category: String,
     pub variables: Vec<TemplateVariable>,
-    pub steps: Vec<RecipeStep>,
+    /// `{{ template.x }}` placeholders in tool node params are filled in by
+    /// `instantiate`.
+    pub flow: Flow,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -81,6 +81,45 @@ herdr plugin install eugeneb50/herdr-mcp   # herdr-mcp as a herdr plugin
 - **Live agent registry** — Unix socket event subscriber tracks panes and agent status in real time; a2a primitives address agents by their unique pane label
 - **Shell-out core** — talks to herdr through its CLI (`tokio::process::Command`, real argv) and socket; no other runtime dependencies
 
+## Agent palette
+
+herdr-mcp ships three bundled recipe templates under the `agents` category
+(`list_templates`, `instantiate_template`, or the web playground's template
+picker). Each starts agents by label with `agent_prompt` and reuses a live
+pane that already has that label.
+
+- **agent-fanout-review** — one task goes to three reviewers in parallel
+  (`{{ template.prefix }}-a/-b/-c`) and a summariser joins their outputs.
+- **agent-relay** — a writer drafts an answer, then a reviewer revises it
+  (`{{ writer.output }}`).
+- **agent-supervisor-loop** — a worker revises until its output contains
+  `TASK_COMPLETE`; the flow loops back on `else` and stops on port `1`.
+
+To build your own, `+ Agent` in a collection adds an agent node: a label
+(pick a live agent, or name a new one with a profile to start), a prompt, and
+a `blocked` port for an agent stuck on an approval. `{{ agents }}` in a
+prompt lists the live agents.
+
+They are flows (parallel paths, joins, loops), not straight-line steps. See
+[the agent guide's Flows section](docs/AGENT-GUIDE.md#flows) for how flows
+run, and the `agent_*` tool reference in [ARCHITECTURE.md §4](docs/ARCHITECTURE.md#4-mcp-tool-reference-46-tools-total).
+
+Example: review a change with three reviewers, then summarise:
+
+```jsonc
+// POST /api/templates/agent-fanout-review/instantiate
+{
+  "variables": {
+    "prefix": "rev",
+    "agent": "claude",
+    "task": "Review README.md and list three risks"
+  }
+}
+```
+
+The run starts `rev-a`, `rev-b` and `rev-c` at once, waits for all three,
+then prompts a summariser pane with their outputs.
+
 ---
 
 ## Architecture

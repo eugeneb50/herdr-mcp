@@ -587,7 +587,14 @@ pub(crate) async fn scope(
     request: HashMap<String, Value>,
 ) -> HashMap<String, Value> {
     let mut scope = server.registry.seed(None).await;
+    let mut roster: Vec<_> = server.registry.inner_snapshot().await.into_iter()
+        .filter(|h| !h.agent.is_empty())
+        .map(|h| serde_json::json!({"label": h.label, "agent": h.agent, "status": h.status, "pane_id": h.pane_id}))
+        .collect();
+    roster.sort_by(|a, b| a["pane_id"].as_str().cmp(&b["pane_id"].as_str()));
     scope.extend(server.registry.seed(Some(ws)).await);
+    // After the handles, so a pane labelled `agents` doesn't hide it.
+    scope.insert("agents".into(), Value::Array(roster));
     for key in ["template.session_id", "template.workspace_id"] {
         scope.insert(key.to_string(), Value::String(ws.to_string()));
     }
@@ -1228,6 +1235,37 @@ impl Executor {
                         .failed(&id, error, StatusCode::UNPROCESSABLE_ENTITY)
                         .await;
                 }
+                let payload = tool_payload(&result);
+                if self
+                    .run
+                    .flow
+                    .node(&id)
+                    .and_then(Node::tool_name)
+                    .is_some_and(|tool| herdr_mcp_api::flow::AGENT_TOOLS.contains(&tool))
+                    && payload["status"] == "blocked"
+                {
+                    if let Some(pane) = payload["pane_id"].as_str() {
+                        self.last_pane = Some(pane.to_string());
+                    }
+                    if self
+                        .run
+                        .flow
+                        .edges
+                        .iter()
+                        .any(|e| e.from == id && e.port == Port::Blocked)
+                    {
+                        return self.finished(&id, result, Port::Blocked).await;
+                    }
+                    let label = payload["label"]
+                        .as_str()
+                        .or_else(|| payload["pane_id"].as_str())
+                        .unwrap_or("");
+                    let output = payload["output"].as_str().unwrap_or("");
+                    let error = format!("agent `{label}` is blocked:\n{output}");
+                    return self
+                        .failed_terminal(&id, error, StatusCode::UNPROCESSABLE_ENTITY)
+                        .await;
+                }
                 // An agent a node started is the pane to look at next.
                 if let Some(p) = tool_payload(&result).get("pane_id").and_then(Value::as_str) {
                     self.last_pane = Some(p.to_string());
@@ -1343,6 +1381,27 @@ impl Executor {
             });
             return None;
         }
+        self.finish_failure(id, result).await
+    }
+
+    async fn failed_terminal(
+        &mut self,
+        id: &str,
+        error: String,
+        code: StatusCode,
+    ) -> Option<RunStatus> {
+        let result = serde_json::json!({ "error": error, "statusCode": code.as_u16() });
+        self.emit(RunEventKind::NodeFailed {
+            node: id.to_string(),
+            error,
+            status_code: code.as_u16(),
+            retry_in_ms: None,
+        })
+        .await;
+        self.finish_failure(id, result).await
+    }
+
+    async fn finish_failure(&mut self, id: &str, result: Value) -> Option<RunStatus> {
         let handled = self
             .run
             .flow
@@ -2330,6 +2389,54 @@ mod tests {
         assert!(done.results.contains_key("after") && !done.results.contains_key("no"));
         let states = herdr_mcp_api::run::node_states(&events);
         assert_eq!(states["no"], herdr_mcp_api::run::NodeState::Skipped);
+    }
+
+    #[tokio::test]
+    async fn blocked_agent_routes_without_extract_or_retry() {
+        let herdr = crate::fake_herdr::FakeHerdr::start().await;
+        herdr.set_panes(serde_json::json!([{"pane_id":"w1:p1", "workspace_id":"w1", "tab_id":"w1:t1", "agent":"claude", "agent_status":"idle", "label":"rev"}]));
+        let tmp = tempfile::tempdir().unwrap();
+        let server = test_server(tmp.path());
+        server
+            .registry
+            .upsert("w1:p1", "w1", "w1:t1", "claude", "rev")
+            .await;
+        let nodes = serde_json::json!([
+            {"id":"start", "type":"start"},
+            {"id":"agent", "type":"tool", "tool":"agent_prompt", "params":{"target":"rev", "text":"block"}, "retry":{"times":2,"delay_ms":1},
+             "extract":[{"path":"missing", "var":"bad", "scope":"global"}]},
+            {"id":"next", "type":"wait", "ms":1}
+        ]);
+        for port in [Some("blocked"), Some("error"), None] {
+            let mut edges = vec![serde_json::json!({"from":"start", "to":"agent"})];
+            if let Some(port) = port {
+                edges.push(serde_json::json!({"from":"agent", "port":port, "to":"next"}));
+            }
+            let (done, events) = run_flow(
+                &server,
+                flow(serde_json::json!({"nodes":nodes, "edges":edges})),
+            )
+            .await;
+            assert_eq!(
+                done.status,
+                if port.is_some() {
+                    RunStatus::Completed
+                } else {
+                    RunStatus::Failed
+                },
+                "{:?}",
+                done.error
+            );
+            assert_eq!(events.iter().filter(|e| matches!(&e.kind, RunEventKind::NodeStarted {node, ..} if node == "agent")).count(), 1);
+            if port == Some("blocked") {
+                assert!(events.iter().any(
+                    |e| matches!(&e.kind, RunEventKind::NodeStarted { node, .. } if node == "next")
+                ));
+            }
+            if port != Some("blocked") {
+                assert!(events.iter().any(|e| matches!(&e.kind, RunEventKind::NodeFailed {error, retry_in_ms: None, ..} if error == "agent `rev` is blocked:\napproval required\n")), "{events:?}");
+            }
+        }
     }
 
     /// A failing tool is retried, then its `error` port takes the failure

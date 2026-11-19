@@ -275,6 +275,10 @@ pub struct AgentMessageParams {
 pub struct AgentPromptParams {
     /// Target agent: pane label or pane id.
     pub target: String,
+    /// Ensure this profile is running under the target label.
+    pub agent: Option<String>,
+    /// Working directory when starting the agent.
+    pub cwd: Option<String>,
     /// Prompt text.
     pub text: String,
     /// Give up waiting for the turn to finish after this long (default 300000).
