@@ -673,7 +673,12 @@ impl HerdrMcpServer {
         }): Parameters<PaneExecParams>,
     ) -> Result<CallToolResult, McpError> {
         let pid = resolve_pane_id(pane_id, label).await?;
-        let token = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        let token = uuid::Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(12)
+            .collect::<String>();
         herdr_cli(&["pane", "run", &pid, &exec_line(&command, &token)]).await?;
         let wait = wait_output_args(
             &pid,
@@ -886,7 +891,12 @@ impl HerdrMcpServer {
         let name = label.unwrap_or_else(|| {
             format!(
                 "{agent}-{}",
-                &uuid::Uuid::new_v4().simple().to_string()[..6]
+                uuid::Uuid::new_v4()
+                    .simple()
+                    .to_string()
+                    .chars()
+                    .take(6)
+                    .collect::<String>()
             )
         });
         if let Some(live) = crate::panes::panes(&Default::default())
@@ -2276,7 +2286,9 @@ fn exec_result(screen: &str, token: &str) -> Option<(String, i32)> {
     let done = format!("HERDR_DONE_{token}:");
     let lines: Vec<&str> = screen.lines().collect();
     let end = lines.iter().rposition(|l| l.starts_with(&done))?;
-    let code = lines[end][done.len()..].trim().parse().ok()?;
+    let code = lines[end]
+        .get(done.len()..)
+        .and_then(|s| s.trim().parse::<i32>().ok())?;
     let echo = format!("HERDR_DONE {token}");
     let start = lines[..end]
         .iter()
@@ -2370,21 +2382,54 @@ pub(crate) async fn herdr_cli(args: &[&str]) -> Result<String, McpError> {
     herdr_cli_at(None, args).await
 }
 
+/// Default timeout for `herdr` CLI calls made without an explicit
+/// `--timeout`. Mirrors `timeouts.herdr-api-ms` (default 60 s).
+const HERDR_CLI_DEFAULT_TIMEOUT_MS: u64 = 60_000;
+/// Extra time added on top of a caller-supplied `herdr --timeout N`, so
+/// herdr's own timeout fires first and we only kill a genuinely wedged
+/// process.
+const HERDR_CLI_GRACE_MS: u64 = 5_000;
+
+/// The timeout in ms for [`herdr_cli_at`]: a caller-supplied `herdr
+/// --timeout N` yields `N + grace`; otherwise the default.
+fn herdr_cli_timeout_ms(args: &[&str]) -> u64 {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if *arg == "--timeout" {
+            return iter
+                .next()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ms| ms.saturating_add(HERDR_CLI_GRACE_MS))
+                .unwrap_or(HERDR_CLI_DEFAULT_TIMEOUT_MS);
+        }
+    }
+    HERDR_CLI_DEFAULT_TIMEOUT_MS
+}
+
 /// [`herdr_cli`] against another session's API socket (`None`: this
 /// server's own, exported at startup).
+///
+/// The call carries `kill_on_drop(true)` and a timeout, so a wedged herdr
+/// cannot block a tool forever: on timeout the child is killed and the
+/// error names the command.
 pub(crate) async fn herdr_cli_at(socket: Option<&str>, args: &[&str]) -> Result<String, McpError> {
-    tracing::debug!("herdr {}", args.join(" "));
+    let cmd_str = args.join(" ");
+    tracing::debug!("herdr {cmd_str}");
 
     let binary = herdr_mcp_core::herdr_bin();
     let mut cmd = tokio::process::Command::new(binary);
+    cmd.kill_on_drop(true);
     if let Some(socket) = socket {
         cmd.env("HERDR_SOCKET_PATH", socket);
     }
-    let output = cmd
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| McpError::internal_error(format!("Failed to execute herdr: {e}"), None))?;
+    let timeout_ms = herdr_cli_timeout_ms(args);
+    let output = tokio::time::timeout(
+        std::time::Duration::from_millis(timeout_ms),
+        cmd.args(args).output(),
+    )
+    .await
+    .map_err(|_| user_err(format!("herdr {cmd_str} timed out after {timeout_ms}ms")))?
+    .map_err(|e| McpError::internal_error(format!("Failed to execute herdr: {e}"), None))?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())

@@ -84,6 +84,12 @@ and variables with `{{ … }}`:
   global variable.
 - `{{ run.pass }}`: 1, plus one per loop taken.
 
+For command parameters in `run_command`, `pane_exec`, or `send_text`, use
+`{{ worker.output | sh }}` or `{{ herdr.some_field | sh }}` for untrusted
+agent output and trigger data. The `sh` filter quotes one POSIX shell word;
+place it as a standalone word, outside any existing shell quotes. Plain
+placeholders insert raw text and must not be used for untrusted shell data.
+
 A tool node can also `extract` part of its result into a variable for later
 runs. A node fails when its tool can't be called or its result has
 `isError: true` (bad params, herdr refusing a method). A `http_request`

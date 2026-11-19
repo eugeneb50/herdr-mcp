@@ -105,6 +105,7 @@ case "$1 $2" in
 "agent start") echo '{{"result":{{}}}}' ;;
 "agent wait") echo '{{"result":{{"agent":{{"agent_status":"idle"}}}}}}' ;;
 "agent prompt") if [ "$4" = "block" ]; then echo '{{"result":{{"agent":{{"agent_status":"blocked"}}}}}}'; else echo '{{"result":{{"agent":{{"agent_status":"idle"}}}}}}'; fi ;;
+"pane sleep") sleep "$3"; echo '{{"result":{{}}}}' ;;
 "pane read") echo 'approval required' ;;
 "pane rename") echo '{{"result":{{}}}}' ;;
 *) echo "fake herdr: no $*" >&2; exit 1 ;;
@@ -165,6 +166,7 @@ async fn announce_splits(log: PathBuf, events: broadcast::Sender<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::herdr_cli_at;
     use herdr_mcp_api::{EventLevel, RecipeStep, RecipeTrigger, RunStatus};
     use std::sync::Arc;
 
@@ -412,5 +414,33 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("No pane found with label 'rev'"), "{err}");
+    }
+
+    /// A wedged herdr (a `pane sleep` that outlives the call's `--timeout`)
+    /// is killed and the error names the command. `--timeout 1` plus the
+    /// 5 s grace makes our deadline ~5.001 s; the fake sleeps 10 s.
+    #[tokio::test]
+    async fn herdr_cli_times_out_on_wedged_herdr() {
+        let _herdr = FakeHerdr::start().await;
+        // A fast call still succeeds.
+        let ok = herdr_cli_at(None, &["pane", "list"]).await.unwrap();
+        assert!(ok.contains("panes"));
+        // A wedged call times out after timeout + grace and names the command.
+        let err = herdr_cli_at(None, &["pane", "sleep", "10000", "--timeout", "1"])
+            .await
+            .unwrap_err();
+        let msg = err.message.to_string();
+        assert!(
+            msg.contains("timed out"),
+            "expected a timeout error, got: {msg}"
+        );
+        assert!(
+            msg.contains("pane sleep"),
+            "expected the command named, got: {msg}"
+        );
+        assert!(
+            msg.contains("5001ms"),
+            "expected the deadline in ms, got: {msg}"
+        );
     }
 }

@@ -46,6 +46,11 @@ predicates = "3"
 # Production code handles errors or states the invariant with `expect`;
 # tests may unwrap (clippy.toml: allow-unwrap-in-tests).
 unwrap_used = "deny"
+# Measured 0 hits; deny to keep it that way.
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+await_holding_lock = "deny"
 
 [profile.release]
 opt-level = 3
