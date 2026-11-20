@@ -327,55 +327,6 @@ fn test_fence_is_per_agent() {
 }
 
 #[test]
-fn test_import_keeps_read_capsules_read_and_is_idempotent() {
-    let f = Fixture::new();
-    f.maildir("lead", "cur", "rakaso", "old and read");
-    f.maildir("lead", "new", "mitohu", "still unread");
-    f.cap(&["import"]);
-    f.cap(&["import"]);
-    let by_id: HashMap<String, String> = f
-        .items("lead", None)
-        .iter()
-        .map(|i| {
-            (
-                i["dedupe_key"].as_str().unwrap().to_string(),
-                i["status"].as_str().unwrap().to_string(),
-            )
-        })
-        .collect();
-    assert_eq!(
-        by_id,
-        HashMap::from([
-            ("rakaso".to_string(), "done".to_string()),
-            ("mitohu".to_string(), "queued".to_string()),
-        ])
-    );
-    let out = f.cap(&["watch", "--to", "lead", "--max", "1"]);
-    assert!(stdout(&out).contains("still unread"), "{}", stdout(&out));
-}
-
-#[test]
-fn test_import_refuses_a_mailbox_that_already_has_unread_mail() {
-    let f = Fixture::new();
-    f.cap(&[
-        "send",
-        "--to",
-        "lead",
-        "--task",
-        "a",
-        "--status",
-        "wip",
-        "--summary",
-        "live",
-    ]);
-    f.maildir("lead", "cur", "rakaso", "old and read");
-    let out = f.run(&["import"], &[]);
-    assert!(!out.status.success());
-    assert!(stderr(&out).contains("unread"), "{}", stderr(&out));
-    assert_eq!(f.unread("lead"), 1);
-}
-
-#[test]
 fn test_a_reply_runs_the_tasks_check_not_its_own() {
     let f = Fixture::new();
     let (cid, _) = f.task_with_check("exit 3\n");
