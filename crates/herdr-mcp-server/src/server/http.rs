@@ -158,6 +158,14 @@ pub(super) fn http_router(
         .route("/api/runs/{id}/events", get(run_events_handler))
         .route("/api/runs/{id}/trail", get(run_trail_handler))
         .route("/api/runs/{id}/{action}", post(control_run_handler))
+        .route("/api/queues", get(queue_depths_handler))
+        .route(
+            "/api/queues/{queue}/items",
+            get(queue_list_handler).post(queue_push_handler),
+        )
+        .route("/api/queues/items/{id}", get(queue_item_handler))
+        .route("/api/queues/items/{id}/cancel", post(queue_cancel_handler))
+        .route("/api/queues/items/{id}/retry", post(queue_retry_handler))
         .route("/api/events", get(events_handler))
         .route("/api/profiles", get(list_profiles_handler))
         .route(
@@ -506,7 +514,11 @@ pub(super) async fn create_recipe_handler(
     State(AppState { server, .. }): State<AppState>,
     Json(req): Json<CreateRecipeRequest>,
 ) -> Result<Json<Recipe>, (StatusCode, String)> {
-    server.create_recipe(req).await.map(Json).map_err(internal)
+    server
+        .create_recipe(req)
+        .await
+        .map(Json)
+        .map_err(queue_http_error)
 }
 
 pub(super) async fn get_recipe_handler(
@@ -530,7 +542,7 @@ pub(super) async fn update_recipe_handler(
     server
         .update_recipe(id, req)
         .await
-        .map_err(internal)?
+        .map_err(queue_http_error)?
         .map(Json)
         .ok_or((StatusCode::NOT_FOUND, "Recipe not found".to_string()))
 }
@@ -1001,4 +1013,119 @@ pub(super) async fn delete_variable_handler(
             }
         })
         .map_err(internal)
+}
+
+type QueueHttp<T> = Result<Json<T>, (StatusCode, String)>;
+
+fn queue_http_error(error: anyhow::Error) -> (StatusCode, String) {
+    use crate::queues::{RequestError, ShuttingDown, WaitTimeout};
+    use herdr_queue::QueueError;
+    let status = if error.is::<ShuttingDown>() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else if error.is::<WaitTimeout>() {
+        StatusCode::REQUEST_TIMEOUT
+    } else if error.is::<RequestError>() {
+        StatusCode::BAD_REQUEST
+    } else {
+        match error.downcast_ref::<QueueError>() {
+            Some(QueueError::NotFound(_)) => StatusCode::NOT_FOUND,
+            Some(
+                QueueError::Full { .. }
+                | QueueError::DedupeConflict { .. }
+                | QueueError::InvalidStatus { .. },
+            ) => StatusCode::CONFLICT,
+            Some(
+                QueueError::InvalidQueueName(_)
+                | QueueError::InvalidLease
+                | QueueError::InvalidMaxAttempts,
+            ) => StatusCode::BAD_REQUEST,
+            _ => return internal(error),
+        }
+    };
+    (status, error.to_string())
+}
+
+async fn queue_depths_handler(
+    State(AppState { server }): State<AppState>,
+) -> QueueHttp<Vec<herdr_queue::QueueDepth>> {
+    server
+        .queues
+        .depths(&server)
+        .await
+        .map(Json)
+        .map_err(queue_http_error)
+}
+
+async fn queue_list_handler(
+    State(AppState { server }): State<AppState>,
+    Path(queue): Path<String>,
+    Query(query): Query<herdr_mcp_api::recipe::QueueListQuery>,
+) -> QueueHttp<Vec<herdr_queue::Item>> {
+    server
+        .queues
+        .list(&server, Some(queue), query.status, query.limit)
+        .await
+        .map(Json)
+        .map_err(queue_http_error)
+}
+
+#[derive(Debug, Deserialize)]
+struct QueueWaitQuery {
+    #[serde(default)]
+    wait: bool,
+    timeout_ms: Option<u64>,
+}
+
+async fn queue_push_handler(
+    State(AppState { server }): State<AppState>,
+    Path(queue): Path<String>,
+    Query(query): Query<QueueWaitQuery>,
+    Json(req): Json<herdr_mcp_api::recipe::QueuePushRequest>,
+) -> QueueHttp<herdr_mcp_api::recipe::QueuePushResponse<herdr_queue::Item>> {
+    server
+        .queues
+        .push_request(&server, &queue, req, query.wait, query.timeout_ms)
+        .await
+        .map(Json)
+        .map_err(queue_http_error)
+}
+
+async fn queue_item_handler(
+    State(AppState { server }): State<AppState>,
+    Path(id): Path<String>,
+) -> QueueHttp<herdr_mcp_api::recipe::QueueItemResponse<herdr_queue::Item, herdr_queue::QueueEvent>>
+{
+    let (item, events) = server
+        .queues
+        .item(&server, &id)
+        .await
+        .map_err(queue_http_error)?;
+    Ok(Json(herdr_mcp_api::recipe::QueueItemResponse {
+        item,
+        events,
+    }))
+}
+
+async fn queue_cancel_handler(
+    State(AppState { server }): State<AppState>,
+    Path(id): Path<String>,
+) -> QueueHttp<herdr_queue::Item> {
+    server
+        .queues
+        .cancel(&server, id)
+        .await
+        .map(Json)
+        .map_err(queue_http_error)
+}
+
+async fn queue_retry_handler(
+    State(AppState { server }): State<AppState>,
+    Path(id): Path<String>,
+) -> QueueHttp<herdr_queue::Item> {
+    server
+        .queues
+        .retry(&server, id)
+        .await
+        .map(Json)
+        .map_err(queue_http_error)
 }

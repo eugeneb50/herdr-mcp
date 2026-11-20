@@ -630,6 +630,13 @@ pub(crate) async fn prune(server: &HerdrMcpServer, recipe: Option<Uuid>) {
 /// [`prune`] every recipe's runs and the ad-hoc ones (at daemon start, so
 /// `keep_days` applies to collections that no longer run).
 pub async fn prune_all(server: &HerdrMcpServer) {
+    let days = server.settings().number(herdr_mcp_api::settings::KEEP_DAYS);
+    if days != 0 {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
+        if let Err(e) = server.queues.prune(server, cutoff.timestamp_millis()).await {
+            tracing::warn!("pruning queue items: {e:#}");
+        }
+    }
     if let Err(e) = prune_runs(server, None).await {
         tracing::warn!("pruning runs: {e:#}");
     }
@@ -1557,6 +1564,7 @@ mod tests {
             category: None,
             triggers: Vec::new(),
             trail: Default::default(),
+            queue: None,
         };
         server.persistence.save_recipe(&recipe).await.unwrap();
         recipe.id
@@ -2013,6 +2021,7 @@ mod tests {
             category: None,
             triggers: Vec::new(),
             trail: Default::default(),
+            queue: None,
         };
         server.persistence.save_recipe(&recipe).await.unwrap();
 
@@ -2055,6 +2064,7 @@ mod tests {
             category: None,
             triggers: Vec::new(),
             trail: Default::default(),
+            queue: None,
         };
         server.persistence.save_recipe(&recipe).await.unwrap();
         let schedule = crate::variables::ScheduledRecipe {

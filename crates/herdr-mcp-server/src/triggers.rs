@@ -164,6 +164,7 @@ mod tests {
             category: None,
             triggers,
             trail: Default::default(),
+            queue: None,
         }
     }
 

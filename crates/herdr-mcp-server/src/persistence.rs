@@ -487,6 +487,7 @@ mod tests {
             category: None,
             triggers: Vec::new(),
             trail: Default::default(),
+            queue: None,
         }
     }
 

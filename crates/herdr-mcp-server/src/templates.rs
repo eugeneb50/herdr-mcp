@@ -706,6 +706,7 @@ pub fn instantiate(
         category: Some(template.category.clone()),
         triggers: Vec::new(),
         trail: Default::default(),
+        queue: None,
     })
 }
 

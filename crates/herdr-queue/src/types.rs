@@ -97,6 +97,7 @@ pub enum Pushed {
 #[derive(Debug)]
 pub enum Outcome {
     Done(Value),
+    Cancelled,
     Failed(String),
 }
 

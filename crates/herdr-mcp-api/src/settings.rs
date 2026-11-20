@@ -180,6 +180,14 @@ pub const TUI_PANE_MS: &str = "intervals.tui-pane-ms";
 pub const KEEP_RUNS: &str = "runs.keep-runs";
 pub const KEEP_DAYS: &str = "runs.keep-days";
 pub const SNAPSHOT_LINES: &str = "runs.snapshot-lines";
+pub const QUEUE_DEFAULT_CONCURRENCY: &str = "queues.default-concurrency";
+pub const QUEUE_DEFAULT_MAX_ATTEMPTS: &str = "queues.default-max-attempts";
+pub const QUEUE_DEFAULT_MAX_DEPTH: &str = "queues.default-max-depth";
+pub const QUEUE_DEFAULT_LEASE_MS: &str = "queues.default-lease-ms";
+pub const QUEUE_REAP_EVERY_MS: &str = "queues.reap-every-ms";
+pub const QUEUE_TICK_MS: &str = "queues.tick-ms";
+pub const QUEUE_SUPERVISOR_MAX_RESTARTS: &str = "queues.supervisor-max-restarts";
+pub const QUEUE_SHUTDOWN_WAIT_MS: &str = "queues.shutdown-wait-ms";
 
 /// Every setting, in display order.
 pub const SPECS: &[Spec] = &[
@@ -334,6 +342,70 @@ pub const SPECS: &[Spec] = &[
         40,
         0,
         10_000,
+    ),
+    count(
+        QUEUE_DEFAULT_CONCURRENCY,
+        "queue concurrency",
+        "Items a collection's queue runs at once, when its queue block sets no concurrency.",
+        1,
+        1,
+        64,
+    ),
+    count(
+        QUEUE_DEFAULT_MAX_ATTEMPTS,
+        "queue attempts",
+        "Times a queued item is tried (a failed run or an expired lease counts) before it is dead, when the queue block sets no max_attempts. Applies to items pushed after the change.",
+        3,
+        1,
+        100,
+    ),
+    count(
+        QUEUE_DEFAULT_MAX_DEPTH,
+        "queue depth limit",
+        "Unfinished items a queue holds before a push is refused, when the queue block sets no max_depth.",
+        50,
+        1,
+        1_000_000,
+    ),
+    ms(
+        QUEUE_DEFAULT_LEASE_MS,
+        "queue lease",
+        "How long a claimed item is owned without a heartbeat before the reaper takes it back and requeues it, when the queue block sets no lease_ms. Heartbeats renew it every third of this.",
+        60_000,
+        1_000,
+        3_600_000,
+    ),
+    ms(
+        QUEUE_REAP_EVERY_MS,
+        "queue reaper interval",
+        "How often the daemon looks for expired leases and requeues (or kills) their items.",
+        5_000,
+        100,
+        600_000,
+    ),
+    ms(
+        QUEUE_TICK_MS,
+        "queue pickup interval",
+        "How often each queue re-checks its table, which is how the daemon notices items pushed by another process (the CLI, another herdr-mcp).",
+        2_000,
+        100,
+        600_000,
+    ),
+    count(
+        QUEUE_SUPERVISOR_MAX_RESTARTS,
+        "queue restart limit",
+        "Crashes of one queue's runner within 10 minutes after which it is stopped and logged instead of restarted. 0 stops it on the first crash.",
+        5,
+        0,
+        1_000,
+    ),
+    ms(
+        QUEUE_SHUTDOWN_WAIT_MS,
+        "queue shutdown wait",
+        "How long shutdown waits for running items to stop before releasing their leases back to the queue.",
+        10_000,
+        0,
+        600_000,
     ),
     keys(
         "keys.tab-next",
@@ -787,6 +859,14 @@ mod tests {
             KEEP_RUNS,
             KEEP_DAYS,
             SNAPSHOT_LINES,
+            QUEUE_DEFAULT_CONCURRENCY,
+            QUEUE_DEFAULT_MAX_ATTEMPTS,
+            QUEUE_DEFAULT_MAX_DEPTH,
+            QUEUE_DEFAULT_LEASE_MS,
+            QUEUE_REAP_EVERY_MS,
+            QUEUE_TICK_MS,
+            QUEUE_SUPERVISOR_MAX_RESTARTS,
+            QUEUE_SHUTDOWN_WAIT_MS,
         ] {
             assert!(spec(key).is_some(), "{key}");
         }

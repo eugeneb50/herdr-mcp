@@ -92,12 +92,13 @@ fn main() -> Result<()> {
         .port
         .context("the TUI needs the HTTP bridge: pass --http <port> or set http.port")?;
     rt.block_on(async move {
-        common::serve_core(&config).await?;
+        let server = common::serve_core(&config).await?;
         let opts = herdr_mcp_tui::DashboardOptions {
             data_dir: config.data_dir.clone(),
             http_port,
         };
         let res = herdr_mcp_tui::run(opts).await;
+        server.queues.shutdown(&server).await;
         tokio::task::spawn_blocking(herdr_mcp_server::clipboard::release).await?;
         res
     })

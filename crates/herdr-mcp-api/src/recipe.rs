@@ -24,6 +24,19 @@ pub struct Recipe {
     /// How long its runs are kept, and its failure snapshots.
     #[serde(default, skip_serializing_if = "RunTrail::is_default")]
     pub trail: RunTrail,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<QueueConfig>,
+}
+
+/// Queue overrides. Unset values use the live queue defaults.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueueConfig {
+    pub concurrency: Option<u32>,
+    pub coalesce: Option<String>,
+    pub max_depth: Option<u32>,
+    pub max_attempts: Option<u32>,
+    pub lease_ms: Option<u64>,
 }
 
 /// A collection's own run-history settings. A field left `None` uses the
@@ -142,6 +155,8 @@ pub struct CreateRecipeRequest {
     pub triggers: Vec<RecipeTrigger>,
     #[serde(default)]
     pub trail: RunTrail,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<QueueConfig>,
 }
 
 /// `PUT /api/recipes/{id}` body — every field optional (partial update).
@@ -156,4 +171,43 @@ pub struct UpdateRecipeRequest {
     pub category: Option<String>,
     /// Replaces the collection's run-history settings.
     pub trail: Option<RunTrail>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue: Option<QueueConfig>,
+}
+
+/// Payload for a new queue item.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueuePushRequest {
+    pub payload: serde_json::Map<String, serde_json::Value>,
+    pub dedupe_key: Option<String>,
+    pub requester: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuePushKind {
+    New,
+    Deduped,
+    Coalesced,
+}
+
+/// The native bridge fills this envelope with the store's canonical item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuePushResponse<T = serde_json::Value> {
+    pub pushed: QueuePushKind,
+    pub item: T,
+}
+
+/// The native bridge uses the store's canonical item and event records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueueItemResponse<T = serde_json::Value, E = serde_json::Value> {
+    pub item: T,
+    pub events: Vec<E>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct QueueListQuery {
+    pub status: Option<String>,
+    pub limit: Option<u32>,
 }
