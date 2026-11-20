@@ -39,6 +39,7 @@ impl Executor for Fake {
                     match mode.as_str() {
                         "panic" => panic!("fake executor"),
                         "fail" => RunOutcome::Failed("fake failed".into()),
+                        "external_cancel" => RunOutcome::Cancelled,
                         "hang" => {
                             cancel.cancelled().await;
                             lock(&cancelled).push(id);
@@ -565,4 +566,285 @@ async fn listing_defaults_to_one_hundred_and_honors_explicit_limit() {
     assert_eq!(default.len(), 100);
     assert_eq!(explicit.len(), 101);
     assert_eq!(default, explicit[..100]);
+}
+
+#[tokio::test(start_paused = true)]
+async fn run_cancel_keeps_the_attempt_and_stops_the_item() {
+    let (_dir, server, _) = fixture(1).await;
+    let item = push(&server, "external_cancel").await;
+    let (_executor, mut starts) = fake(&server);
+    assert_eq!(next(&mut starts).await, item.id);
+    let finished = tokio::select! {
+        finished = terminal(&server, &item.id, ItemStatus::Cancelled) => finished,
+        repeated = next(&mut starts) => panic!("cancelled work began again: {repeated}"),
+    };
+    assert_eq!((finished.attempts, finished.claims), (1, 1));
+    assert!(starts.try_recv().is_err());
+    server.queues.shutdown(&server).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_executor_that_ignores_the_token_frees_its_slot() {
+    let (_dir, server, _) = fixture(1).await;
+    let ignored = push(&server, "ignore").await;
+    let next_item = push(&server, "ok").await;
+    let (_executor, mut starts) = fake(&server);
+    assert_eq!(next(&mut starts).await, ignored.id);
+    while server
+        .queues
+        .item(&server, &ignored.id)
+        .await
+        .unwrap()
+        .0
+        .run_id
+        .is_none()
+    {
+        tokio::task::yield_now().await;
+    }
+    let start = Instant::now();
+    server
+        .queues
+        .cancel(&server, ignored.id.clone())
+        .await
+        .unwrap();
+    assert_eq!(next(&mut starts).await, next_item.id);
+    assert!(start.elapsed() >= Duration::from_millis(250));
+    terminal(&server, &ignored.id, ItemStatus::Cancelled).await;
+    terminal(&server, &next_item.id, ItemStatus::Done).await;
+    server.queues.shutdown(&server).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn startup_renews_the_lease_until_the_run_attaches() {
+    let (_dir, server, _) = fixture(1).await;
+    let item = push(&server, "attach").await;
+    let (executor, mut starts) = fake(&server);
+    assert_eq!(next(&mut starts).await, item.id);
+    tokio::time::sleep(Duration::from_millis(1600)).await;
+    let (starting, history) = server.queues.item(&server, &item.id).await.unwrap();
+    assert_eq!(
+        (starting.status, starting.attempts, starting.claims),
+        (ItemStatus::Running, 1, 1)
+    );
+    assert!(starting.run_id.is_none());
+    assert!(!history.iter().any(|e| e.kind == "stalled"));
+    executor.attach.add_permits(1);
+    terminal(&server, &item.id, ItemStatus::Done).await;
+    server.queues.shutdown(&server).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn recipe_queue_overrides_are_checked_on_create_and_update() {
+    let (_dir, server, recipe) = fixture(1).await;
+    let request = CreateRecipeRequest {
+        name: "invalid".into(),
+        description: None,
+        flow: Flow::default(),
+        variables: HashMap::new(),
+        category: None,
+        triggers: vec![],
+        trail: Default::default(),
+        queue: Some(QueueConfig {
+            concurrency: Some(0),
+            ..Default::default()
+        }),
+    };
+    assert!(
+        server
+            .create_recipe(request)
+            .await
+            .unwrap_err()
+            .is::<RequestError>()
+    );
+    for queue in [
+        QueueConfig {
+            lease_ms: Some(0),
+            ..Default::default()
+        },
+        QueueConfig {
+            max_attempts: Some(0),
+            ..Default::default()
+        },
+        QueueConfig {
+            max_depth: Some(u32::MAX),
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            server
+                .update_recipe(
+                    recipe.id,
+                    herdr_mcp_api::UpdateRecipeRequest {
+                        queue: Some(queue),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .unwrap_err()
+                .is::<RequestError>()
+        );
+    }
+    assert_eq!(
+        server
+            .persistence
+            .load_recipe(&recipe.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .queue,
+        recipe.queue
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn wait_defaults_to_a_deadline_and_checks_on_queue_tick() {
+    let (_dir, server, _) = fixture(1).await;
+    let item = push(&server, "ok").await;
+    setting(&server, QUEUE_TICK_MS, 1000);
+    let until = Instant::now() + Duration::from_millis(300);
+    let (waited, ()) = tokio::join!(server.queues.wait(&server, &item.id, Some(500)), async {
+        tokio::time::sleep_until(until).await;
+        server
+            .queues
+            .cancel(&server, item.id.clone())
+            .await
+            .unwrap();
+    },);
+    assert!(waited.unwrap_err().is::<WaitTimeout>());
+    let another = push(&server, "ok").await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(61),
+        server.queues.wait(&server, &another.id, None),
+    )
+    .await
+    .unwrap();
+    assert!(result.unwrap_err().is::<WaitTimeout>());
+}
+
+#[tokio::test(start_paused = true)]
+async fn retry_from_another_connection_waits_until_old_claim_drains() {
+    let (dir, server, _) = fixture(2).await;
+    let item = push(&server, "ignore").await;
+    let (_executor, mut starts) = fake(&server);
+    assert_eq!(next(&mut starts).await, item.id);
+    while server
+        .queues
+        .item(&server, &item.id)
+        .await
+        .unwrap()
+        .0
+        .run_id
+        .is_none()
+    {
+        tokio::task::yield_now().await;
+    }
+    let mut external = Queue::open(dir.path().join("queue.db")).unwrap();
+    external.cancel(&item.id, server.queues.now()).unwrap();
+    external.retry(&item.id, server.queues.now()).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), starts.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(next(&mut starts).await, item.id);
+    assert_eq!(
+        server
+            .queues
+            .item(&server, &item.id)
+            .await
+            .unwrap()
+            .0
+            .claims,
+        2
+    );
+    replay(&server, &item.id).await;
+    server.queues.shutdown(&server).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn explicit_list_limit_is_capped() {
+    let (_dir, server, mut recipe) = fixture(1).await;
+    recipe.queue.as_mut().unwrap().max_depth = Some(1001);
+    server.persistence.save_recipe(&recipe).await.unwrap();
+    for _ in 0..1001 {
+        push(&server, "ok").await;
+    }
+    assert_eq!(
+        server
+            .queues
+            .list(&server, None, None, Some(u32::MAX))
+            .await
+            .unwrap()
+            .len(),
+        1000
+    );
+}
+
+#[tokio::test]
+async fn shutdown_does_not_wait_behind_a_busy_store() {
+    let (_dir, server, _) = fixture(1).await;
+    setting(&server, QUEUE_SHUTDOWN_WAIT_MS, 10);
+    let runtime = server.queues.0.clone();
+    let (locked, ready) = tokio::sync::oneshot::channel();
+    let (unlock, release) = std::sync::mpsc::channel();
+    let blocker = server.queues.0.tracker.spawn_blocking(move || {
+        let _guard = lock(&runtime.db);
+        locked.send(()).unwrap();
+        release.recv().unwrap();
+    });
+    ready.await.unwrap();
+
+    let shutdown =
+        tokio::time::timeout(Duration::from_millis(500), server.queues.shutdown(&server)).await;
+    unlock.send(()).unwrap();
+    blocker.await.unwrap();
+    shutdown.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_fallback_leaves_a_resolved_outcome_to_commit() {
+    let (_dir, server, recipe) = fixture(1).await;
+    setting(&server, QUEUE_SHUTDOWN_WAIT_MS, 0);
+    let item = push(&server, "ok").await;
+    let queue = recipe.id.to_string();
+    let now = server.queues.now();
+    let (_, lease) = server
+        .queues
+        .db(&server, move |db| Ok(db.claim(&queue, 1000, now)?.unwrap()))
+        .await
+        .unwrap();
+    lock(&server.queues.0.active).insert(
+        (lease.id.clone(), lease.claim),
+        ActiveClaim {
+            queue: item.queue,
+            cancel: server.queues.0.root.child_token(),
+            settling: true,
+        },
+    );
+    let (commit, ready) = tokio::sync::oneshot::channel();
+    let service = server.queues.clone();
+    let worker_server = server.clone();
+    let worker = server.queues.0.tracker.spawn(async move {
+        ready.await.unwrap();
+        service
+            .db(&worker_server, move |db| {
+                Ok(db.finish(&lease, Outcome::Done(json!(42)), now)?)
+            })
+            .await
+            .unwrap()
+    });
+    server.queues.shutdown(&server).await;
+    commit.send(()).unwrap();
+    assert!(matches!(worker.await.unwrap(), Fenced::Applied(_)));
+    assert_eq!(
+        server
+            .queues
+            .item(&server, &item.id)
+            .await
+            .unwrap()
+            .0
+            .result,
+        Some(json!(42))
+    );
+    replay(&server, &item.id).await;
 }

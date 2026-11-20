@@ -15,7 +15,13 @@ use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
-type Active = HashMap<(String, i64), (String, CancellationToken)>;
+type Active = HashMap<(String, i64), ActiveClaim>;
+
+struct ActiveClaim {
+    queue: String,
+    cancel: CancellationToken,
+    settling: bool,
+}
 
 #[derive(Clone, Default)]
 pub struct QueueService(Arc<Runtime>);
@@ -43,6 +49,26 @@ impl std::error::Error for RequestError {}
 
 fn invalid(message: impl Into<String>) -> anyhow::Error {
     RequestError(message.into()).into()
+}
+
+pub(crate) fn validate_config(config: &QueueConfig) -> Result<()> {
+    let mut settings = Settings::default();
+    for (key, value) in [
+        (QUEUE_DEFAULT_CONCURRENCY, config.concurrency.map(u64::from)),
+        (QUEUE_DEFAULT_MAX_DEPTH, config.max_depth.map(u64::from)),
+        (
+            QUEUE_DEFAULT_MAX_ATTEMPTS,
+            config.max_attempts.map(u64::from),
+        ),
+        (QUEUE_DEFAULT_LEASE_MS, config.lease_ms),
+    ] {
+        if let Some(value) = value {
+            settings
+                .set(key, herdr_mcp_api::settings::Value::Number(value))
+                .map_err(|error| invalid(format!("{key}: {error}")))?;
+        }
+    }
+    Ok(())
 }
 
 fn number(server: &HerdrMcpServer, key: &str) -> u64 {
@@ -129,14 +155,16 @@ impl QueueService {
             return Err(ShuttingDown.into());
         }
         let recipe = Self::recipe(server, queue).await?;
+        let config = recipe
+            .queue
+            .ok_or_else(|| invalid("collection has no queue configuration"))?;
+        validate_config(&config)?;
         let QueueConfig {
             coalesce,
             max_depth,
             max_attempts,
             ..
-        } = recipe
-            .queue
-            .ok_or_else(|| invalid("collection has no queue configuration"))?;
+        } = config;
         let coalesce_key = coalesce
             .map(|template| {
                 let mut value = Value::String(template);
@@ -192,7 +220,7 @@ impl QueueService {
             .map(|s| s.parse().map_err(|_| invalid("unknown queue status")))
             .transpose()?;
         self.db(server, move |db| {
-            Ok(db.list(queue.as_deref(), status, limit.unwrap_or(100))?)
+            Ok(db.list(queue.as_deref(), status, limit.unwrap_or(100).min(1000))?)
         })
         .await
     }
@@ -214,8 +242,8 @@ impl QueueService {
         let runtime = self.0.clone();
         self.db(server, move |db| {
             let item = db.cancel(&id, now)?;
-            if let Some((_, cancel)) = lock(&runtime.active).get(&(item.id.clone(), item.claims)) {
-                cancel.cancel();
+            if let Some(active) = lock(&runtime.active).get(&(item.id.clone(), item.claims)) {
+                active.cancel.cancel();
             }
             Ok(item)
         })
@@ -245,22 +273,21 @@ impl QueueService {
     ) -> Result<Item> {
         let wait = async {
             loop {
-                let (item, _) = self.item(server, id).await?;
+                let id = id.to_owned();
+                let item = self.db(server, move |db| Ok(db.get(&id)?)).await?;
                 if !matches!(item.status, ItemStatus::Queued | ItemStatus::Running) {
                     return Ok(item);
                 }
                 tokio::select! {
                     () = self.0.root.cancelled() => return Err(ShuttingDown.into()),
-                    () = tokio::time::sleep(Duration::from_millis(100)) => {}
+                    () = tokio::time::sleep(duration(server, QUEUE_TICK_MS)) => {}
                 }
             }
         };
-        match timeout {
-            Some(ms) => tokio::time::timeout(Duration::from_millis(ms), wait)
-                .await
-                .map_err(|_| WaitTimeout)?,
-            None => wait.await,
-        }
+        let timeout = Duration::from_millis(timeout.unwrap_or(30_000).clamp(1, 60_000));
+        tokio::time::timeout(timeout, wait)
+            .await
+            .map_err(|_| WaitTimeout)?
     }
 }
 

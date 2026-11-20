@@ -1119,6 +1119,20 @@ esac
     );
     assert_eq!(api.list_recipes().await.unwrap().len(), 1);
     use herdr_mcp_api::recipe::{QueueConfig, QueuePushKind, QueuePushRequest};
+    assert!(matches!(
+        api.update_recipe(
+            created.id,
+            &herdr_mcp_api::UpdateRecipeRequest {
+                queue: Some(QueueConfig {
+                    lease_ms: Some(0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        )
+        .await,
+        Err(ApiError::Status { status: 400, .. })
+    ));
     api.update_recipe(
         created.id,
         &herdr_mcp_api::UpdateRecipeRequest {
@@ -1155,6 +1169,17 @@ esac
         api.queue_item("missing").await,
         Err(ApiError::Status { status: 404, .. })
     ));
+    let timed_out = http
+        .post(format!(
+            "http://{addr}/api/queues/{queue}/items?wait=true&timeout_ms=10"
+        ))
+        .timeout(std::time::Duration::from_secs(1))
+        .json(&push)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(timed_out.status(), 408);
+    assert_eq!(api.queue_item(id).await.unwrap().item["status"], "queued");
     api.delete_recipe(created.id).await.unwrap();
     assert!(api.list_recipes().await.unwrap().is_empty());
 

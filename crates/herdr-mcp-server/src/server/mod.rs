@@ -274,6 +274,9 @@ impl HerdrMcpServer {
 
     /// Save `req` as a new recipe.
     pub async fn create_recipe(&self, req: CreateRecipeRequest) -> anyhow::Result<Recipe> {
+        if let Some(queue) = &req.queue {
+            crate::queues::validate_config(queue)?;
+        }
         let now = chrono::Utc::now();
         let recipe = Recipe {
             id: uuid::Uuid::new_v4(),
@@ -324,6 +327,7 @@ impl HerdrMcpServer {
             recipe.trail = trail;
         }
         if let Some(queue) = req.queue {
+            crate::queues::validate_config(&queue)?;
             recipe.queue = Some(queue);
         }
         recipe.updated_at = chrono::Utc::now();

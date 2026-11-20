@@ -131,6 +131,17 @@ impl Queue {
         lease_ms: u64,
         now_ms: i64,
     ) -> Result<Option<(Item, Lease)>> {
+        self.claim_excluding(queue, lease_ms, now_ms, &[])
+    }
+
+    /// Claim the oldest queued item whose previous worker is no longer draining.
+    pub fn claim_excluding(
+        &mut self,
+        queue: &str,
+        lease_ms: u64,
+        now_ms: i64,
+        excluded: &[&str],
+    ) -> Result<Option<(Item, Lease)>> {
         validate_name(queue)?;
         let until = lease_until(lease_ms, now_ms).ok_or(QueueError::InvalidLease)?;
         self.write(|tx| {
@@ -139,9 +150,10 @@ impl Queue {
                     "UPDATE queue_items SET status = 'running', attempts = attempts + 1, claims = claims + 1,
                  lease_until = ?2, started_at = ?3
                  WHERE id = (SELECT id FROM queue_items WHERE queue = ?1
-                             AND status = 'queued' ORDER BY seq LIMIT 1)
+                             AND status = 'queued' AND id NOT IN (SELECT value FROM json_each(?4))
+                             ORDER BY seq LIMIT 1)
                  RETURNING *",
-                    params![queue, until, now_ms],
+                    params![queue, until, now_ms, json!(excluded).to_string()],
                     read_item,
                 )
                 .optional()?;
@@ -218,9 +230,10 @@ impl Queue {
                 Outcome::Done(value) => (
                     ItemStatus::Done,
                     "done",
-                    value,
+                    Some(value),
                     Some(json!({"attempt": attempt, "claim": lease.claim})),
                 ),
+                Outcome::Cancelled => (ItemStatus::Cancelled, "cancelled", None, None),
                 Outcome::Failed(error) => {
                     event(
                         tx,
@@ -234,7 +247,7 @@ impl Queue {
                     } else {
                         (ItemStatus::Dead, "dead")
                     };
-                    (status, kind, Value::String(error), None)
+                    (status, kind, Some(Value::String(error)), None)
                 }
             };
             end_run(
@@ -242,7 +255,7 @@ impl Queue {
                 &lease.id,
                 lease.claim,
                 status,
-                Some(&result),
+                result.as_ref(),
                 now_ms,
                 false,
             )?;
@@ -376,6 +389,10 @@ impl Queue {
              AND (?2 IS NULL OR status = ?2) ORDER BY queue, seq LIMIT ?3",
             params![queue, status.map(ItemStatus::as_str), limit],
         )
+    }
+
+    pub fn get(&self, id: &str) -> Result<Item> {
+        get_item(&self.conn, id)
     }
 
     pub fn item(&mut self, id: &str) -> Result<Option<(Item, Vec<QueueEvent>)>> {

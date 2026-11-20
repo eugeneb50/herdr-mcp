@@ -514,7 +514,11 @@ pub(super) async fn create_recipe_handler(
     State(AppState { server, .. }): State<AppState>,
     Json(req): Json<CreateRecipeRequest>,
 ) -> Result<Json<Recipe>, (StatusCode, String)> {
-    server.create_recipe(req).await.map(Json).map_err(internal)
+    server
+        .create_recipe(req)
+        .await
+        .map(Json)
+        .map_err(queue_http_error)
 }
 
 pub(super) async fn get_recipe_handler(
@@ -538,7 +542,7 @@ pub(super) async fn update_recipe_handler(
     server
         .update_recipe(id, req)
         .await
-        .map_err(internal)?
+        .map_err(queue_http_error)?
         .map(Json)
         .ok_or((StatusCode::NOT_FOUND, "Recipe not found".to_string()))
 }
@@ -1065,15 +1069,22 @@ async fn queue_list_handler(
         .map_err(queue_http_error)
 }
 
+#[derive(Debug, Deserialize)]
+struct QueueWaitQuery {
+    #[serde(default)]
+    wait: bool,
+    timeout_ms: Option<u64>,
+}
+
 async fn queue_push_handler(
     State(AppState { server }): State<AppState>,
     Path(queue): Path<String>,
-    Query(query): Query<WaitQuery>,
+    Query(query): Query<QueueWaitQuery>,
     Json(req): Json<herdr_mcp_api::recipe::QueuePushRequest>,
 ) -> QueueHttp<herdr_mcp_api::recipe::QueuePushResponse<herdr_queue::Item>> {
     server
         .queues
-        .push_request(&server, &queue, req, query.wait, None)
+        .push_request(&server, &queue, req, query.wait, query.timeout_ms)
         .await
         .map(Json)
         .map_err(queue_http_error)

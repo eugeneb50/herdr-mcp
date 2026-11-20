@@ -117,10 +117,10 @@ impl QueueService {
                 match service.db(&server, move |db| Ok(db.reap(now)?)).await {
                     Ok(items) => {
                         for item in items {
-                            if let Some((_, cancel)) =
-                                lock(&service.0.active).remove(&(item.id, item.claims))
+                            if let Some(active) =
+                                lock(&service.0.active).get(&(item.id, item.claims))
                             {
-                                cancel.cancel();
+                                active.cancel.cancel();
                             }
                             service.wake(&item.queue);
                         }
@@ -230,6 +230,7 @@ impl QueueService {
                 .await?
                 .and_then(|r| r.queue)
             {
+                validate_config(&config)?;
                 let concurrency = config
                     .concurrency
                     .unwrap_or_else(|| count(server, QUEUE_DEFAULT_CONCURRENCY));
@@ -239,7 +240,7 @@ impl QueueService {
                 loop {
                     let running = lock(&self.0.active)
                         .values()
-                        .filter(|(name, _)| name == queue)
+                        .filter(|active| active.queue == queue)
                         .count();
                     if running >= concurrency as usize {
                         break;
@@ -253,12 +254,25 @@ impl QueueService {
                             if cancel.is_cancelled() {
                                 return Ok(None);
                             }
-                            let Some((item, lease)) = db.claim(&name, lease_ms, service.now())?
+                            let draining: Vec<_> = lock(&runtime.active)
+                                .iter()
+                                .filter(|(_, active)| active.queue == name)
+                                .map(|((id, _), _)| id.clone())
+                                .collect();
+                            let excluded: Vec<_> = draining.iter().map(String::as_str).collect();
+                            let Some((item, lease)) =
+                                db.claim_excluding(&name, lease_ms, service.now(), &excluded)?
                             else {
                                 return Ok(None);
                             };
-                            lock(&runtime.active)
-                                .insert((lease.id.clone(), lease.claim), (name, cancel.clone()));
+                            lock(&runtime.active).insert(
+                                (lease.id.clone(), lease.claim),
+                                ActiveClaim {
+                                    queue: name,
+                                    cancel: cancel.clone(),
+                                    settling: false,
+                                },
+                            );
                             Ok(Some((item, lease, cancel)))
                         })
                         .await?;
@@ -318,7 +332,7 @@ impl QueueService {
         cancel: &CancellationToken,
         lease_ms: u64,
     ) -> Result<()> {
-        let work = async {
+        let run = async {
             if cancel.is_cancelled() {
                 return Ok(Some(RunOutcome::Cancelled));
             }
@@ -339,20 +353,43 @@ impl QueueService {
                 return Ok(None);
             }
 
-            let mut outcome = started.outcome;
+            Ok(Some(started.outcome.await))
+        };
+        let renew = async {
             let heartbeat = Duration::from_millis((lease_ms / 3).max(1));
             loop {
-                tokio::select! {
-                    result = &mut outcome => return Ok(Some(result)),
-                    () = cancel.cancelled() => return Ok(Some(outcome.await)),
-                    () = tokio::time::sleep(heartbeat) => {
-                        let token = lease.clone();
-                        let service = self.clone();
-                        if matches!(self.db(server, move |db| Ok(db.heartbeat(&token, lease_ms, service.now())?)).await?, Fenced::Stale) {
-                            cancel.cancel();
-                            return Ok(None);
-                        }
-                    }
+                tokio::time::sleep(heartbeat).await;
+                let token = lease.clone();
+                let service = self.clone();
+                if matches!(
+                    self.db(server, move |db| Ok(db.heartbeat(
+                        &token,
+                        lease_ms,
+                        service.now()
+                    )?))
+                    .await?,
+                    Fenced::Stale
+                ) {
+                    return Ok::<_, anyhow::Error>(());
+                }
+            }
+        };
+        let work = async {
+            tokio::pin!(run, renew);
+            let grace = duration(server, QUEUE_SHUTDOWN_WAIT_MS);
+            tokio::select! {
+                biased;
+                result = &mut run => result,
+                () = cancel.cancelled() => {
+                    tokio::time::timeout(grace, &mut run)
+                        .await
+                        .unwrap_or(Ok(Some(RunOutcome::Cancelled)))
+                }
+                result = &mut renew => {
+                    result?;
+                    cancel.cancel();
+                    tokio::time::timeout(grace, &mut run).await.ok().transpose()?;
+                    Ok(None)
                 }
             }
         };
@@ -363,6 +400,10 @@ impl QueueService {
         let Some(outcome) = outcome else {
             return Ok(());
         };
+        if let Some(active) = lock(&self.0.active).get_mut(&(lease.id.clone(), lease.claim)) {
+            active.settling = true;
+        }
+        let interrupted = cancel.is_cancelled();
         let now = self.now();
         self.db(server, move |db| {
             match outcome {
@@ -372,8 +413,11 @@ impl QueueService {
                 RunOutcome::Failed(error) => {
                     db.finish(&lease, Outcome::Failed(error), now)?;
                 }
-                RunOutcome::Cancelled => {
+                RunOutcome::Cancelled if interrupted => {
                     db.release(&lease, now)?;
+                }
+                RunOutcome::Cancelled => {
+                    db.finish(&lease, Outcome::Cancelled, now)?;
                 }
             }
             Ok(())
@@ -384,34 +428,42 @@ impl QueueService {
     pub async fn shutdown(&self, server: &HerdrMcpServer) {
         self.0.root.cancel();
         self.0.tracker.close();
-        if tokio::time::timeout(
-            duration(server, QUEUE_SHUTDOWN_WAIT_MS),
-            self.0.tracker.wait(),
-        )
-        .await
-        .is_err()
+        let grace = duration(server, QUEUE_SHUTDOWN_WAIT_MS);
+        if tokio::time::timeout(grace, self.0.tracker.wait())
+            .await
+            .is_ok()
         {
-            let runtime = self.0.clone();
-            let now = self.now();
-            if let Err(error) = self
-                .db(server, move |db| {
-                    // Snapshot under the DB lock so every claim in progress at shutdown is visible.
-                    let leases: Vec<_> = lock(&runtime.active)
-                        .keys()
-                        .map(|(id, claim)| Lease {
-                            id: id.clone(),
-                            claim: *claim,
-                        })
-                        .collect();
-                    for lease in leases {
-                        db.release(&lease, now)?;
-                    }
-                    Ok(())
-                })
-                .await
-            {
-                tracing::error!("releasing queue leases at shutdown: {error:#}");
+            return;
+        }
+
+        let runtime = self.0.clone();
+        let now = self.now();
+        let release = self.0.tracker.spawn_blocking(move || {
+            // A blocked store already prevents immediate recovery. Let these
+            // leases expire instead of queueing another task behind its mutex.
+            let Ok(mut db) = runtime.db.try_lock() else {
+                anyhow::bail!("queue database busy during shutdown");
+            };
+            if let Some(db) = db.as_mut() {
+                let leases: Vec<_> = lock(&runtime.active)
+                    .iter()
+                    .filter(|(_, worker)| !worker.settling)
+                    .map(|((id, claim), _)| Lease {
+                        id: id.clone(),
+                        claim: *claim,
+                    })
+                    .collect();
+                for lease in leases {
+                    db.release(&lease, now)?;
+                }
             }
+            Ok::<_, anyhow::Error>(())
+        });
+        match tokio::time::timeout(grace.max(Duration::from_millis(1)), release).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(error))) => tracing::warn!("releasing queue leases at shutdown: {error:#}"),
+            Ok(Err(error)) => tracing::warn!("queue shutdown release task: {error}"),
+            Err(_) => tracing::warn!("queue shutdown release timed out"),
         }
     }
 }
