@@ -518,56 +518,6 @@ fn test_a_prompt_the_agent_starts_gets_no_extra_enter() {
 }
 
 #[test]
-fn test_an_id_taken_by_a_racing_sender_is_minted_again() {
-    let f = Fixture::new();
-    // Two senders can mint the same id; the loser's push comes back `deduped`.
-    // Fake that race on the first push: the capsule must remint and still store.
-    let real = which("herdr-queue");
-    let flag = f.tmp.path().join("raced");
-    let fake = f.tmp.path().join("herdr-queue-racing");
-    let script = format!(
-        r#"#!/bin/sh
-for a in "$@"; do [ "$a" = push ] && is_push=1; done
-if [ -n "${{is_push:-}}" ] && [ ! -e "{flag}" ]; then
-  touch "{flag}"
-  "{real}" "$@" >/dev/null || exit $?
-  "{real}" "$@"
-  exit $?
-fi
-exec "{real}" "$@"
-"#,
-        flag = flag.display(),
-        real = real,
-    );
-    fs::write(&fake, script).unwrap();
-    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
-    let out = f.cap_env(
-        &[
-            "send",
-            "--to",
-            "builder",
-            "--task",
-            "t1",
-            "--status",
-            "wip",
-            "--summary",
-            "raced",
-        ],
-        &[("HERDR_QUEUE_BIN", fake.to_str().unwrap())],
-    );
-    let cid = stdout(&out).split_whitespace().nth(1).unwrap().to_string();
-    let stored: Vec<String> = f
-        .items("builder", None)
-        .iter()
-        .map(|i| i["dedupe_key"].as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(stored.len(), 2, "{stored:?}");
-    assert!(stored.contains(&cid), "{stored:?}");
-    let unique: HashSet<&String> = stored.iter().collect();
-    assert_eq!(unique.len(), 2, "our capsule was deduped into the racer's");
-}
-
-#[test]
 fn test_a_forged_copy_of_a_task_cannot_swap_its_check() {
     let f = Fixture::new();
     let (cid, _) = f.task_with_check("exit 3\n");

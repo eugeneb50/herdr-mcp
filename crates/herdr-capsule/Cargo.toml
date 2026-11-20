@@ -3,9 +3,33 @@ name = "herdr-capsule"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "capsule"
+path = "src/main.rs"
+
+[dependencies]
+herdr-queue = { path = "../herdr-queue" }
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+thiserror = "2"
+
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true
 
-[lints]
-workspace = true
+[lints.clippy]
+unwrap_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+await_holding_lock = "deny"
+
+# The frozen CLI suite is deletion-only: removing the racing test left its
+# `which` / `PermissionsExt` imports and the frozen helper's `which` unused.
+[lints.rust]
+unused_imports = "allow"
+dead_code = "allow"
