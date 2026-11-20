@@ -2,13 +2,15 @@ use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use herdr_mcp_api::{
     ApiError, Uuid,
-    recipe::QueueListQuery,
+    recipe::{QueueItemResponse, QueueListQuery},
     settings::{Settings, UI_QUEUES_POLL_MS},
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-use super::queue_rows::{actions, item_id, selected_row};
+use super::queue_rows::{
+    Cause, Group, bridge_unreachable, buttons, item_id, refetch, selected_row,
+};
 use crate::{client::use_api, components::Route};
 
 const ITEM_LIMIT: u32 = 100;
@@ -43,6 +45,25 @@ struct QueueRow {
     dead: i64,
 }
 
+/// Read on mount and queue change, never on a poll tick.
+struct Meta {
+    settings_error: Option<String>,
+    depths: Result<BTreeMap<String, QueueRow>, String>,
+}
+
+/// What a poll tick re-reads: filtered items and the open item's history.
+type Tick = (
+    Result<Vec<Value>, String>,
+    Option<Result<QueueItemResponse, String>>,
+);
+
+fn restart(cause: Cause, mut meta: Resource<Meta>, mut tick: Resource<Tick>) {
+    if refetch(cause) == Group::All {
+        meta.restart();
+    }
+    tick.restart();
+}
+
 #[component]
 pub(super) fn Queues(
     queue: Option<String>,
@@ -50,19 +71,19 @@ pub(super) fn Queues(
     mut status: Signal<String>,
 ) -> Element {
     let api = use_api();
-    let mut interval = use_signal(|| Settings::default().number(UI_QUEUES_POLL_MS) as u32);
+    let interval = use_signal(|| Settings::default().number(UI_QUEUES_POLL_MS) as u32);
     let mut action_pending = use_signal(|| false);
     let mut action_message = use_signal(|| None::<Result<String, String>>);
 
-    let list_queue = queue.clone();
-    let detail_item = item.clone();
-    let mut snapshot = use_resource(move || {
+    // The component is keyed on queue and item, so either change remounts it
+    // and re-reads this metadata; the poll only restarts `tick`.
+    let meta = use_resource(move || {
         let client = api();
-        let queue = list_queue.clone();
-        let item = detail_item.clone();
-        let filter = status();
+        let mut interval = interval;
         async move {
-            if let Ok(settings) = client.settings().await {
+            let settings = client.settings().await;
+            let settings_error = settings.as_ref().err().map(ToString::to_string);
+            if let Ok(settings) = &settings {
                 interval.set(settings.overrides().number(UI_QUEUES_POLL_MS) as u32);
             }
             let depths = async {
@@ -100,28 +121,52 @@ pub(super) fn Queues(
                 }
                 Ok::<_, ApiError>(queues)
             }
-            .await;
+            .await
+            .map_err(|error| error.to_string());
+            Meta {
+                settings_error,
+                depths,
+            }
+        }
+    });
+
+    let tick_queue = queue.clone();
+    let detail_item = item.clone();
+    let tick = use_resource(move || {
+        let client = api();
+        let queue = tick_queue.clone();
+        let item = detail_item.clone();
+        let filter = status();
+        async move {
             let rows = match queue {
-                Some(queue) => {
-                    client
-                        .queue_list(
-                            &queue,
-                            &QueueListQuery {
-                                status: (!filter.is_empty()).then_some(filter),
-                                limit: Some(ITEM_LIMIT),
-                            },
-                        )
-                        .await
-                }
+                Some(queue) => client
+                    .queue_list(
+                        &queue,
+                        &QueueListQuery {
+                            status: (!filter.is_empty()).then_some(filter),
+                            limit: Some(ITEM_LIMIT),
+                        },
+                    )
+                    .await
+                    .map_err(|error| error.to_string()),
                 None => Ok(Vec::new()),
             };
             let detail = match item {
-                Some(id) => Some(client.queue_item(&id).await),
+                Some(id) => Some(
+                    client
+                        .queue_item(&id)
+                        .await
+                        .map_err(|error| error.to_string()),
+                ),
                 None => None,
             };
-            (depths, rows, detail)
+            (rows, detail)
         }
     });
+
+    let refresh = move |cause: Cause| restart(cause, meta, tick);
+    let poll_refresh = refresh;
+    let action_refresh = refresh;
     use_future(move || async move {
         loop {
             let delay = *interval.peek();
@@ -129,8 +174,8 @@ pub(super) fn Queues(
             let visible = web_sys::window()
                 .and_then(|w| w.document())
                 .is_some_and(|doc| !doc.hidden());
-            if visible && !snapshot.pending() && !*action_pending.peek() {
-                snapshot.restart();
+            if visible && !tick.pending() && !*action_pending.peek() {
+                poll_refresh(Cause::Poll);
             }
         }
     });
@@ -142,6 +187,7 @@ pub(super) fn Queues(
         action_pending.set(true);
         action_message.set(None);
         let client = api();
+        let refresh = action_refresh;
         spawn(async move {
             let reply = if retry {
                 client.queue_retry(&id).await
@@ -154,40 +200,71 @@ pub(super) fn Queues(
                     .map_err(|error| error.to_string()),
             ));
             action_pending.set(false);
-            snapshot.restart();
+            refresh(Cause::Action);
         });
     };
 
-    let data = snapshot.read();
-    let Some((depths, rows, detail)) = data.as_ref() else {
+    let metadata = meta.read();
+    let snapshot = tick.read();
+    let Some(metadata) = metadata.as_ref() else {
         return rsx! { p { role: "status", "Loading queues…" } };
     };
+    let Some((rows, detail)) = snapshot.as_ref() else {
+        return rsx! { p { role: "status", "Loading queues…" } };
+    };
+    let mut attempts: Vec<Option<Result<(), String>>> = vec![
+        Some(
+            metadata
+                .settings_error
+                .as_ref()
+                .map_or(Ok(()), |error| Err(error.clone())),
+        ),
+        Some(metadata.depths.as_ref().map(|_| ()).map_err(Clone::clone)),
+        Some(rows.as_ref().map(|_| ()).map_err(Clone::clone)),
+    ];
+    if let Some(detail) = detail {
+        attempts.push(Some(detail.as_ref().map(|_| ()).map_err(Clone::clone)));
+    }
+    if bridge_unreachable(&attempts) {
+        return rsx! {
+            div { class: "btn-row",
+                button { class: "btn", onclick: move |_| refresh(Cause::Manual), "Refresh queues" }
+            }
+            p { role: "alert", class: "send-error", "Bridge unreachable — no queue data could be read." }
+        };
+    }
     let active_row = rows
         .as_ref()
         .ok()
         .and_then(|rows| selected_row(rows, item.as_deref()));
     rsx! {
         div { class: "btn-row",
-            button { class: "btn", onclick: move |_| snapshot.restart(), "Refresh queues" }
-            if *snapshot.state().read() == UseResourceState::Pending {
+            button { class: "btn", onclick: move |_| refresh(Cause::Manual), "Refresh queues" }
+            if *meta.state().read() == UseResourceState::Pending
+                || *tick.state().read() == UseResourceState::Pending
+            {
                 span { class: "muted", role: "status", "Refreshing…" }
             }
         }
-        if let Ok(queues) = depths {
-            div { class: "card",
-                if queues.is_empty() { p { "No collection queues configured." } }
-                for (id, row) in queues {
-                    Link {
-                        key: "{id}",
-                        class: if queue.as_deref() == Some(id) { "tree-item tree-sel" } else { "tree-item" },
-                        to: queue_link(Some(id.clone()), None),
-                        span { class: "tree-name", "{row.name}" }
-                        span { class: "muted", "{row.queued} queued · {row.running} running · {row.dead} dead" }
+        if let Some(error) = &metadata.settings_error {
+            p { role: "alert", class: "send-error", "Settings read failed. {error}" }
+        }
+        match &metadata.depths {
+            Ok(queues) => rsx! {
+                div { class: "card",
+                    if queues.is_empty() { p { "No collection queues configured." } }
+                    for (id, row) in queues {
+                        Link {
+                            key: "{id}",
+                            class: if queue.as_deref() == Some(id) { "tree-item tree-sel" } else { "tree-item" },
+                            to: queue_link(Some(id.clone()), None),
+                            span { class: "tree-name", "{row.name}" }
+                            span { class: "muted", "{row.queued} queued · {row.running} running · {row.dead} dead" }
+                        }
                     }
                 }
-            }
-        } else if let Err(error) = depths {
-            p { role: "alert", class: "send-error", "Queue counts unavailable. {error}" }
+            },
+            Err(error) => rsx! { p { role: "alert", class: "send-error", "Queue counts unavailable. {error}" } },
         }
         if let Some(queue) = &queue {
             div { class: "runs",
@@ -251,20 +328,23 @@ fn ItemHistory(
 ) -> Element {
     let id = item_id(&item).unwrap_or_default().to_owned();
     let status = field(&item, "status");
-    let (cancel, retry) = actions(status);
+    let run = item["run_id"]
+        .as_str()
+        .and_then(|id| Uuid::parse_str(id).ok());
+    let controls = buttons(status, &id, run);
     let retry_id = id.clone();
     let cancel_id = id.clone();
     rsx! {
         h2 { "Item {id}" }
         p { "{status} · attempt " {item["attempts"].to_string()} " of " {item["max_attempts"].to_string()} }
         div { class: "btn-row",
-            if cancel && !id.is_empty() {
+            if controls.cancel {
                 button { class: "btn", disabled: pending, onclick: move |_| on_action.call((cancel_id.clone(), false)), "Cancel item" }
             }
-            if retry && !id.is_empty() {
+            if controls.retry {
                 button { class: "btn", disabled: pending, onclick: move |_| on_action.call((retry_id.clone(), true)), "Retry item" }
             }
-            if let Some(run) = item["run_id"].as_str().and_then(|id| Uuid::parse_str(id).ok()) {
+            if let Some(run) = controls.run {
                 Link { to: super::run_link(run), "Open run" }
             }
         }
