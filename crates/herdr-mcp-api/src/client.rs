@@ -413,6 +413,48 @@ impl ApiClient {
             .await
     }
 
+    pub async fn queue_depths(&self) -> Result<Vec<Value>, ApiError> {
+        self.get(&["api", "queues"]).await
+    }
+
+    pub async fn queue_push(
+        &self,
+        queue: &str,
+        req: &recipe::QueuePushRequest,
+        wait: bool,
+    ) -> Result<recipe::QueuePushResponse, ApiError> {
+        Self::json(
+            self.request(Method::POST, &["api", "queues", queue, "items"])
+                .query(&[("wait", wait)])
+                .json(req),
+        )
+        .await
+    }
+
+    pub async fn queue_list(
+        &self,
+        queue: &str,
+        query: &recipe::QueueListQuery,
+    ) -> Result<Vec<Value>, ApiError> {
+        Self::json(
+            self.request(Method::GET, &["api", "queues", queue, "items"])
+                .query(query),
+        )
+        .await
+    }
+
+    pub async fn queue_item(&self, id: &str) -> Result<recipe::QueueItemResponse, ApiError> {
+        self.get(&["api", "queues", "items", id]).await
+    }
+
+    pub async fn queue_cancel(&self, id: &str) -> Result<Value, ApiError> {
+        Self::json(self.request(Method::POST, &["api", "queues", "items", id, "cancel"])).await
+    }
+
+    pub async fn queue_retry(&self, id: &str) -> Result<Value, ApiError> {
+        Self::json(self.request(Method::POST, &["api", "queues", "items", id, "retry"])).await
+    }
+
     // ── runs ───────────────────────────────────────────────────────────
 
     /// `POST /api/runs` — start a run in the background; returns its first record.

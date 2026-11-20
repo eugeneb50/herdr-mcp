@@ -7,6 +7,7 @@ pub mod outbound;
 pub mod panes;
 pub mod persistence;
 pub mod profiles;
+pub mod queues;
 pub mod runs;
 pub mod scheduler;
 pub mod security;

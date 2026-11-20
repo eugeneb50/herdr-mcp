@@ -1378,6 +1378,7 @@ mod tests {
             category: None,
             triggers: Vec::new(),
             trail: Default::default(),
+            queue: None,
         };
         let (mut a, mut b, mut c) = (recipe(1), recipe(2), recipe(3));
         let gone = Uuid::from_u128(4);

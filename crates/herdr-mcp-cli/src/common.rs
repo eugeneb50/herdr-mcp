@@ -130,6 +130,7 @@ fn spawn_daemon(
             data_dir.display()
         );
         triggers::spawn(server.clone(), herdr_client.clone());
+        server.queues.start(&server);
         // Runs past their retention since the last start (keep-days ages
         // runs of collections that no longer run).
         herdr_mcp_server::runs::prune_all(&server).await;
@@ -162,11 +163,12 @@ pub async fn run_serve(config: &Config) -> Result<()> {
         tracing::info!("Shutting down");
     } else {
         tracing::info!("Starting herdr-mcp MCP server");
-        let service = server.serve(stdio()).await?;
+        let service = server.clone().serve(stdio()).await?;
         tracing::info!("herdr-mcp server initialized, waiting for requests");
         service.waiting().await?;
         tracing::info!("herdr-mcp server stopped");
     }
+    server.queues.shutdown(&server).await;
     tokio::task::spawn_blocking(herdr_mcp_server::clipboard::release).await?;
     Ok(())
 }

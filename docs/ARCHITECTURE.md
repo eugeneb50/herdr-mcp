@@ -500,6 +500,12 @@ runs form one group) beyond the newest `keep_runs`, or older than
 `runs.keep-runs` / `runs.keep-days` / `runs.snapshot-lines` settings; 0 means
 no limit, and the defaults keep every run (snapshot: 40 lines).
 
+**Queue panics.** Release builds use `panic = "abort"`, so a panic crashes
+the daemon. When a daemon next holds the lock, its reaper recovers expired
+leases, requeuing items with attempts left and marking exhausted items dead.
+In unwinding builds, an executor panic fails its item and the supervisor
+restarts a panicked queue actor within the configured restart limit.
+
 **Checks** (`flow::Check`): a check resolves `path` like a `{{ path }}`
 placeholder in the run's scope and compares it with `value`: `eq` / `ne`
 (a string and a number compare by text), `lt` / `gt` (numbers), `contains`

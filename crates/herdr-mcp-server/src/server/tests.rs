@@ -1087,6 +1087,7 @@ esac
             category: None,
             triggers: Vec::new(),
             trail: Default::default(),
+            queue: None,
         })
         .await
         .unwrap();
@@ -1117,6 +1118,43 @@ esac
         vec![trigger]
     );
     assert_eq!(api.list_recipes().await.unwrap().len(), 1);
+    use herdr_mcp_api::recipe::{QueueConfig, QueuePushKind, QueuePushRequest};
+    api.update_recipe(
+        created.id,
+        &herdr_mcp_api::UpdateRecipeRequest {
+            queue: Some(QueueConfig::default()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let queue = created.id.to_string();
+    let push = QueuePushRequest {
+        payload: serde_json::Map::new(),
+        dedupe_key: Some("build-once".into()),
+        requester: None,
+    };
+    let first = api.queue_push(&queue, &push, false).await.unwrap();
+    assert_eq!(first.pushed, QueuePushKind::New);
+    let duplicate = api.queue_push(&queue, &push, false).await.unwrap();
+    assert_eq!(duplicate.pushed, QueuePushKind::Deduped);
+    let id = first.item["id"].as_str().unwrap();
+    assert_eq!(duplicate.item["id"], id);
+    assert_eq!(api.queue_depths().await.unwrap()[0]["queued"], 1);
+    assert_eq!(
+        api.queue_list(&queue, &Default::default())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(api.queue_item(id).await.unwrap().events.len(), 2);
+    assert_eq!(api.queue_cancel(id).await.unwrap()["status"], "cancelled");
+    assert_eq!(api.queue_retry(id).await.unwrap()["status"], "queued");
+    assert!(matches!(
+        api.queue_item("missing").await,
+        Err(ApiError::Status { status: 404, .. })
+    ));
     api.delete_recipe(created.id).await.unwrap();
     assert!(api.list_recipes().await.unwrap().is_empty());
 

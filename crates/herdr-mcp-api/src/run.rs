@@ -155,6 +155,9 @@ pub enum RunOrigin {
         node: String,
     },
     Schedule,
+    Queue {
+        item: String,
+    },
     /// A herdr event matched one of the recipe's triggers.
     Trigger {
         event: String,
@@ -182,6 +185,7 @@ impl std::fmt::Display for RunOrigin {
             Self::Run { run_id: Some(id) } => write!(f, "a node of run {id}"),
             Self::Run { run_id: None } => f.write_str("another run"),
             Self::Node { run_id, node } => write!(f, "node {node} of run {run_id}"),
+            Self::Queue { item } => write!(f, "queue item {item}"),
             Self::Schedule => f.write_str("a schedule"),
             Self::Trigger { event } => write!(f, "herdr event {event}"),
         }

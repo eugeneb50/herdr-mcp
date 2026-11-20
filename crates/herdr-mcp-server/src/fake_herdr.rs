@@ -213,6 +213,7 @@ mod tests {
                     .unwrap(),
             }],
             trail: Default::default(),
+            queue: None,
         };
         persistence.save_recipe(&recipe).await.unwrap();
 

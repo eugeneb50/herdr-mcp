@@ -457,6 +457,8 @@ pub struct RecipeSaveParams {
     /// (`snapshot_lines`); unset fields use the global `runs.*` settings,
     /// 0 means no limit / no snapshot.
     pub trail: Option<herdr_mcp_api::RunTrail>,
+    /// Enables the queue and sets per-collection overrides.
+    pub queue: Option<herdr_mcp_api::recipe::QueueConfig>,
 }
 
 /// Parameters for `recipe_run`.

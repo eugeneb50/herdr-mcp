@@ -1,4 +1,5 @@
 use herdr_mcp_api::settings;
+use rmcp::schemars;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::wrapper::Parameters,
@@ -15,7 +16,7 @@ use crate::templates as tmpl;
 use crate::variables::{Recipe, ScheduledRecipe};
 use herdr_mcp_api::{CreateRecipeRequest, UpdateRecipeRequest};
 use regex::Regex;
-mod engine;
+pub(crate) mod engine;
 mod http;
 mod params;
 #[cfg(test)]
@@ -55,6 +56,7 @@ pub struct HerdrMcpServer {
     pub herdr_client: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<HerdrClient>>>,
     /// Control channels of in-flight recipe runs (state is in their records).
     pub runs: crate::runs::Runs,
+    pub queues: crate::queues::QueueService,
     /// In-process MCP client session to this server, opened on first use by
     /// [`dispatch_tool`]: the bridge and run engine call tools through it.
     pub tool_session: ToolSession,
@@ -166,8 +168,102 @@ fn category(name: &str) -> rmcp::model::Meta {
     meta
 }
 
+#[derive(serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct QueuePushParams {
+    queue: String,
+    payload: serde_json::Map<String, serde_json::Value>,
+    dedupe_key: Option<String>,
+    requester: Option<String>,
+    wait: Option<bool>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct QueueListParams {
+    queue: Option<String>,
+    status: Option<String>,
+    limit: Option<u32>,
+}
+
+#[derive(serde::Deserialize, rmcp::schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct QueueIdParams {
+    id: String,
+}
+
+fn queue_result<T: serde::Serialize>(
+    result: anyhow::Result<T>,
+) -> Result<CallToolResult, McpError> {
+    let value = result.map_err(|error| user_err(error.to_string()))?;
+    Ok(CallToolResult::success(vec![
+        Content::json(value).map_err(to_mcp_err)?,
+    ]))
+}
+
 #[tool_router]
 impl HerdrMcpServer {
+    #[tool(meta = category("Queues"), description = "Push an item to a collection's queue. Set wait to return the terminal item.")]
+    async fn queue_push(
+        &self,
+        Parameters(p): Parameters<QueuePushParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use herdr_mcp_api::recipe::QueuePushRequest;
+        queue_result(
+            self.queues
+                .push_request(
+                    self,
+                    &p.queue,
+                    QueuePushRequest {
+                        payload: p.payload,
+                        dedupe_key: p.dedupe_key,
+                        requester: p.requester,
+                    },
+                    p.wait.unwrap_or_default(),
+                    p.timeout_ms,
+                )
+                .await,
+        )
+    }
+
+    #[tool(meta = category("Queues"), description = "List queue items, optionally filtered by collection and status.")]
+    async fn queue_list(
+        &self,
+        Parameters(p): Parameters<QueueListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        queue_result(self.queues.list(self, p.queue, p.status, p.limit).await)
+    }
+
+    #[tool(meta = category("Queues"), description = "Read a queue item and its event history.")]
+    async fn queue_item(
+        &self,
+        Parameters(p): Parameters<QueueIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        queue_result(
+            self.queues
+                .item(self, &p.id)
+                .await
+                .map(|(item, events)| herdr_mcp_api::recipe::QueueItemResponse { item, events }),
+        )
+    }
+
+    #[tool(meta = category("Queues"), description = "Cancel a queued or running item.")]
+    async fn queue_cancel(
+        &self,
+        Parameters(p): Parameters<QueueIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        queue_result(self.queues.cancel(self, p.id).await)
+    }
+
+    #[tool(meta = category("Queues"), description = "Retry a dead or cancelled queue item.")]
+    async fn queue_retry(
+        &self,
+        Parameters(p): Parameters<QueueIdParams>,
+    ) -> Result<CallToolResult, McpError> {
+        queue_result(self.queues.retry(self, p.id).await)
+    }
+
     pub fn new(persistence: Persistence, registry: AgentRegistry) -> Self {
         let config = herdr_mcp_core::Config {
             data_dir: persistence.data_dir().to_path_buf(),
@@ -191,6 +287,7 @@ impl HerdrMcpServer {
             category: req.category,
             triggers: req.triggers,
             trail: req.trail,
+            queue: req.queue,
         };
         self.persistence.save_recipe(&recipe).await?;
         Ok(recipe)
@@ -225,6 +322,9 @@ impl HerdrMcpServer {
         }
         if let Some(trail) = req.trail {
             recipe.trail = trail;
+        }
+        if let Some(queue) = req.queue {
+            recipe.queue = Some(queue);
         }
         recipe.updated_at = chrono::Utc::now();
         self.persistence.save_recipe(&recipe).await?;
@@ -331,6 +431,7 @@ impl HerdrMcpServer {
             config_edit: std::sync::Arc::default(),
             herdr_client: std::sync::Arc::default(),
             runs: crate::runs::Runs::default(),
+            queues: crate::queues::QueueService::default(),
             tool_session: ToolSession::default(),
             security: std::sync::Arc::new(crate::security::Security::new(config)),
             listed: std::sync::Arc::new(config.mcp.tools.clone()),
@@ -1600,6 +1701,7 @@ impl HerdrMcpServer {
             triggers,
             category,
             trail,
+            queue,
         }): Parameters<RecipeSaveParams>,
     ) -> Result<CallToolResult, McpError> {
         let flow = flow.or_else(|| steps.map(herdr_mcp_api::Flow::chain));
@@ -1614,6 +1716,7 @@ impl HerdrMcpServer {
                     triggers,
                     category,
                     trail,
+                    queue,
                 };
                 self.update_recipe(id, req)
                     .await
@@ -1632,6 +1735,7 @@ impl HerdrMcpServer {
                     category,
                     triggers: triggers.unwrap_or_default(),
                     trail: trail.unwrap_or_default(),
+                    queue,
                 };
                 self.create_recipe(req).await.map_err(to_mcp_err)?
             }
