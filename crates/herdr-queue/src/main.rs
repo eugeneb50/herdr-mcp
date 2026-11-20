@@ -1,5 +1,7 @@
 use clap::{Args, Parser, Subcommand};
-use herdr_queue::{Fenced, Item, ItemStatus, Lease, Outcome, Push, Pushed, Queue, QueueError};
+use herdr_queue::{
+    AuditError, Fenced, Item, ItemStatus, Lease, Outcome, Push, Pushed, Queue, QueueError,
+};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::{
@@ -114,6 +116,14 @@ enum Command {
         #[arg(long, allow_hyphen_values = true)]
         finished_before_ms: i64,
     },
+    Audit {
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long)]
+        driver: Option<PathBuf>,
+        #[arg(long)]
+        max: Option<usize>,
+    },
 }
 
 #[derive(Serialize)]
@@ -154,6 +164,13 @@ fn default_db() -> Result<PathBuf, io::Error> {
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
+    // Audit writes its own text output to stdout; it must not go through the
+    // JSON writer below, or the output won't be byte-identical to Python.
+    if let Command::Audit { db, driver, max } = &cli.command {
+        herdr_queue::run_audit(db, *max, driver.as_deref())?;
+        return Ok(());
+    }
+
     let db = match cli.db {
         Some(path) => path,
         None => default_db()?,
@@ -239,6 +256,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         Command::Retry { id } => json!(CliItem::from(&db.retry(&id, now)?)),
         Command::Depth => json!(db.depths()?),
         Command::Prune { finished_before_ms } => json!(db.prune(finished_before_ms)?),
+        Command::Audit { .. } => unreachable!("audit handled before match"),
     };
     let mut stdout = io::stdout().lock();
     serde_json::to_writer(&mut stdout, &output)?;
@@ -250,6 +268,12 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            if matches!(
+                error.downcast_ref::<AuditError>(),
+                Some(AuditError::Violations(_))
+            ) {
+                return ExitCode::FAILURE;
+            }
             eprintln!("herdr-queue: {error}");
             if matches!(
                 error.downcast_ref::<QueueError>(),
