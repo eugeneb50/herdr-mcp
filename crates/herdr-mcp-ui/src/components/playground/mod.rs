@@ -8,56 +8,89 @@ pub mod events;
 pub mod flow;
 pub mod forms;
 pub mod map;
+mod queue_rows;
+mod queues;
 pub mod recipes;
 pub mod runs;
 
+use super::Route;
 use dioxus::prelude::*;
+use herdr_mcp_api::Uuid;
 
 use collections::Collections;
 use events::HerdrEvents;
 use map::Map;
-use runs::Runs;
+use queues::Queues;
+use runs::{LinkedRun, Runs};
 
 use super::pane_options::LivePaneOptions;
 
-#[component]
-pub fn Playground() -> Element {
-    let mut tab: Signal<&str> = use_signal(|| "collections");
+pub(super) fn playground_tab(tab: &str) -> Route {
+    Route::Playground {
+        tab: (tab != "collections").then(|| tab.to_owned()),
+        queue: None,
+        item: None,
+        run: None,
+    }
+}
 
+pub(super) fn run_link(id: Uuid) -> Route {
+    Route::Playground {
+        tab: Some("runs".into()),
+        queue: None,
+        item: None,
+        run: Some(id.to_string()),
+    }
+}
+
+#[component]
+pub fn Playground(
+    tab: Option<String>,
+    queue: Option<String>,
+    item: Option<String>,
+    run: Option<String>,
+) -> Element {
+    let status = use_signal(String::new);
+    let queue_key = format!("{queue:?}/{item:?}");
+    let tab = tab.as_deref().unwrap_or("collections");
+    let run = run.and_then(|id| id.parse::<Uuid>().ok());
     rsx! {
+
         section { class: "page-head",
             div { class: "eyebrow", "Playground" }
-            h1 { class: "page-title", "Collections" }
-            p { class: "lede",
-                "A collection is a flow: requests (tool and herdr API calls) wired to branches, loops, waits and other collections. Send one request, or run the flow and watch it; extract parts of a result into variables for the next node."
+            h1 { class: "page-title",
+                match tab {
+                    "queues" => "Queues",
+                    "runs" => "Runs",
+                    "map" => "Map",
+                    "events" => "herdr Events",
+                    _ => "Collections",
+                }
+            }
+            if tab == "collections" {
+                p { class: "lede",
+                    "A collection is a flow: requests (tool and herdr API calls) wired to branches, loops, waits and other collections. Send one request, or run the flow and watch it; extract parts of a result into variables for the next node."
+                }
             }
         }
         LivePaneOptions {}
         div { class: "tabs",
-            button {
-                class: if *tab.read() == "collections" { "tab tab-active" } else { "tab" },
-                onclick: move |_| tab.set("collections"),
-                "Collections"
-            }
-            button {
-                class: if *tab.read() == "runs" { "tab tab-active" } else { "tab" },
-                onclick: move |_| tab.set("runs"),
-                "Runs"
-            }
-            button {
-                class: if *tab.read() == "map" { "tab tab-active" } else { "tab" },
-                onclick: move |_| tab.set("map"),
-                "Map"
-            }
-            button {
-                class: if *tab.read() == "events" { "tab tab-active" } else { "tab" },
-                onclick: move |_| tab.set("events"),
-                "herdr Events"
+            for (id, title) in [("collections", "Collections"), ("runs", "Runs"), ("queues", "Queues"), ("map", "Map"), ("events", "herdr Events")] {
+                Link {
+                    key: "{id}",
+                    class: if tab == id { "tab tab-active" } else { "tab" },
+                    to: playground_tab(id),
+                    "{title}"
+                }
             }
         }
-        match *tab.read() {
+        match tab {
             "events" => rsx! { HerdrEvents {} },
-            "runs" => rsx! { Runs {} },
+            "runs" => match run {
+                Some(id) => rsx! { LinkedRun { key: "{id}", id } },
+                None => rsx! { Runs {} },
+            },
+            "queues" => rsx! { Queues { key: "{queue_key}", queue, item, status } },
             "map" => rsx! { Map {} },
             _ => rsx! { Collections {} },
         }

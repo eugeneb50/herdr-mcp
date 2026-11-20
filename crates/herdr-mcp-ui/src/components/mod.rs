@@ -24,8 +24,8 @@ pub enum Route {
         Home {},
         #[route("/overview")]
         Overview {},
-        #[route("/playground")]
-        Playground {},
+        #[route("/playground?:tab&:queue&:item&:run")]
+        Playground { tab: Option<String>, queue: Option<String>, item: Option<String>, run: Option<String> },
         #[route("/variables")]
         Variables {},
         #[route("/settings")]
@@ -47,7 +47,7 @@ fn Shell() -> Element {
             nav { class: "nav",
                 Link { class: "nav-link", to: Route::Home {}, "Home" }
                 Link { class: "nav-link", to: Route::Overview {}, "Overview" }
-                Link { class: "nav-link", to: Route::Playground {}, "Playground" }
+                Link { class: "nav-link", to: playground::playground_tab("collections"), "Playground" }
                 Link { class: "nav-link", to: Route::Variables {}, "Variables" }
                 Link { class: "nav-link", to: Route::Settings {}, "Settings" }
             }

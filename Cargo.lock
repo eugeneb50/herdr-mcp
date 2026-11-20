@@ -1989,6 +1989,7 @@ dependencies = [
 name = "herdr-mcp-ui"
 version = "0.2.0"
 dependencies = [
+ "chrono",
  "dioxus",
  "gloo-timers",
  "herdr-mcp-api",
