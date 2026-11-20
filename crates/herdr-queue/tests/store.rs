@@ -1,3 +1,8 @@
+#![allow(
+    clippy::panic,
+    reason = "test helpers fail the test on an unexpected variant"
+)]
+
 use herdr_queue::{Fenced, Item, ItemStatus::*, Lease, Outcome, Push, Pushed, Queue, QueueError};
 use serde_json::{Value, json};
 use tempfile::TempDir;
