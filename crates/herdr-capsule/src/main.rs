@@ -205,7 +205,12 @@ fn announce(cfg: &CapsuleConfig, cap: &Capsule, herdr: &CliHerdr) -> AppResult<O
         Err(e) => Ok(Some(format!("trigger event failed: {e}"))),
     }
 }
-fn send_impl(spec: SendSpec, cfg: &CapsuleConfig, skin: &str) -> AppResult<String> {
+fn send_impl(
+    spec: SendSpec,
+    cfg: &CapsuleConfig,
+    skin: &str,
+    g: &fmt::Glyphs,
+) -> AppResult<String> {
     let re = spec.re.as_deref().unwrap_or("");
     let reply_to = spec.reply_to.as_deref().unwrap_or("");
     let reply_check = spec.reply_check.as_deref().unwrap_or("");
@@ -345,7 +350,7 @@ fn send_impl(spec: SendSpec, cfg: &CapsuleConfig, skin: &str) -> AppResult<Strin
     } else {
         eprintln!("capsule: not in a herdr pane: no trigger event");
     }
-    Ok(line(&cap, skin))
+    Ok(line(&cap, skin, g))
 }
 fn send_time(cfg: &CapsuleConfig) -> AppResult<String> {
     if let Some(now) = &cfg.now {
@@ -363,15 +368,25 @@ fn send_time(cfg: &CapsuleConfig) -> AppResult<String> {
 fn item_capsule(item: &herdr_queue::Item) -> Option<Capsule> {
     Capsule::from_value(&Value::Object(item.payload.clone())).ok()
 }
-fn view(store: &mut Store, to: &str, reference: &str, skin: &str, mode: &str) -> AppResult<()> {
+fn view(
+    store: &mut Store,
+    to: &str,
+    reference: &str,
+    skin: &str,
+    mode: &str,
+    g: &fmt::Glyphs,
+) -> AppResult<()> {
     let queue = queue_name(to)?;
     let item = store.find_q(&queue, reference)?;
     let cap = item_capsule(&item)
         .ok_or_else(|| err(format!("item {reference} in {queue} has no payload")))?;
     match mode {
-        "line" => println!("{}", line(&cap, skin)),
-        "card" => println!("{}", card(&cap, skin)),
-        _ => println!("{}", herdr_capsule::capsule::json_pretty(&cap)?),
+        "line" => println!("{}", line(&cap, skin, g)),
+        "card" => println!("{}", card(&cap, skin, g)),
+        _ => println!(
+            "{}",
+            herdr_capsule::capsule::json_pretty(&Value::Object(item.payload.clone()))?
+        ),
     }
     Ok(())
 }
@@ -385,7 +400,7 @@ fn consume(
     }
     Ok(())
 }
-fn list_cmd(store: &mut Store, to: &str, all: bool, skin: &str) -> AppResult<()> {
+fn list_cmd(store: &mut Store, to: &str, all: bool, skin: &str, g: &fmt::Glyphs) -> AppResult<()> {
     let queue = queue_name(to)?;
     let status = if all {
         None
@@ -396,18 +411,24 @@ fn list_cmd(store: &mut Store, to: &str, all: bool, skin: &str) -> AppResult<()>
     items.sort_by(|a, b| a.id.cmp(&b.id));
     for item in items {
         if let Some(cap) = item_capsule(&item) {
-            println!("{}", line(&cap, skin));
+            println!("{}", line(&cap, skin, g));
         }
     }
     Ok(())
 }
-fn wait_cmd(store: &mut Store, to: &str, timeout: i64, skin: &str) -> AppResult<()> {
+fn wait_cmd(
+    store: &mut Store,
+    to: &str,
+    timeout: i64,
+    skin: &str,
+    g: &fmt::Glyphs,
+) -> AppResult<()> {
     let queue = queue_name(to)?;
     let end = std::time::Instant::now() + Duration::from_secs(timeout.max(0) as u64);
     while std::time::Instant::now() < end {
         if let Some((item, lease)) = store.claim(&queue, 60_000)? {
             if let Some(cap) = item_capsule(&item) {
-                println!("{}", line(&cap, skin));
+                println!("{}", line(&cap, skin, g));
             }
             consume(store, &item, &lease)?;
             return Ok(());
@@ -416,13 +437,19 @@ fn wait_cmd(store: &mut Store, to: &str, timeout: i64, skin: &str) -> AppResult<
     }
     Err(err(format!("nothing in {queue} after {timeout}s")))
 }
-fn watch_cmd(store: &mut Store, to: &str, max: Option<usize>, skin: &str) -> AppResult<()> {
+fn watch_cmd(
+    store: &mut Store,
+    to: &str,
+    max: Option<usize>,
+    skin: &str,
+    g: &fmt::Glyphs,
+) -> AppResult<()> {
     let queue = queue_name(to)?;
     let mut seen = 0usize;
     while max.is_none_or(|n| seen < n) {
         if let Some((item, lease)) = store.claim(&queue, 60_000)? {
             if let Some(cap) = item_capsule(&item) {
-                println!("{}", line(&cap, skin));
+                println!("{}", line(&cap, skin, g));
                 std::io::stdout().flush()?;
             }
             consume(store, &item, &lease)?;
@@ -581,7 +608,7 @@ fn rollup_cmd(
         rollup: Some(idx.display().to_string()),
         ..SendSpec::default()
     };
-    println!("{}", send_impl(spec, cfg, "cap")?);
+    println!("{}", send_impl(spec, cfg, "cap", &fmt::Glyphs::defaults())?);
     Ok(())
 }
 fn verify_cmd(store: &mut Store, to: &str, reference: &str) -> AppResult<()> {
@@ -648,10 +675,11 @@ fn verify_cmd(store: &mut Store, to: &str, reference: &str) -> AppResult<()> {
 fn real_main() -> AppResult<()> {
     let cli = Cli::parse();
     let cfg = CapsuleConfig::from_env()?;
+    let g = fmt::Glyphs::load(&cfg.home);
     match cli.cmd {
         Commands::Send(spec) => {
             let skin = skin_of(spec.skin.as_deref(), &cfg)?;
-            println!("{}", send_impl(spec, &cfg, &skin)?);
+            println!("{}", send_impl(spec, &cfg, &skin, &g)?);
         }
         Commands::Brief {
             to,
@@ -679,7 +707,7 @@ fn real_main() -> AppResult<()> {
         }
         Commands::Howto => print!("{}", fmt::howto(&cfg.exe)),
         Commands::Whoami => println!("{}", callsign(&cfg)?),
-        Commands::Legend => println!("{}", fmt::legend(&cfg.home)),
+        Commands::Legend => println!("{}", fmt::legend(&cfg.home, &g)),
         Commands::Line {
             reference,
             to,
@@ -687,7 +715,7 @@ fn real_main() -> AppResult<()> {
         } => {
             let skin = skin_of(skin.as_deref(), &cfg)?;
             let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
-            view(&mut store, &to, &reference, &skin, "line")?;
+            view(&mut store, &to, &reference, &skin, "line", &g)?;
         }
         Commands::Card {
             reference,
@@ -696,26 +724,26 @@ fn real_main() -> AppResult<()> {
         } => {
             let skin = skin_of(skin.as_deref(), &cfg)?;
             let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
-            view(&mut store, &to, &reference, &skin, "card")?;
+            view(&mut store, &to, &reference, &skin, "card", &g)?;
         }
         Commands::Json { reference, to } => {
             let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
-            view(&mut store, &to, &reference, "cap", "json")?;
+            view(&mut store, &to, &reference, "cap", "json", &g)?;
         }
         Commands::List { to, all, skin } => {
             let skin = skin_of(skin.as_deref(), &cfg)?;
             let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
-            list_cmd(&mut store, &to, all, &skin)?;
+            list_cmd(&mut store, &to, all, &skin, &g)?;
         }
         Commands::Wait { to, timeout, skin } => {
             let skin = skin_of(skin.as_deref(), &cfg)?;
             let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
-            wait_cmd(&mut store, &to, timeout, &skin)?;
+            wait_cmd(&mut store, &to, timeout, &skin, &g)?;
         }
         Commands::Watch { to, max, skin } => {
             let skin = skin_of(skin.as_deref(), &cfg)?;
             let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
-            watch_cmd(&mut store, &to, max, &skin)?;
+            watch_cmd(&mut store, &to, max, &skin, &g)?;
         }
         Commands::Deliver { once, interval } => deliver_cmd(&cfg, once, interval)?,
         Commands::Rollup { to, task, send } => {

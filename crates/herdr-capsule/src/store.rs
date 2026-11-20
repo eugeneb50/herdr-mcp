@@ -169,7 +169,7 @@ mod tests {
         let keys = s.all_keys().unwrap();
         assert_eq!(keys.len(), 2);
         assert!(keys.contains(&"tirumo".to_string()));
-        assert!(line(&c, "cap").starts_with("CAP tirumo"));
+        assert!(line(&c, "cap", &crate::format::Glyphs::defaults()).starts_with("CAP tirumo"));
     }
     #[test]
     fn racing_minter_gives_up() {

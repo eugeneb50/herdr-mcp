@@ -70,11 +70,11 @@ impl Capsule {
     }
 }
 /// Python's `json.dumps(c, indent=1, ensure_ascii=False)` — one space, not two.
-pub fn json_pretty(cap: &Capsule) -> Result<String> {
+pub fn json_pretty(value: &serde_json::Value) -> Result<String> {
     let mut buf = Vec::new();
     let fmt = serde_json::ser::PrettyFormatter::with_indent(b" ");
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, fmt);
-    serde::Serialize::serialize(cap, &mut ser)?;
+    serde::Serialize::serialize(value, &mut ser)?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 pub fn normalize_summary(s: &str) -> String {

@@ -1,14 +1,18 @@
-use crate::{Capsule, CapsuleConfig};
-use serde_json::Value;
-use std::{collections::BTreeMap, fs, path::Path};
+use crate::{Capsule, CapsuleConfig, KINDS, STATUSES, capsule::json_pretty};
+use serde_json::{Map, Value};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 const SAFE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-";
 const DEFAULT_SIGIL: &str = "\u{13c9}";
 const DEFAULT_STATUS: [(&str, &str); 5] = [
-    ("done", "\u{13e0}"),
-    ("fail", "\u{13e1}"),
-    ("block", "\u{13e2}"),
-    ("wip", "\u{13e3}"),
-    ("task", "\u{13e4}"),
+    ("done", "\u{13a0}"),
+    ("fail", "\u{13a1}"),
+    ("block", "\u{13a2}"),
+    ("wip", "\u{13a3}"),
+    ("task", "\u{13a4}"),
 ];
 const DEFAULT_KIND: [(&str, &str); 9] = [
     ("file", "\u{13d0}"),
@@ -21,6 +25,72 @@ const DEFAULT_KIND: [(&str, &str); 9] = [
     ("url", "\u{13d7}"),
     ("capsules", "\u{13da}"),
 ];
+/// The local key: meaning -> glyph. Python's `glyphs()` writes the defaults
+/// once, then reads the file every time, merged over those defaults.
+pub struct Glyphs {
+    pub sigil: String,
+    pub status: BTreeMap<String, String>,
+    pub kind: BTreeMap<String, String>,
+}
+impl Glyphs {
+    pub fn defaults() -> Self {
+        Self {
+            sigil: DEFAULT_SIGIL.to_string(),
+            status: DEFAULT_STATUS
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            kind: DEFAULT_KIND
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+    pub fn load(home: &Path) -> Self {
+        let mut g = Self::defaults();
+        let path = home.join("glyphs.json");
+        if !path.exists() {
+            let mut root = Map::new();
+            root.insert("sigil".into(), Value::String(g.sigil.clone()));
+            for (key, map) in [("status", &g.status), ("kind", &g.kind)] {
+                root.insert(
+                    key.into(),
+                    Value::Object(
+                        map.iter()
+                            .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                            .collect(),
+                    ),
+                );
+            }
+            if let Ok(text) = json_pretty(&Value::Object(root)) {
+                let _ = fs::write(&path, format!("{text}\n"));
+            }
+            return g;
+        }
+        let Ok(text) = fs::read_to_string(&path) else {
+            return g;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            return g;
+        };
+        if let Some(s) = value.get("sigil").and_then(Value::as_str) {
+            g.sigil = s.to_string();
+        }
+        for (section, map) in [("status", &mut g.status), ("kind", &mut g.kind)] {
+            if let Some(obj) = value.get(section).and_then(Value::as_object) {
+                for (k, v) in obj {
+                    if let Some(s) = v.as_str() {
+                        map.insert(k.clone(), s.to_string());
+                    }
+                }
+            }
+        }
+        g
+    }
+    fn lookup<'a>(map: &'a BTreeMap<String, String>, key: &str) -> Option<&'a str> {
+        map.get(key).map(String::as_str)
+    }
+}
 pub fn shlex_quote(s: &str) -> String {
     if !s.is_empty() && s.chars().all(|c| SAFE.contains(c)) {
         return s.to_string();
@@ -34,7 +104,7 @@ fn check_mark(c: &Capsule) -> String {
         Some(k) => format!(" chk:{}", k.exit),
     }
 }
-pub fn head(c: &Capsule, skin: &str) -> String {
+pub fn head(c: &Capsule, skin: &str, g: &Glyphs) -> String {
     let re =
         c.re.as_deref()
             .filter(|s| !s.is_empty())
@@ -43,12 +113,10 @@ pub fn head(c: &Capsule, skin: &str) -> String {
     let (sigil, status, quote) = match skin {
         "raw" => (">".to_string(), c.status.clone(), ""),
         "glyph" => (
-            DEFAULT_SIGIL.to_string(),
-            DEFAULT_STATUS
-                .iter()
-                .find(|(k, _)| *k == c.status)
-                .map(|(_, v)| v.to_string())
-                .unwrap_or_else(|| c.status.clone()),
+            g.sigil.clone(),
+            Glyphs::lookup(&g.status, &c.status)
+                .unwrap_or(&c.status)
+                .to_string(),
             "",
         ),
         _ => ("CAP".to_string(), c.status.clone(), "\""),
@@ -62,21 +130,17 @@ pub fn head(c: &Capsule, skin: &str) -> String {
         c.summary
     )
 }
-fn kmark(kind: &str, skin: &str) -> String {
+fn kmark(kind: &str, skin: &str, g: &Glyphs) -> String {
     if skin == "glyph" {
-        DEFAULT_KIND
-            .iter()
-            .find(|(k, _)| *k == kind)
-            .map(|(_, v)| v.to_string())
-            .unwrap_or_else(|| kind.to_string())
+        Glyphs::lookup(&g.kind, kind).unwrap_or(kind).to_string()
     } else {
         kind.to_string()
     }
 }
-pub fn line(c: &Capsule, skin: &str) -> String {
-    let mut parts = vec![head(c, skin)];
+pub fn line(c: &Capsule, skin: &str, g: &Glyphs) -> String {
+    let mut parts = vec![head(c, skin, g)];
     for a in &c.artifacts {
-        parts.push(format!("{}:{}", kmark(&a.kind, skin), a.reference));
+        parts.push(format!("{}:{}", kmark(&a.kind, skin, g), a.reference));
     }
     parts.join(" ")
 }
@@ -142,8 +206,8 @@ fn digest(c: &Capsule) -> Vec<String> {
     ));
     out
 }
-pub fn card(c: &Capsule, skin: &str) -> String {
-    let mut out = vec![head(c, skin)];
+pub fn card(c: &Capsule, skin: &str, g: &Glyphs) -> String {
+    let mut out = vec![head(c, skin, g)];
     for a in &c.artifacts {
         let mut extra = Vec::new();
         if let Some(s) = &a.size {
@@ -153,7 +217,7 @@ pub fn card(c: &Capsule, skin: &str) -> String {
             extra.push(n.clone());
         }
         let suffix = extra.join(" ");
-        let rendered = format!("  {}:{} {suffix}", kmark(&a.kind, skin), a.reference);
+        let rendered = format!("  {}:{} {suffix}", kmark(&a.kind, skin, g), a.reference);
         out.push(rendered.trim_end().to_string());
     }
     if let Some(check) = &c.check
@@ -170,7 +234,7 @@ pub fn card(c: &Capsule, skin: &str) -> String {
     out.join("\n")
 }
 pub fn delivery_text(c: &Capsule, cfg: &CapsuleConfig) -> String {
-    let rendered = line(c, "raw");
+    let rendered = line(c, "raw", &Glyphs::defaults());
     let raw = rendered.strip_prefix("> ").unwrap_or(&rendered);
     let head = format!("Capsule {} for you: {}", c.id, raw);
     let q = shlex_quote;
@@ -258,27 +322,19 @@ pub fn short_brief(exe: &str, to: &str, task: &str, check: &str) -> String {
 pub fn howto(exe: &str) -> String {
     include_str!("howto.md").replace("{exe}", exe)
 }
-fn vget<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
-    v.get(k).and_then(Value::as_str)
-}
-pub fn legend(home: &Path) -> String {
-    let path = home.join("glyphs.json");
-    let key: Value = fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
-    let sigil = vget(&key, "sigil").unwrap_or(DEFAULT_SIGIL);
-    let row = |sec: &str, defs: &[(&str, &str)]| {
+pub fn legend(home: &Path, g: &Glyphs) -> String {
+    let row = |defs: &[(&str, &str)], map: &BTreeMap<String, String>| {
         defs.iter()
-            .map(|(k, d)| format!("{} {k}", key.get(sec).and_then(|s| vget(s, k)).unwrap_or(d)))
+            .map(|(k, d)| format!("{} {k}", map.get(*k).map(String::as_str).unwrap_or(d)))
             .collect::<Vec<_>>()
             .join("  ")
     };
     format!(
-        "{sigil}  capsule   ({})\nstatus:  {}\nkind:    {}",
-        path.display(),
-        row("status", &DEFAULT_STATUS),
-        row("kind", &DEFAULT_KIND)
+        "{}  capsule   ({})\nstatus:  {}\nkind:    {}",
+        g.sigil,
+        home.join("glyphs.json").display(),
+        row(&DEFAULT_STATUS, &g.status),
+        row(&DEFAULT_KIND, &g.kind)
     )
 }
 #[cfg(test)]
@@ -305,10 +361,13 @@ mod tests {
     #[test]
     fn cap_and_raw_lines_have_the_same_field_order() {
         assert_eq!(
-            head(&cap(), "cap"),
+            head(&cap(), "cap", &Glyphs::defaults()),
             "CAP rotisu t1 task tohitu \"build it\""
         );
-        assert_eq!(head(&cap(), "raw"), "> rotisu t1 task tohitu build it");
+        assert_eq!(
+            head(&cap(), "raw", &Glyphs::defaults()),
+            "> rotisu t1 task tohitu build it"
+        );
     }
     #[test]
     fn brief_fills_every_placeholder() {
@@ -334,9 +393,10 @@ mod tests {
         let key = r#"{"sigil":"S","status":{"done":"D"},"kind":{"file":"F"}}"#;
         let p = d.path().join("glyphs.json");
         fs::write(&p, key).unwrap();
-        let s: Vec<_> = legend(d.path()).lines().map(str::to_string).collect();
+        let g = Glyphs::load(d.path());
+        let s: Vec<_> = legend(d.path(), &g).lines().map(str::to_string).collect();
         assert_eq!(s[0], format!("S  capsule   ({})", p.display()));
-        assert_eq!(s[1], "status:  D done  Ꮱ fail  Ꮲ block  Ꮳ wip  Ꮴ task");
+        assert_eq!(s[1], "status:  D done  Ꭱ fail  Ꭲ block  Ꭳ wip  Ꭴ task");
         assert!(s[2].contains("F file") && s[2].ends_with("Ꮪ capsules"));
     }
 }
