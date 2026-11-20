@@ -187,6 +187,7 @@ pub const QUEUE_DEFAULT_LEASE_MS: &str = "queues.default-lease-ms";
 pub const QUEUE_REAP_EVERY_MS: &str = "queues.reap-every-ms";
 pub const QUEUE_TICK_MS: &str = "queues.tick-ms";
 pub const QUEUE_SUPERVISOR_MAX_RESTARTS: &str = "queues.supervisor-max-restarts";
+pub const UI_QUEUES_POLL_MS: &str = "ui.queues-poll-ms";
 pub const QUEUE_SHUTDOWN_WAIT_MS: &str = "queues.shutdown-wait-ms";
 
 /// Every setting, in display order.
@@ -406,6 +407,14 @@ pub const SPECS: &[Spec] = &[
         10_000,
         0,
         600_000,
+    ),
+    ms(
+        UI_QUEUES_POLL_MS,
+        "queue panel refresh interval",
+        "How often the visible web Queues tab refreshes queue items and their history.",
+        2_000,
+        500,
+        60_000,
     ),
     keys(
         "keys.tab-next",
@@ -867,6 +876,7 @@ mod tests {
             QUEUE_TICK_MS,
             QUEUE_SUPERVISOR_MAX_RESTARTS,
             QUEUE_SHUTDOWN_WAIT_MS,
+            UI_QUEUES_POLL_MS,
         ] {
             assert!(spec(key).is_some(), "{key}");
         }

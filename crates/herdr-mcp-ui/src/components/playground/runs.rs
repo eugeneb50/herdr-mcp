@@ -188,6 +188,39 @@ pub fn Runs() -> Element {
     }
 }
 
+#[component]
+pub(super) fn LinkedRun(id: Uuid) -> Element {
+    let api = use_api();
+    let seen = use_run_events();
+    use_context_provider(|| seen);
+    let mut run = use_signal(|| None);
+    let navigator = use_navigator();
+    use_future(move || async move {
+        let mut read = None;
+        loop {
+            changed(seen, &mut read).await;
+            run.set(Some(api().get_run(id).await));
+        }
+    });
+    let value = run.read();
+    rsx! {
+        Link { to: super::playground_tab("runs"), "All runs" }
+        match value.as_ref() {
+            None => rsx! { p { role: "status", "Loading run…" } },
+            Some(Err(error)) => rsx! { p { role: "alert", "Run unavailable. {error}" } },
+            Some(Ok(record)) => rsx! {
+                RunDetail {
+                    run: record.clone(),
+                    child_runs: Vec::new(),
+                    on_open: move |next: Uuid| {
+                        navigator.push(super::run_link(next));
+                    },
+                }
+            },
+        }
+    }
+}
+
 /// `child_runs`: the runs this one started (run nodes, `recipe_run` calls); `on_open` picks one, or the parent.
 #[component]
 fn RunDetail(
