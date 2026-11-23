@@ -112,6 +112,7 @@ enum Command {
         id: String,
     },
     Depth,
+    Consumers,
     Prune {
         #[arg(long, allow_hyphen_values = true)]
         finished_before_ms: i64,
@@ -255,6 +256,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         Command::Cancel { id } => json!(CliItem::from(&db.cancel(&id, now)?)),
         Command::Retry { id } => json!(CliItem::from(&db.retry(&id, now)?)),
         Command::Depth => json!(db.depths()?),
+        Command::Consumers => json!(db.consumers()?),
         Command::Prune { finished_before_ms } => json!(db.prune(finished_before_ms)?),
         Command::Audit { .. } => unreachable!("audit handled before match"),
     };

@@ -1,5 +1,6 @@
 use crate::{
-    Fenced, Item, ItemStatus, Lease, Outcome, Push, Pushed, QueueDepth, QueueError, QueueEvent,
+    Consumer, ConsumerRow, Fenced, Item, ItemStatus, Lease, Outcome, Push, Pushed, QueueDepth,
+    QueueError, QueueEvent,
 };
 use rusqlite::{
     Connection, OptionalExtension, Params, Row, Transaction, TransactionBehavior, params,
@@ -16,7 +17,12 @@ use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, QueueError>;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+// Keep released rows so a later acquisition can never reuse a fencing token.
+const RELEASED_CONSUMER: i64 = i64::MIN;
+const FIND_REPLY: &str = "SELECT * FROM queue_items
+             WHERE json_extract(payload,'$.re') = ?1 AND json_extract(payload,'$.delivery') = ?2
+             ORDER BY enqueued_at, rowid LIMIT 1";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Queue {
@@ -39,13 +45,15 @@ impl Queue {
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.pragma_update(None, "foreign_keys", true)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        match tx.pragma_query_value(None, "user_version", |row| row.get(0))? {
-            0 => {
-                tx.execute_batch(include_str!("schema.sql"))?;
-                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            }
-            SCHEMA_VERSION => {}
+        let version = tx.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
+        match version {
+            0 => tx.execute_batch(include_str!("schema.sql"))?,
+            1 | SCHEMA_VERSION => {}
             version => return Err(QueueError::UnsupportedSchema { version }),
+        }
+        if version < SCHEMA_VERSION {
+            tx.execute_batch(include_str!("schema-v2.sql"))?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.commit()?;
         let started = Instant::now();
@@ -144,33 +152,135 @@ impl Queue {
     ) -> Result<Option<(Item, Lease)>> {
         validate_name(queue)?;
         let until = lease_until(lease_ms, now_ms).ok_or(QueueError::InvalidLease)?;
+        self.write(|tx| claim_item(tx, queue, until, now_ms, excluded))
+    }
+
+    pub fn claim_consumer(
+        &mut self,
+        queue: &str,
+        owner: &str,
+        lease_ms: u64,
+        now_ms: i64,
+    ) -> Result<Option<Consumer>> {
+        validate_name(queue)?;
+        let until = lease_until(lease_ms, now_ms).ok_or(QueueError::InvalidLease)?;
         self.write(|tx| {
-            let item = tx
+            Ok(tx
                 .query_row(
-                    "UPDATE queue_items SET status = 'running', attempts = attempts + 1, claims = claims + 1,
-                 lease_until = ?2, started_at = ?3
-                 WHERE id = (SELECT id FROM queue_items WHERE queue = ?1
-                             AND status = 'queued' AND id NOT IN (SELECT value FROM json_each(?4))
-                             ORDER BY seq LIMIT 1)
-                 RETURNING *",
-                    params![queue, until, now_ms, json!(excluded).to_string()],
-                    read_item,
+                    "INSERT INTO queue_consumers(queue, owner, token, until) VALUES (?1, ?2, 1, ?3)
+                 ON CONFLICT(queue) DO UPDATE SET owner = excluded.owner, until = excluded.until,
+                 token = queue_consumers.token + (queue_consumers.until <= ?4)
+                 WHERE queue_consumers.until <= ?4 OR queue_consumers.owner = excluded.owner
+                 RETURNING queue, owner, token",
+                    params![queue, owner, until, now_ms],
+                    read_consumer,
+                )
+                .optional()?)
+        })
+    }
+
+    pub fn claim_owned(
+        &mut self,
+        consumer: &Consumer,
+        lease_ms: u64,
+        now_ms: i64,
+    ) -> Result<Fenced<Option<(Item, Lease)>>> {
+        let until = lease_until(lease_ms, now_ms).ok_or(QueueError::InvalidLease)?;
+        self.write(|tx| {
+            let owns = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM queue_consumers
+                  WHERE queue = ?1 AND owner = ?2 AND token = ?3 AND until > ?4)",
+                params![consumer.queue, consumer.owner, consumer.token, now_ms],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !owns {
+                return Ok(Fenced::Stale);
+            }
+            Ok(Fenced::Applied(claim_item(
+                tx,
+                &consumer.queue,
+                until,
+                now_ms,
+                &[],
+            )?))
+        })
+    }
+
+    pub fn release_consumer(&mut self, consumer: &Consumer) -> Result<Fenced<()>> {
+        self.write(|tx| {
+            let changed = tx.execute(
+                "UPDATE queue_consumers SET until = ?4
+                 WHERE queue = ?1 AND owner = ?2 AND token = ?3 AND until <> ?4",
+                params![
+                    consumer.queue,
+                    consumer.owner,
+                    consumer.token,
+                    RELEASED_CONSUMER
+                ],
+            )?;
+            if changed == 0 {
+                return Ok(Fenced::Stale);
+            }
+            Ok(Fenced::Applied(()))
+        })
+    }
+
+    pub fn consumers(&self) -> Result<Vec<ConsumerRow>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT queue, owner, token, until FROM queue_consumers ORDER BY queue")?;
+        Ok(stmt
+            .query_map([], |row| {
+                Ok(ConsumerRow {
+                    consumer: read_consumer(row)?,
+                    until: row.get("until")?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_delivery(
+        &mut self,
+        lease: &Lease,
+        delivery: &str,
+        data: Value,
+        now_ms: i64,
+    ) -> Result<Fenced<()>> {
+        self.write(|tx| {
+            let attempt = tx
+                .query_row(
+                    "UPDATE queue_items SET delivery = ?3
+                 WHERE id = ?1 AND status = 'running' AND claims = ?2
+                 RETURNING attempts",
+                    params![lease.id, lease.claim, delivery],
+                    |row| row.get::<_, u32>(0),
                 )
                 .optional()?;
-            let Some(item) = item else { return Ok(None) };
+            let Some(attempt) = attempt else {
+                return Ok(Fenced::Stale);
+            };
+            let Value::Object(mut data) = data else {
+                return Err(QueueError::InvalidDeliveryData);
+            };
+            data.insert("attempt".into(), json!(attempt));
+            data.insert("claim".into(), json!(lease.claim));
+            data.insert("delivery".into(), json!(delivery));
             event(
                 tx,
-                &item.id,
+                &lease.id,
                 now_ms,
-                "claimed",
-                Some(&json!({"attempt": item.attempts, "claim": item.claims})),
+                "delivered",
+                Some(&Value::Object(data)),
             )?;
-            let lease = Lease {
-                id: item.id.clone(),
-                claim: item.claims,
-            };
-            Ok(Some((item, lease)))
+            Ok(Fenced::Applied(()))
         })
+    }
+
+    pub fn find_reply(&self, re: &str, delivery: &str) -> Result<Option<Item>> {
+        Ok(self
+            .conn
+            .query_row(FIND_REPLY, params![re, delivery], read_item)
+            .optional()?)
     }
 
     pub fn set_run(&mut self, lease: &Lease, run_id: &str, now_ms: i64) -> Result<Fenced<()>> {
@@ -234,6 +344,15 @@ impl Queue {
                     Some(json!({"attempt": attempt, "claim": lease.claim})),
                 ),
                 Outcome::Cancelled => (ItemStatus::Cancelled, "cancelled", None, None),
+                Outcome::Dead(error) => {
+                    let data = json!({"attempt": attempt, "claim": lease.claim, "error": error});
+                    (
+                        ItemStatus::Dead,
+                        "dead",
+                        Some(Value::String(error)),
+                        Some(data),
+                    )
+                }
                 Outcome::Failed(error) => {
                     event(
                         tx,
@@ -455,6 +574,48 @@ impl Queue {
     }
 }
 
+fn read_consumer(row: &Row<'_>) -> rusqlite::Result<Consumer> {
+    Ok(Consumer {
+        queue: row.get("queue")?,
+        owner: row.get("owner")?,
+        token: row.get("token")?,
+    })
+}
+
+fn claim_item(
+    tx: &Transaction<'_>,
+    queue: &str,
+    until: i64,
+    now_ms: i64,
+    excluded: &[&str],
+) -> Result<Option<(Item, Lease)>> {
+    let item = tx
+        .query_row(
+            "UPDATE queue_items SET status = 'running', attempts = attempts + 1, claims = claims + 1,
+         lease_until = ?2, started_at = ?3
+         WHERE id = (SELECT id FROM queue_items WHERE queue = ?1
+                     AND status = 'queued' AND id NOT IN (SELECT value FROM json_each(?4))
+                     ORDER BY seq LIMIT 1)
+         RETURNING *",
+            params![queue, until, now_ms, json!(excluded).to_string()],
+            read_item,
+        )
+        .optional()?;
+    let Some(item) = item else { return Ok(None) };
+    event(
+        tx,
+        &item.id,
+        now_ms,
+        "claimed",
+        Some(&json!({"attempt": item.attempts, "claim": item.claims})),
+    )?;
+    let lease = Lease {
+        id: item.id.clone(),
+        claim: item.claims,
+    };
+    Ok(Some((item, lease)))
+}
+
 fn end_run(
     tx: &Transaction<'_>,
     id: &str,
@@ -544,6 +705,7 @@ fn read_item(row: &Row<'_>) -> rusqlite::Result<Item> {
         requester: row.get("requester")?,
         waiters: decode(row, "waiters", &row.get::<_, String>("waiters")?)?,
         run_id: row.get("run_id")?,
+        delivery: row.get("delivery")?,
         lease_until: row.get("lease_until")?,
         result: decode_optional(row, "result")?,
         enqueued_at: row.get("enqueued_at")?,
@@ -596,5 +758,24 @@ fn validate_name(queue: &str) -> Result<()> {
         Ok(())
     } else {
         Err(QueueError::InvalidQueueName(queue.into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reply_lookup_uses_expression_index() {
+        let queue = Queue::open(":memory:").unwrap();
+        let plan: String = queue
+            .conn
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {FIND_REPLY}"),
+                ["message", "delivery"],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("USING INDEX queue_items_reply"), "{plan}");
     }
 }

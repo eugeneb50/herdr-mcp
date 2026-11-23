@@ -49,6 +49,7 @@ pub struct Item {
     pub requester: Option<String>,
     pub waiters: Vec<String>,
     pub run_id: Option<String>,
+    pub delivery: Option<String>,
     pub lease_until: Option<i64>,
     pub result: Option<Value>,
     pub enqueued_at: i64,
@@ -99,6 +100,7 @@ pub enum Outcome {
     Done(Value),
     Cancelled,
     Failed(String),
+    Dead(String),
 }
 
 #[derive(Debug)]
@@ -108,6 +110,7 @@ pub enum QueueError {
     InvalidQueueName(String),
     InvalidMaxAttempts,
     InvalidLease,
+    InvalidDeliveryData,
     NotFound(String),
     InvalidStatus { id: String, status: ItemStatus },
     DedupeConflict { id: String },
@@ -127,6 +130,7 @@ impl fmt::Display for QueueError {
             Self::InvalidLease => {
                 f.write_str("lease must be positive and fit in a Unix millisecond timestamp")
             }
+            Self::InvalidDeliveryData => f.write_str("delivery data must be a JSON object"),
             Self::NotFound(id) => write!(f, "no such item {id}"),
             Self::InvalidStatus { id, status } => write!(f, "item {id} is {}", status.as_str()),
             Self::DedupeConflict { id } => {
@@ -166,6 +170,22 @@ impl From<rusqlite::Error> for QueueError {
 pub struct Lease {
     pub id: String,
     pub claim: i64,
+}
+
+/// Fencing identity for one continuous period of mailbox ownership.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Consumer {
+    pub queue: String,
+    pub owner: String,
+    pub token: i64,
+}
+
+/// Stored mailbox lease, including its expiry in Unix milliseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConsumerRow {
+    #[serde(flatten)]
+    pub consumer: Consumer,
+    pub until: i64,
 }
 
 #[derive(Debug, PartialEq, Eq)]

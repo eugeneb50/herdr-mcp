@@ -7,5 +7,6 @@ mod types;
 pub use audit::{AuditError, run_audit};
 pub use store::Queue;
 pub use types::{
-    Fenced, Item, ItemStatus, Lease, Outcome, Push, Pushed, QueueDepth, QueueError, QueueEvent,
+    Consumer, ConsumerRow, Fenced, Item, ItemStatus, Lease, Outcome, Push, Pushed, QueueDepth,
+    QueueError, QueueEvent,
 };
