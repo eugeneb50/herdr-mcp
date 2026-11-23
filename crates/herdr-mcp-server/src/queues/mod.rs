@@ -1,3 +1,4 @@
+mod mail;
 mod worker;
 
 use crate::{HerdrMcpServer, Recipe, lock};
