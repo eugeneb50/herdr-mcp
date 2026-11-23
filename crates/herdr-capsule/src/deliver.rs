@@ -232,7 +232,7 @@ pub fn deliver_pass(cfg: &CapsuleConfig, store: &mut Store, herdr: &dyn Herdr) -
         let Ok(cap) = Capsule::from_value(&Value::Object(item.payload.clone())) else {
             continue;
         };
-        let (ok, msg) = herdr.prompt(&pane.pane_id, &delivery_text(&cap, cfg))?;
+        let (ok, msg) = herdr.prompt(&pane.pane_id, &delivery_text(&cap, cfg, None))?;
         if !ok {
             store.release(&lease)?;
             println!("deliver {} to {to}: {}", cap.id, msg.trim());

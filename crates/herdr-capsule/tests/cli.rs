@@ -727,3 +727,22 @@ fn the_read_command_in_a_delivery_finds_the_capsule_by_its_id() {
     let out = f.cap(&["line", &uuid[..8], "--to", "builder"]);
     assert!(stdout(&out).contains(&cid), "{}", stdout(&out));
 }
+
+#[test]
+fn a_reply_names_the_delivery_it_answers() {
+    // The postman types `send --re <task> --delivery <attempt>`; the reply
+    // must carry it so an answer to an older attempt can't close a newer one.
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    let out = f.reply(&cid, &["--delivery", "d-1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let reply = f
+        .items("lead", None)
+        .into_iter()
+        .find(|i| i["payload"]["re"] == cid)
+        .expect("reply in mail-lead");
+    assert_eq!(reply["payload"]["delivery"], "d-1");
+    let bare = f.run(&["send", "--to", "lead", "--task", "t", "--status", "wip",
+        "--summary", "x", "--delivery", "d-2"], &[]);
+    assert!(!bare.status.success(), "--delivery without --re must be refused");
+}

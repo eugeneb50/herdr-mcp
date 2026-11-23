@@ -25,6 +25,9 @@ pub struct Capsule {
     pub artifacts: Vec<Artifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub re: Option<String>,
+    /// The delivery attempt a reply answers (`--re X --delivery D`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

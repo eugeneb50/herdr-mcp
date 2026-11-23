@@ -233,7 +233,10 @@ pub fn card(c: &Capsule, skin: &str, g: &Glyphs) -> String {
     }
     out.join("\n")
 }
-pub fn delivery_text(c: &Capsule, cfg: &CapsuleConfig) -> String {
+/// What a postman types into the agent: the capsule, how to read it and,
+/// for a task, the one reply command (`delivery` = this attempt's id; the
+/// reply's check is the task's pinned one, resolved by `send`).
+pub fn delivery_text(c: &Capsule, cfg: &CapsuleConfig, delivery: Option<&str>) -> String {
     let rendered = line(c, "raw", &Glyphs::defaults());
     let raw = rendered.strip_prefix("> ").unwrap_or(&rendered);
     let head = format!("Capsule {} for you: {}", c.id, raw);
@@ -247,10 +250,8 @@ pub fn delivery_text(c: &Capsule, cfg: &CapsuleConfig) -> String {
     if c.status != "task" {
         return head + &read;
     }
-    let check = c
-        .reply_check
-        .as_deref()
-        .map(|x| format!(" --check {}", q(x)))
+    let delivery = delivery
+        .map(|d| format!(" --delivery {}", q(d)))
         .unwrap_or_default();
     let report = q(&format!(
         "file={}/{}/{}-report.md::report",
@@ -259,7 +260,7 @@ pub fn delivery_text(c: &Capsule, cfg: &CapsuleConfig) -> String {
         c.id
     ));
     let reply = format!(
-        " When done or stuck, reply with ONE command: {} send --re {} --to {} --task {} --status done|fail|block --summary \"<=120 chars\" --artifact {report}{check} ; then reply with its CAP line only and stop.",
+        " When done or stuck, reply with ONE command: {} send --re {}{delivery} --to {} --task {} --status done|fail|block --summary \"<=120 chars\" --artifact {report} ; then reply with its CAP line only and stop.",
         q(&cfg.exe),
         q(&c.id),
         q(c.reply_to.as_deref().unwrap_or("lead")),

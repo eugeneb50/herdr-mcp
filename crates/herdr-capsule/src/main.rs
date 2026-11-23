@@ -121,6 +121,9 @@ struct SendSpec {
     check: Option<String>,
     #[arg(long)]
     re: Option<String>,
+    /// The delivery this reply answers (from the delivery text).
+    #[arg(long, requires = "re")]
+    delivery: Option<String>,
     #[arg(long)]
     rollup: Option<String>,
     #[arg(long)]
@@ -215,6 +218,7 @@ fn send_impl(
     let reply_to = spec.reply_to.as_deref().unwrap_or("");
     let reply_check = spec.reply_check.as_deref().unwrap_or("");
     let check_arg = spec.check.as_deref().unwrap_or("");
+    let delivery = spec.delivery.as_deref().unwrap_or("");
     no_control_chars(
         &[
             ("summary", spec.summary.as_str()),
@@ -224,6 +228,7 @@ fn send_impl(
             ("reply_to", reply_to),
             ("reply_check", reply_check),
             ("check", check_arg),
+            ("delivery", delivery),
         ],
         &spec.artifact,
     )?;
@@ -327,6 +332,7 @@ fn send_impl(
         summary,
         artifacts: arts,
         re: spec.re.clone(),
+        delivery: spec.delivery.clone(),
         pane: cfg.pane.clone(),
         at: send_time(cfg)?,
         ..Capsule::default()
