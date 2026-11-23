@@ -478,7 +478,10 @@ pub fn set_setting_in_file(
                 let n = i64::try_from(*n).context("setting value too large")?;
                 tbl.insert(name, toml_edit::value(n));
             }
-            Some(Value::Keys(keys)) => {
+            Some(Value::Bool(b)) => {
+                tbl.insert(name, toml_edit::value(*b));
+            }
+            Some(Value::List(keys)) => {
                 let list: toml_edit::Array = keys.iter().map(String::as_str).collect();
                 tbl.insert(name, toml_edit::value(list));
             }
@@ -690,7 +693,7 @@ mod tests {
         let path = tmp.path().join("herdr-mcp.toml");
         std::fs::write(&path, "# mine\ndata-dir = \"./d\"\n").unwrap();
         set_setting_in_file(&path, PANE_EXEC_MS, Some(&Value::Number(9_000))).unwrap();
-        let keys = Value::Keys(vec!["alt+]".into(), "f6".into()]);
+        let keys = Value::List(vec!["alt+]".into(), "f6".into()]);
         set_setting_in_file(&path, "keys.tab-next", Some(&keys)).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.starts_with("# mine\ndata-dir = \"./d\"\n"), "{text}");
@@ -700,6 +703,19 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(s.number(PANE_EXEC_MS), 9_000);
         assert_eq!(s.value("keys.tab-next"), Some(keys));
+
+        use herdr_mcp_api::settings::{MAIL_ENABLED, MAIL_LABELS};
+        let labels = Value::List(vec!["flow-sh".into(), "pg-review".into()]);
+        set_setting_in_file(&path, MAIL_ENABLED, Some(&Value::Bool(true))).unwrap();
+        set_setting_in_file(&path, MAIL_LABELS, Some(&labels)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("enabled = true"), "{text}");
+        let (s, warnings) = toml::from_str::<Config>(&text).unwrap().settings();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(s.flag(MAIL_ENABLED));
+        assert_eq!(s.value(MAIL_LABELS), Some(labels));
+        set_setting_in_file(&path, MAIL_ENABLED, None).unwrap();
+        set_setting_in_file(&path, MAIL_LABELS, None).unwrap();
 
         set_setting_in_file(&path, PANE_EXEC_MS, None).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().contains("timeouts"));

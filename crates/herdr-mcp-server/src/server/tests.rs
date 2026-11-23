@@ -766,11 +766,11 @@ async fn settings_crud_over_http_with_known_good_fallback() {
         .unwrap();
     assert!(info(&r, PANE_EXEC_MS).overridden);
     assert_eq!(server.settings().number(PANE_EXEC_MS), 9_000);
-    let keys = Value::Keys(vec!["Alt+]".into()]);
+    let keys = Value::List(vec!["Alt+]".into()]);
     let r = api.set_setting("keys.tab-next", &keys).await.unwrap();
     assert_eq!(
         info(&r, "keys.tab-next").value,
-        Value::Keys(vec!["alt+]".into()])
+        Value::List(vec!["alt+]".into()])
     );
     let text = std::fs::read_to_string(&cfg).unwrap();
     assert!(text.contains("# keep me\n"), "{text}");
@@ -779,8 +779,8 @@ async fn settings_crud_over_http_with_known_good_fallback() {
     // Bad values are refused with the reason, and nothing changes.
     let bad = [
         (PANE_EXEC_MS, Value::Number(1)),
-        ("keys.tab-prev", Value::Keys(vec!["alt+]".into()])),
-        ("keys.quit", Value::Keys(vec!["q".into()])),
+        ("keys.tab-prev", Value::List(vec!["alt+]".into()])),
+        ("keys.quit", Value::List(vec!["q".into()])),
         ("timeouts.nope", Value::Number(5_000)),
     ];
     for (key, value) in bad {

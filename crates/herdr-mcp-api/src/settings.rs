@@ -22,20 +22,26 @@ pub enum Kind {
     Count,
     /// Key chords bound to a TUI action, e.g. `["alt+right", "ctrl+tab"]`.
     Keys,
+    /// On or off.
+    Bool,
+    /// Pane labels, e.g. `["flow-sh", "pg-review"]`; each names a mailbox
+    /// queue `mail-<label>`, so it follows the queue name grammar.
+    Labels,
 }
 
-/// A setting's value: a number for [`Kind::Millis`] / [`Kind::Count`], key
-/// chords for [`Kind::Keys`].
+/// A setting's value: a number for [`Kind::Millis`] / [`Kind::Count`], a
+/// flag for [`Kind::Bool`], a list for [`Kind::Keys`] / [`Kind::Labels`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Value {
     Number(u64),
-    Keys(Vec<String>),
+    Bool(bool),
+    List(Vec<String>),
 }
 
 impl Value {
     /// A value as typed in a Settings field: a whole number (`120_000`
-    /// works), or comma-separated key chords. Only the shape is checked
+    /// works), on/off, or a comma-separated list. Only the shape is checked
     /// here; [`Settings::set`] checks the rest.
     pub fn parse(kind: Kind, text: &str) -> Result<Self, String> {
         match kind {
@@ -45,7 +51,12 @@ impl Value {
                 .parse::<u64>()
                 .map(Self::Number)
                 .map_err(|_| format!("{:?} is not a whole number", text.trim())),
-            Kind::Keys => Ok(Self::Keys(
+            Kind::Bool => match text.trim().to_ascii_lowercase().as_str() {
+                "true" | "on" | "yes" | "1" => Ok(Self::Bool(true)),
+                "false" | "off" | "no" | "0" => Ok(Self::Bool(false)),
+                _ => Err(format!("{:?} is not on/off", text.trim())),
+            },
+            Kind::Keys | Kind::Labels => Ok(Self::List(
                 text.split(',')
                     .map(str::trim)
                     .filter(|k| !k.is_empty())
@@ -60,7 +71,8 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Number(n) => write!(f, "{n}"),
-            Self::Keys(k) => f.write_str(&k.join(", ")),
+            Self::Bool(b) => f.write_str(if *b { "on" } else { "off" }),
+            Self::List(k) => f.write_str(&k.join(", ")),
         }
     }
 }
@@ -69,14 +81,16 @@ impl fmt::Display for Value {
 #[derive(Debug, Clone, Copy)]
 pub enum DefaultValue {
     Number(u64),
-    Keys(&'static [&'static str]),
+    Bool(bool),
+    List(&'static [&'static str]),
 }
 
 impl DefaultValue {
     fn value(self) -> Value {
         match self {
             Self::Number(n) => Value::Number(n),
-            Self::Keys(k) => Value::Keys(k.iter().map(|s| (*s).to_string()).collect()),
+            Self::Bool(b) => Value::Bool(b),
+            Self::List(k) => Value::List(k.iter().map(|s| (*s).to_string()).collect()),
         }
     }
 }
@@ -149,10 +163,31 @@ const fn keys(
         label,
         help,
         kind: Kind::Keys,
-        default: DefaultValue::Keys(d),
+        default: DefaultValue::List(d),
         min: 0,
         max: 0,
         restart: false,
+    }
+}
+
+const fn flag(key: &'static str, label: &'static str, help: &'static str, d: bool) -> Spec {
+    Spec {
+        key,
+        label,
+        help,
+        kind: Kind::Bool,
+        default: DefaultValue::Bool(d),
+        min: 0,
+        max: 0,
+        restart: false,
+    }
+}
+
+const fn labels(key: &'static str, label: &'static str, help: &'static str) -> Spec {
+    Spec {
+        kind: Kind::Labels,
+        default: DefaultValue::List(&[]),
+        ..flag(key, label, help, false)
     }
 }
 
@@ -189,6 +224,11 @@ pub const QUEUE_TICK_MS: &str = "queues.tick-ms";
 pub const QUEUE_SUPERVISOR_MAX_RESTARTS: &str = "queues.supervisor-max-restarts";
 pub const UI_QUEUES_POLL_MS: &str = "ui.queues-poll-ms";
 pub const QUEUE_SHUTDOWN_WAIT_MS: &str = "queues.shutdown-wait-ms";
+pub const MAIL_ENABLED: &str = "mail.enabled";
+pub const MAIL_LABELS: &str = "mail.labels";
+pub const MAIL_REPLY_WAIT_MS: &str = "mail.reply-wait-ms";
+pub const MAIL_SUBMIT_CONFIRM_MS: &str = "mail.submit-confirm-ms";
+pub const MAIL_CONSUMER_LEASE_MS: &str = "mail.consumer-lease-ms";
 
 /// Every setting, in display order.
 pub const SPECS: &[Spec] = &[
@@ -416,6 +456,41 @@ pub const SPECS: &[Spec] = &[
         500,
         60_000,
     ),
+    flag(
+        MAIL_ENABLED,
+        "mail delivery",
+        "herdr-mcp delivers capsules (queue mail-<label>) to idle agents in mail.labels.",
+        false,
+    ),
+    labels(
+        MAIL_LABELS,
+        "mail labels",
+        "Pane labels whose mailbox herdr-mcp delivers; others are left to any other postman.",
+    ),
+    ms(
+        MAIL_REPLY_WAIT_MS,
+        "reply wait",
+        "How long a delivered task waits for its reply before it is dead and the sender is told.",
+        1_800_000,
+        60_000,
+        86_400_000,
+    ),
+    ms(
+        MAIL_SUBMIT_CONFIRM_MS,
+        "submit confirm",
+        "After typing a capsule, how long to wait for the agent to start before pressing Enter once more.",
+        5_000,
+        500,
+        60_000,
+    ),
+    ms(
+        MAIL_CONSUMER_LEASE_MS,
+        "mailbox lease",
+        "How long this herdr-mcp owns a mailbox without renewing; another one takes over after it.",
+        15_000,
+        1_000,
+        600_000,
+    ),
     keys(
         "keys.tab-next",
         "next tab",
@@ -473,6 +548,28 @@ pub const SPECS: &[Spec] = &[
 /// tab or be shadowed by it, so they are refused, except as the action's own
 /// default (`ctrl+r` for refresh).
 pub const RESERVED: &[&str] = &["ctrl+c", "ctrl+d", "ctrl+r", "ctrl+t", "ctrl+v", "ctrl+x"];
+
+/// Labels become queue names `mail-<label>` (herdr-queue: `[a-z0-9][a-z0-9_-]*`,
+/// at most 64 bytes), so each must fit that grammar after the prefix.
+fn check_labels(list: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for label in list {
+        let first = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+        let ok = label.len() <= 64 - "mail-".len()
+            && label.bytes().next().is_some_and(first)
+            && label.bytes().all(|b| first(b) || b == b'-' || b == b'_');
+        if !ok {
+            return Err(format!(
+                "label {label:?}: use lowercase letters, digits, - and _ (a mailbox queue name)"
+            ));
+        }
+        if out.contains(label) {
+            return Err(format!("label {label:?} is listed twice"));
+        }
+        out.push(label.clone());
+    }
+    Ok(out)
+}
 
 /// The spec for `key`.
 pub fn spec(key: &str) -> Option<&'static Spec> {
@@ -627,7 +724,7 @@ impl Settings {
                     }
                     Err(_) => drop(
                         &key,
-                        format!("expected a number or a list of keys, got {raw}"),
+                        format!("expected a number, true/false or a list, got {raw}"),
                     ),
                 }
             }
@@ -698,6 +795,19 @@ impl Settings {
         }
     }
 
+    /// A [`Kind::Bool`] setting in effect; false for an unknown key.
+    pub fn flag(&self, key: &str) -> bool {
+        matches!(self.value(key), Some(Value::Bool(true)))
+    }
+
+    /// A [`Kind::Labels`] setting in effect; empty for an unknown key.
+    pub fn labels(&self, key: &str) -> Vec<String> {
+        match (spec(key).map(|s| s.kind), self.value(key)) {
+            (Some(Kind::Labels), Some(Value::List(l))) => l,
+            _ => Vec::new(),
+        }
+    }
+
     /// A millisecond setting as a [`std::time::Duration`].
     pub fn duration(&self, key: &str) -> std::time::Duration {
         std::time::Duration::from_millis(self.number(key))
@@ -715,7 +825,7 @@ impl Settings {
     /// The chords bound to `key` (parsed; stored ones are valid).
     pub fn chords(&self, key: &str) -> Vec<Chord> {
         match self.value(key) {
-            Some(Value::Keys(k)) => k.iter().filter_map(|c| Chord::parse(c).ok()).collect(),
+            Some(Value::List(k)) => k.iter().filter_map(|c| Chord::parse(c).ok()).collect(),
             _ => Vec::new(),
         }
     }
@@ -730,9 +840,13 @@ impl Settings {
                     Err(format!("{n} is outside {}..={}", spec.min, spec.max))
                 }
             }
-            (Kind::Keys, Value::Keys(list)) => self.check_keys(spec, &list).map(Value::Keys),
-            (Kind::Keys, Value::Number(_)) => Err("expected a list of keys".into()),
-            (_, Value::Keys(_)) => Err("expected a number".into()),
+            (Kind::Keys, Value::List(list)) => self.check_keys(spec, &list).map(Value::List),
+            (Kind::Labels, Value::List(list)) => check_labels(&list).map(Value::List),
+            (Kind::Bool, Value::Bool(b)) => Ok(Value::Bool(b)),
+            (Kind::Keys, _) => Err("expected a list of keys".into()),
+            (Kind::Labels, _) => Err("expected a list of labels".into()),
+            (Kind::Bool, _) => Err("expected on or off".into()),
+            (_, _) => Err("expected a number".into()),
         }
     }
 
@@ -741,8 +855,8 @@ impl Settings {
             return Err("bind at least one key (reset to go back to the default)".into());
         }
         let own_default: Vec<String> = match spec.default.value() {
-            Value::Keys(k) => k,
-            Value::Number(_) => Vec::new(),
+            Value::List(k) => k,
+            Value::Number(_) | Value::Bool(_) => Vec::new(),
         };
         let mut out: Vec<String> = Vec::new();
         for text in list {
@@ -918,7 +1032,7 @@ mod tests {
         assert!(Value::parse(Kind::Millis, "-5").is_err());
         assert_eq!(
             Value::parse(Kind::Keys, "alt+right, ctrl+tab,,"),
-            Ok(Value::Keys(vec!["alt+right".into(), "ctrl+tab".into()]))
+            Ok(Value::List(vec!["alt+right".into(), "ctrl+tab".into()]))
         );
     }
 
@@ -929,7 +1043,7 @@ mod tests {
         assert_eq!(s.duration(PANE_EXEC_MS).as_millis(), 5_000);
         assert!(s.set(PANE_EXEC_MS, Value::Number(5)).is_err());
         assert!(
-            s.set(PANE_EXEC_MS, Value::Keys(vec!["alt+x".into()]))
+            s.set(PANE_EXEC_MS, Value::List(vec!["alt+x".into()]))
                 .is_err()
         );
         assert!(s.set("timeouts.nope", Value::Number(5_000)).is_err());
@@ -940,7 +1054,7 @@ mod tests {
     #[test]
     fn keys_refuse_typing_reserved_and_taken_chords() {
         let mut s = Settings::default();
-        let keys = |k: &[&str]| Value::Keys(k.iter().map(|s| (*s).to_string()).collect());
+        let keys = |k: &[&str]| Value::List(k.iter().map(|s| (*s).to_string()).collect());
         assert!(
             s.set("keys.tab-next", keys(&["n"]))
                 .unwrap_err()
@@ -982,7 +1096,7 @@ mod tests {
     /// gave it up, and `tab-1` sorts first.
     #[test]
     fn file_overrides_load_in_any_order() {
-        let keys = |k: &[&str]| Value::Keys(k.iter().map(|s| (*s).to_string()).collect());
+        let keys = |k: &[&str]| Value::List(k.iter().map(|s| (*s).to_string()).collect());
         let mut live = Settings::default();
         live.set("keys.tab-next", keys(&["alt+n"])).unwrap();
         live.set("keys.tab-1", keys(&["alt+right"])).unwrap();
@@ -1025,5 +1139,42 @@ mod tests {
         let back: SettingsResponse =
             serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(back, r);
+    }
+
+    #[test]
+    fn bool_and_labels_parse_validate_and_read_back() {
+        assert_eq!(Value::parse(Kind::Bool, " On "), Ok(Value::Bool(true)));
+        assert_eq!(Value::parse(Kind::Bool, "off"), Ok(Value::Bool(false)));
+        assert!(Value::parse(Kind::Bool, "maybe").is_err());
+        assert_eq!(
+            Value::parse(Kind::Labels, "flow-sh, pg-review,"),
+            Ok(Value::List(vec!["flow-sh".into(), "pg-review".into()]))
+        );
+
+        let mut s = Settings::default();
+        assert!(!s.flag(MAIL_ENABLED));
+        assert!(s.labels(MAIL_LABELS).is_empty());
+        s.set(MAIL_ENABLED, Value::Bool(true)).unwrap();
+        s.set(MAIL_LABELS, Value::List(vec!["flow-sh".into(), "w_2".into()]))
+            .unwrap();
+        assert!(s.flag(MAIL_ENABLED));
+        assert_eq!(s.labels(MAIL_LABELS), ["flow-sh", "w_2"]);
+        s.set(MAIL_LABELS, Value::List(vec![])).unwrap();
+        assert!(s.labels(MAIL_LABELS).is_empty());
+
+        for bad in ["Flow", "-x", "a b", "a:b", "", &"a".repeat(60)] {
+            assert!(
+                s.set(MAIL_LABELS, Value::List(vec![bad.into()])).is_err(),
+                "{bad:?}"
+            );
+        }
+        let twice = Value::List(vec!["a".into(), "a".into()]);
+        assert!(s.set(MAIL_LABELS, twice).is_err());
+        assert!(s.set(MAIL_ENABLED, Value::Number(1)).is_err());
+        assert!(s.set(MAIL_LABELS, Value::Bool(true)).is_err());
+        assert!(s.set(MAIL_REPLY_WAIT_MS, Value::Bool(true)).is_err());
+        assert!(s.set("keys.quit", Value::Bool(true)).is_err());
+        // A labels list is never read as chords, nor chords as labels.
+        assert!(s.labels("keys.quit").is_empty());
     }
 }

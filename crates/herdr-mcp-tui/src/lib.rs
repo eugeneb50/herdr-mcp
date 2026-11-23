@@ -1542,10 +1542,10 @@ mod tests {
         use herdr_mcp_api::settings::Value;
         let mut knobs = herdr_mcp_api::Settings::default();
         knobs
-            .set("keys.tab-next", Value::Keys(vec!["f6".into()]))
+            .set("keys.tab-next", Value::List(vec!["f6".into()]))
             .unwrap();
         knobs
-            .set("keys.quit", Value::Keys(vec!["alt+q".into()]))
+            .set("keys.quit", Value::List(vec!["alt+q".into()]))
             .unwrap();
         let alt = KeyModifiers::ALT;
         assert_eq!(
