@@ -149,6 +149,11 @@ pub fn replied(store: &mut Store, id: &str) -> Result<bool> {
     Ok(false)
 }
 fn fence_decision(last: &Fence, pane: &Pane, now: f64, reply_wait: f64, has_reply: bool) -> bool {
+    // A task's reply proves its turn happened, even when herdr's turn
+    // counter never moved (e.g. the agent restarted outside herdr's view).
+    if last.task && has_reply {
+        return false;
+    }
     if last.pane == pane.pane_id && last.state_change_seq == pane.state_change_seq {
         return true;
     }
@@ -286,6 +291,12 @@ mod tests {
     #[test]
     fn the_same_turn_is_always_fenced() {
         assert!(fence_decision(&fence(false), &pane(), 1001.0, 1800.0, true));
+    }
+    #[test]
+    fn a_replied_task_never_fences_even_if_the_turn_counter_stuck() {
+        // hermes restarted after its reply; herdr's seq stayed at delivery's.
+        assert!(!fence_decision(&fence(true), &pane(), 1001.0, 1800.0, true));
+        assert!(fence_decision(&fence(true), &pane(), 1001.0, 1800.0, false));
     }
     #[test]
     fn a_task_holds_until_its_reply_arrives_or_wait_ends() {
