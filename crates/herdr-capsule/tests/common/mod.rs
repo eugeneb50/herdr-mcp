@@ -15,7 +15,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const DEFAULT_BIN: &str = "/home/producer32/code/herdr-mcp-refs/scripts/capsule";
+/// The binary this tree builds; CAPSULE_BIN overrides it (e.g. to replay
+/// the suite against another implementation).
+const DEFAULT_BIN: &str = env!("CARGO_BIN_EXE_capsule");
 const SCRATCH: &str = "/home/producer32/code/herdr-mcp-refs/scratch";
 
 const FAKE_HERDR: &str = r#"#!/bin/sh
