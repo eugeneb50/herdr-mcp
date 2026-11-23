@@ -63,9 +63,7 @@ impl MailHerdr for CliMailHerdr {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|a| {
-                    Some((a["pane_id"].as_str()?, a["state_change_seq"].as_i64()))
-                })
+                .filter_map(|a| Some((a["pane_id"].as_str()?, a["state_change_seq"].as_i64())))
                 .collect();
             Ok(panes["panes"]
                 .as_array()
@@ -226,6 +224,7 @@ impl QueueService {
                 .collect::<Vec<_>>(),
         );
         if all.is_empty() {
+            self.release_closed_mailboxes(server, postman, open).await?;
             return Ok(vec![]);
         }
         let panes = match postman.herdr.panes().await {
@@ -251,7 +250,39 @@ impl QueueService {
                 Err(error) => tracing::warn!("mail {label}: {error:#}"),
             }
         }
+        self.release_closed_mailboxes(server, postman, open).await?;
         Ok(steps)
+    }
+
+    async fn release_closed_mailboxes(
+        &self,
+        server: &HerdrMcpServer,
+        postman: &Postman,
+        mut retained: Vec<String>,
+    ) -> Result<()> {
+        // This service cannot own a mailbox before it has opened the queue.
+        if self.0.db.try_lock().is_ok_and(|db| db.is_none()) {
+            return Ok(());
+        }
+        retained.extend(lock(&postman.flights).keys().cloned());
+        let owner = postman.owner.clone();
+        let now = self.now();
+        self.db(server, move |db| {
+            for row in db.consumers()? {
+                let consumer = row.consumer;
+                if consumer.owner == owner
+                    && row.until > now
+                    && consumer
+                        .queue
+                        .strip_prefix("mail-")
+                        .is_some_and(|label| !retained.iter().any(|keep| keep == label))
+                {
+                    db.release_consumer(&consumer)?;
+                }
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn mail_step(
@@ -268,7 +299,9 @@ impl QueueService {
         let now = self.now();
         let (q, owner) = (queue.clone(), postman.owner.clone());
         let Some(consumer) = self
-            .db(server, move |db| Ok(db.claim_consumer(&q, &owner, lease_ms, now)?))
+            .db(server, move |db| {
+                Ok(db.claim_consumer(&q, &owner, lease_ms, now)?)
+            })
             .await?
         else {
             lock(&postman.flights).remove(label);
@@ -276,7 +309,11 @@ impl QueueService {
         };
         let here: Vec<&MailPane> = panes.iter().filter(|p| p.label == label).collect();
         // Missing, or two panes share the label: deliver to neither.
-        let pane = if let [pane] = here.as_slice() { Some(*pane) } else { None };
+        let pane = if let [pane] = here.as_slice() {
+            Some(*pane)
+        } else {
+            None
+        };
         let flight = lock(&postman.flights).get(label).cloned();
         let flight = match flight {
             Some(f) => Some(f),
@@ -286,11 +323,6 @@ impl QueueService {
             return self.follow(server, postman, label, flight, pane).await;
         }
         if !is_open {
-            // Label switched off or removed, nothing in flight: let go of the
-            // mailbox so another postman may take it.
-            lock(&postman.flights).remove(label);
-            self.db(server, move |db| Ok(db.release_consumer(&consumer)?))
-                .await?;
             return Ok(Step::NotOwner);
         }
         if !readable {
@@ -332,7 +364,8 @@ impl QueueService {
         let capsule = match parse_capsule(&item) {
             Ok(c) => c,
             Err(reason) => {
-                self.finish_mail(server, &lease, Outcome::Dead(reason)).await?;
+                self.finish_mail(server, &lease, Outcome::Dead(reason))
+                    .await?;
                 return Ok(None);
             }
         };
@@ -384,8 +417,12 @@ impl QueueService {
             }
         };
         let delivery = uuid::Uuid::new_v4().simple().to_string()[..12].to_owned();
-        let baseline = json!({"pane": pane.pane_id, "state_change_seq": pane.seq, "submitted": false});
-        if !self.record_delivery(server, &lease, &delivery, baseline).await? {
+        let baseline =
+            json!({"pane": pane.pane_id, "state_change_seq": pane.seq, "submitted": false});
+        if !self
+            .record_delivery(server, &lease, &delivery, baseline)
+            .await?
+        {
             return Ok(Step::Empty);
         }
         let text = delivery_text(&capsule, &capsule_config(), Some(&delivery));
@@ -395,10 +432,17 @@ impl QueueService {
             return Ok(Step::Released(format!("{error:#}")));
         }
         let typed = json!({"pane": pane.pane_id, "state_change_seq": pane.seq, "submitted": true});
-        if !self.record_delivery(server, &lease, &delivery, typed).await? {
+        if !self
+            .record_delivery(server, &lease, &delivery, typed)
+            .await?
+        {
             return Ok(Step::Empty);
         }
-        let (l, wait, now) = (lease.clone(), number(server, MAIL_REPLY_WAIT_MS), self.now());
+        let (l, wait, now) = (
+            lease.clone(),
+            number(server, MAIL_REPLY_WAIT_MS),
+            self.now(),
+        );
         self.db(server, move |db| Ok(db.heartbeat(&l, wait, now)?))
             .await?;
         let confirm = ms(server, MAIL_SUBMIT_CONFIRM_MS);
@@ -441,7 +485,11 @@ impl QueueService {
         pane: Option<&MailPane>,
     ) -> Result<Step> {
         let reply_wait = ms(server, MAIL_REPLY_WAIT_MS);
-        let (l, wait, now) = (flight.lease.clone(), number(server, MAIL_REPLY_WAIT_MS), self.now());
+        let (l, wait, now) = (
+            flight.lease.clone(),
+            number(server, MAIL_REPLY_WAIT_MS),
+            self.now(),
+        );
         let beat = self
             .db(server, move |db| Ok(db.heartbeat(&l, wait, now)?))
             .await?;
@@ -464,7 +512,10 @@ impl QueueService {
             if let Some(reply) = reply {
                 let result = json!({"reply": reply.id, "delivery": flight.delivery});
                 return Ok(
-                    if self.finish_mail(server, &flight.lease, Outcome::Done(result)).await? {
+                    if self
+                        .finish_mail(server, &flight.lease, Outcome::Done(result))
+                        .await?
+                    {
                         done(Step::Replied(reply.id))
                     } else {
                         done(Step::Empty)
@@ -474,7 +525,10 @@ impl QueueService {
         } else if turn_moved && ready {
             let result = json!({"delivery": flight.delivery});
             return Ok(
-                if self.finish_mail(server, &flight.lease, Outcome::Done(result)).await? {
+                if self
+                    .finish_mail(server, &flight.lease, Outcome::Done(result))
+                    .await?
+                {
                     done(Step::TurnEnded)
                 } else {
                     done(Step::Empty)
@@ -483,7 +537,11 @@ impl QueueService {
         }
         // Every delivery ends by the deadline, task or not, pane or not.
         if now.saturating_sub(flight.delivered_at) >= reply_wait {
-            let what = if flight.capsule.status == "task" { "no reply" } else { "no turn end" };
+            let what = if flight.capsule.status == "task" {
+                "no reply"
+            } else {
+                "no turn end"
+            };
             let reason = format!(
                 "{what} from {label} within {} min (delivery {})",
                 reply_wait / 60_000,
@@ -587,3 +645,7 @@ impl QueueService {
         .await
     }
 }
+
+#[cfg(test)]
+#[path = "mail_tests.rs"]
+mod tests;
