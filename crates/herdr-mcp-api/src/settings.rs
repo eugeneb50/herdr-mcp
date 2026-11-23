@@ -1155,8 +1155,11 @@ mod tests {
         assert!(!s.flag(MAIL_ENABLED));
         assert!(s.labels(MAIL_LABELS).is_empty());
         s.set(MAIL_ENABLED, Value::Bool(true)).unwrap();
-        s.set(MAIL_LABELS, Value::List(vec!["flow-sh".into(), "w_2".into()]))
-            .unwrap();
+        s.set(
+            MAIL_LABELS,
+            Value::List(vec!["flow-sh".into(), "w_2".into()]),
+        )
+        .unwrap();
         assert!(s.flag(MAIL_ENABLED));
         assert_eq!(s.labels(MAIL_LABELS), ["flow-sh", "w_2"]);
         s.set(MAIL_LABELS, Value::List(vec![])).unwrap();

@@ -24,7 +24,7 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
-    Send(#[command(flatten)] SendSpec),
+    Send(#[command(flatten)] Box<SendSpec>),
     Brief {
         #[arg(long, default_value = "lead")]
         to: String,
@@ -685,7 +685,7 @@ fn real_main() -> AppResult<()> {
     match cli.cmd {
         Commands::Send(spec) => {
             let skin = skin_of(spec.skin.as_deref(), &cfg)?;
-            println!("{}", send_impl(spec, &cfg, &skin, &g)?);
+            println!("{}", send_impl(*spec, &cfg, &skin, &g)?);
         }
         Commands::Brief {
             to,

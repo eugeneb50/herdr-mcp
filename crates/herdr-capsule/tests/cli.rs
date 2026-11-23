@@ -121,7 +121,9 @@ fn test_idle_agent_gets_the_task_with_its_reply_command() {
     assert!(text.contains(&cid));
     assert!(text.contains(&format!("--re {cid}")));
     assert!(text.contains("--to lead"));
-    assert!(text.contains("sh /x/check.sh"));
+    // The check's shell text is never typed: `send --re` runs the task's
+    // pinned check itself (agent-executor contract, "Formatter").
+    assert!(!text.contains("sh /x/check.sh"), "{text}");
     assert_eq!(f.unread("builder"), 0);
     let log = fs::read_to_string(f.home.join("delivered.jsonl")).unwrap();
     let first: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
@@ -742,7 +744,24 @@ fn a_reply_names_the_delivery_it_answers() {
         .find(|i| i["payload"]["re"] == cid)
         .expect("reply in mail-lead");
     assert_eq!(reply["payload"]["delivery"], "d-1");
-    let bare = f.run(&["send", "--to", "lead", "--task", "t", "--status", "wip",
-        "--summary", "x", "--delivery", "d-2"], &[]);
-    assert!(!bare.status.success(), "--delivery without --re must be refused");
+    let bare = f.run(
+        &[
+            "send",
+            "--to",
+            "lead",
+            "--task",
+            "t",
+            "--status",
+            "wip",
+            "--summary",
+            "x",
+            "--delivery",
+            "d-2",
+        ],
+        &[],
+    );
+    assert!(
+        !bare.status.success(),
+        "--delivery without --re must be refused"
+    );
 }
