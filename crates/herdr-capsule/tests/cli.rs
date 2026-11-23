@@ -705,3 +705,21 @@ fn test_a_under_limit_file_is_accepted_with_a_correct_chunked_sha() {
         "84c89c12"
     );
 }
+
+#[test]
+fn the_read_command_in_a_delivery_finds_the_capsule_by_its_id() {
+    // Every delivery says `Read it: capsule card <capsule id> --to <me>`;
+    // the lookup used to match only queue item uuids, so it always failed.
+    let f = Fixture::new();
+    let cid = f.task("builder");
+    for view in ["card", "line", "json"] {
+        let out = f.cap(&[view, &cid, "--to", "builder"]);
+        assert!(stdout(&out).contains(&cid), "{view}: {}", stdout(&out));
+    }
+    let uuid = f.items("builder", None)[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let out = f.cap(&["line", &uuid[..8], "--to", "builder"]);
+    assert!(stdout(&out).contains(&cid), "{}", stdout(&out));
+}

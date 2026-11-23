@@ -92,12 +92,23 @@ impl Store {
         }
         Ok(found.pop())
     }
+    /// The item in `queue` whose capsule id is `reference`, else the one
+    /// whose queue item id starts with it.
     pub fn find_q(&mut self, queue: &str, reference: &str) -> Result<Item> {
-        let hits: Vec<Item> = self
-            .list(Some(queue), None, u32::MAX)?
-            .into_iter()
-            .filter(|it| it.id.starts_with(reference))
+        let items = self.list(Some(queue), None, u32::MAX)?;
+        let by_capsule: Vec<Item> = items
+            .iter()
+            .filter(|it| it.dedupe_key.as_deref() == Some(reference))
+            .cloned()
             .collect();
+        let hits: Vec<Item> = if by_capsule.is_empty() {
+            items
+                .into_iter()
+                .filter(|it| it.id.starts_with(reference))
+                .collect()
+        } else {
+            by_capsule
+        };
         if hits.len() > 1 {
             return Err(fail(format!(
                 "{} items in {queue} match {}",
