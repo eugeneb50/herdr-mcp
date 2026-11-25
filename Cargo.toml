@@ -8,6 +8,7 @@ members = [
     "crates/herdr-mcp-cli",
     "crates/herdr-mcp-ui",
     "crates/herdr-queue",
+    "crates/herdr-capsule",
 ]
 
 [workspace.package]
