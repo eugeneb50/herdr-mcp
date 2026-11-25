@@ -10,7 +10,7 @@ use std::{
     collections::HashMap,
     fs::{self, File},
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
     time::{Duration, Instant},
 };
@@ -20,6 +20,17 @@ use std::{
 const DEFAULT_BIN: &str = env!("CARGO_BIN_EXE_capsule");
 /// Cargo's per-target scratch dir: outside /tmp, never the real mailbox.
 const SCRATCH: &str = env!("CARGO_TARGET_TMPDIR");
+
+/// The herdr-queue CLI: the one a workspace build put next to `capsule`,
+/// else whichever is on PATH.
+pub fn queue_bin() -> PathBuf {
+    let built = Path::new(DEFAULT_BIN).with_file_name("herdr-queue");
+    if built.exists() {
+        built
+    } else {
+        PathBuf::from("herdr-queue")
+    }
+}
 
 const FAKE_HERDR: &str = r#"#!/bin/sh
 # Fake herdr: `pane list` prints $FAKE_PANES; `agent prompt` logs its args
@@ -360,7 +371,7 @@ impl Fixture {
             args.push("--status".into());
             args.push(s.into());
         }
-        let out = Command::new("herdr-queue")
+        let out = Command::new(queue_bin())
             .args(&args)
             .output()
             .expect("herdr-queue list");

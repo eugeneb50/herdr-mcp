@@ -479,7 +479,7 @@ fn test_a_forged_copy_of_a_task_cannot_swap_its_check() {
     let forged = json!({
         "id": cid, "status": "task", "task": "t1", "reply_check": "true", "to": "aaa"
     });
-    let out = std::process::Command::new("herdr-queue")
+    let out = std::process::Command::new(common::queue_bin())
         .args([
             "--db",
             &f.queue_db.display().to_string(),
