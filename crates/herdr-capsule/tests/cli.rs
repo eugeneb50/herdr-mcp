@@ -81,7 +81,11 @@ fn test_delivery_names_a_report_path_in_the_work_dir() {
             .1
             .contains(&f.work.join("t1").display().to_string())
     );
-    assert!(!prompts[0].1.contains("/tmp"), "{}", prompts[0].1);
+    let tmp = format!("{}/", std::env::temp_dir().display());
+    let mut paths = prompts[0]
+        .1
+        .split(|c: char| c.is_whitespace() || c == ':' || c == '=');
+    assert!(!paths.any(|p| p.starts_with(&tmp)), "{}", prompts[0].1);
 }
 
 #[test]

@@ -18,7 +18,8 @@ use std::{
 /// The binary this tree builds; CAPSULE_BIN overrides it (e.g. to replay
 /// the suite against another implementation).
 const DEFAULT_BIN: &str = env!("CARGO_BIN_EXE_capsule");
-const SCRATCH: &str = "/home/producer32/code/herdr-mcp-refs/scratch";
+/// Cargo's per-target scratch dir: outside /tmp, never the real mailbox.
+const SCRATCH: &str = env!("CARGO_TARGET_TMPDIR");
 
 const FAKE_HERDR: &str = r#"#!/bin/sh
 # Fake herdr: `pane list` prints $FAKE_PANES; `agent prompt` logs its args
