@@ -70,6 +70,14 @@ fn group(r: &RunRecord) -> String {
         .map_or_else(|| "adhoc".into(), |id| id.to_string())
 }
 
+/// The runs `run` started, as the `(id, title)` pairs the detail buttons use.
+/// Shared by the Runs list and the linked-run view opened from a queue item.
+pub(super) fn child_run_buttons(run: &RunRecord, all: &[RunRecord]) -> Vec<(Uuid, String)> {
+    run.children(all)
+        .map(|r| (r.id, r.title().to_string()))
+        .collect()
+}
+
 #[component]
 pub fn Runs() -> Element {
     let client = use_api();
@@ -122,11 +130,7 @@ pub fn Runs() -> Element {
     let picked = pick().and_then(|id| all.iter().find(|r| r.id == id).cloned());
     let child_runs: Vec<(Uuid, String)> = picked
         .as_ref()
-        .map(|p| {
-            p.children(&all)
-                .map(|r| (r.id, r.title().to_string()))
-                .collect()
-        })
+        .map(|p| child_run_buttons(p, &all))
         .unwrap_or_default();
 
     rsx! {
@@ -184,6 +188,43 @@ pub fn Runs() -> Element {
                     div { class: "card", p { class: "muted", "Pick a run to see its trail." } }
                 },
             }
+        }
+    }
+}
+
+#[component]
+pub(super) fn LinkedRun(id: Uuid) -> Element {
+    let api = use_api();
+    let seen = use_run_events();
+    use_context_provider(|| seen);
+    let mut run = use_signal(|| None);
+    let mut all: Signal<Vec<RunRecord>> = use_signal(Vec::new);
+    let navigator = use_navigator();
+    use_future(move || async move {
+        let mut read = None;
+        loop {
+            changed(seen, &mut read).await;
+            run.set(Some(api().get_run(id).await));
+            if let Ok(list) = api().list_runs(herdr_mcp_api::playground::RUNS_SHOWN).await {
+                all.set(list);
+            }
+        }
+    });
+    let value = run.read();
+    rsx! {
+        Link { to: super::playground_tab("runs"), "All runs" }
+        match value.as_ref() {
+            None => rsx! { p { role: "status", "Loading run…" } },
+            Some(Err(error)) => rsx! { p { role: "alert", "Run unavailable. {error}" } },
+            Some(Ok(record)) => rsx! {
+                RunDetail {
+                    run: record.clone(),
+                    child_runs: child_run_buttons(record, &all.read()),
+                    on_open: move |next: Uuid| {
+                        navigator.push(super::run_link(next));
+                    },
+                }
+            },
         }
     }
 }
