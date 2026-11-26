@@ -537,10 +537,9 @@ impl Queue {
         )
     }
 
-    /// Reads a bounded, filtered page and its event histories in one snapshot.
-    pub fn list_prefixed_with_events(
+    /// Reads a bounded, filtered mailbox page and its histories in one snapshot.
+    pub fn mail_items_with_events(
         &mut self,
-        prefix: &str,
         queue: Option<&str>,
         status: Option<ItemStatus>,
         limit: u32,
@@ -549,13 +548,20 @@ impl Queue {
             validate_name(queue)?;
         }
         let tx = self.conn.transaction()?;
-        let items = query_items(
-            &tx,
-            "SELECT * FROM queue_items WHERE substr(queue, 1, length(?1)) = ?1
-               AND length(queue) > length(?1) AND (?2 IS NULL OR queue = ?2)
-               AND (?3 IS NULL OR status = ?3) ORDER BY queue, seq LIMIT ?4",
-            params![prefix, queue, status.map(ItemStatus::as_str), limit],
-        )?;
+        let status = status.map(ItemStatus::as_str);
+        let items = match queue {
+            Some(queue) => query_items(
+                &tx,
+                MAIL_ITEMS_BY_QUEUE,
+                params![MAILBOX_GLOB, queue, status, limit],
+            )?,
+            None => query_items(
+                &tx,
+                "SELECT * FROM queue_items WHERE queue GLOB ?1
+                 AND (?2 IS NULL OR status = ?2) ORDER BY queue, seq LIMIT ?3",
+                params![MAILBOX_GLOB, status, limit],
+            )?,
+        };
         let mut statement = tx.prepare(ITEM_EVENTS)?;
         items
             .into_iter()
@@ -576,7 +582,10 @@ impl Queue {
     ) -> Result<Vec<T>> {
         let mut statement = self.conn.prepare(include_str!("mail-stats.sql"))?;
         Ok(statement
-            .query_map(rusqlite::named_params! {":since": since}, map)?
+            .query_map(
+                rusqlite::named_params! {":since": since, ":mailbox_glob": MAILBOX_GLOB},
+                map,
+            )?
             .collect::<rusqlite::Result<_>>()?)
     }
 
@@ -598,26 +607,21 @@ impl Queue {
         self.item_matching(id, None)
     }
 
-    /// Reads an exact ID only if its queue has this prefix and a nonempty suffix.
-    pub fn prefixed_item(
-        &mut self,
-        id: &str,
-        prefix: &str,
-    ) -> Result<Option<(Item, Vec<QueueEvent>)>> {
-        self.item_matching(id, Some(prefix))
+    /// Reads an exact ID only if the item belongs to a mailbox.
+    pub fn mail_item(&mut self, id: &str) -> Result<Option<(Item, Vec<QueueEvent>)>> {
+        self.item_matching(id, Some(MAILBOX_GLOB))
     }
 
     fn item_matching(
         &mut self,
         id: &str,
-        prefix: Option<&str>,
+        queue_pattern: Option<&str>,
     ) -> Result<Option<(Item, Vec<QueueEvent>)>> {
         let tx = self.conn.transaction()?;
         let item = tx
             .query_row(
-                "SELECT * FROM queue_items WHERE id = ?1 AND (?2 IS NULL OR
-                   (substr(queue, 1, length(?2)) = ?2 AND length(queue) > length(?2)))",
-                params![id, prefix],
+                "SELECT * FROM queue_items WHERE id = ?1 AND (?2 IS NULL OR queue GLOB ?2)",
+                params![id, queue_pattern],
                 read_item,
             )
             .optional()?;
@@ -945,6 +949,11 @@ fn query_items(conn: &Connection, sql: &str, params: impl Params) -> Result<Vec<
         .collect::<rusqlite::Result<_>>()?)
 }
 
+// Queue name validation covers the remaining suffix after its first byte.
+const MAILBOX_GLOB: &str = "mail-[a-z0-9]*";
+const MAIL_ITEMS_BY_QUEUE: &str = "SELECT * FROM queue_items WHERE queue = ?2 AND queue GLOB ?1
+     AND (?3 IS NULL OR status = ?3) ORDER BY seq LIMIT ?4";
+
 const ITEM_EVENTS: &str =
     "SELECT item_id, seq, at, kind, data FROM queue_events WHERE item_id = ? ORDER BY seq";
 
@@ -1040,6 +1049,23 @@ fn validate_name(queue: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mail_exact_recipient_seeks_the_queue_index() {
+        let queue = Queue::open(":memory:").unwrap();
+        let plan: String = queue
+            .conn
+            .query_row(
+                &format!("EXPLAIN QUERY PLAN {MAIL_ITEMS_BY_QUEUE}"),
+                params![MAILBOX_GLOB, "mail-worker", "done", 10],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(
+            plan.contains("SEARCH") && plan.contains("queue=?"),
+            "{plan}"
+        );
+    }
 
     #[test]
     fn reply_lookup_uses_expression_index() {

@@ -191,7 +191,7 @@ pub(super) fn http_router(
         .with_state(state)
         .layer(axum::middleware::from_fn({
             let bind = bind.to_string();
-            move |req: axum::extract::Request, next: axum::middleware::Next| {
+            move |mut req: axum::extract::Request, next: axum::middleware::Next| {
                 let host = req
                     .headers()
                     .get(axum::http::header::HOST)
@@ -212,12 +212,40 @@ pub(super) fn http_router(
                 };
                 async move {
                     match refused {
-                        None => next.run(req).await,
+                        None => {
+                            if let Some(uri) = query_without_token(req.uri()) {
+                                *req.uri_mut() = uri;
+                            }
+                            next.run(req).await
+                        }
                         Some(refusal) => axum::response::IntoResponse::into_response(refusal),
                     }
                 }
             }
         }))
+}
+
+// The query token is auth, already checked: handlers never see it, so a
+// strict query type (deny_unknown_fields) still accepts `?token=`.
+fn query_without_token(uri: &axum::http::Uri) -> Option<axum::http::Uri> {
+    let mut url = reqwest::Url::parse(&format!("http://bridge/?{}", uri.query()?)).ok()?;
+    if !url.query_pairs().any(|(key, _)| key == "token") {
+        return None;
+    }
+    let query: Vec<_> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "token")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    let path_and_query = if query.is_empty() {
+        uri.path().parse().ok()?
+    } else {
+        url.query_pairs_mut().clear().extend_pairs(query);
+        format!("{}?{}", uri.path(), url.query()?).parse().ok()?
+    };
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(path_and_query);
+    axum::http::Uri::from_parts(parts).ok()
 }
 
 /// Why `req` may not reach `/api/*` without the bridge token, if it may
