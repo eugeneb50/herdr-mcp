@@ -28,6 +28,8 @@ const READY: [&str; 2] = ["idle", "done"];
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct MailPane {
     pub pane_id: String,
+    /// herdr's stable terminal identity; survives a cross-workspace pane move.
+    pub terminal_id: String,
     pub label: String,
     pub status: String,
     /// herdr's per-pane turn counter; moves when the agent starts or ends a turn.
@@ -69,6 +71,12 @@ impl MailHerdr for CliMailHerdr {
                 .flatten()
                 .filter_map(|a| Some((a["pane_id"].as_str()?, a["state_change_seq"].as_i64())))
                 .collect();
+            let terminals: HashMap<&str, &str> = agents["agents"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|a| Some((a["pane_id"].as_str()?, a["terminal_id"].as_str()?)))
+                .collect();
             panes["panes"]
                 .as_array()
                 .context("herdr pane list has no panes array")?
@@ -80,6 +88,11 @@ impl MailHerdr for CliMailHerdr {
                         .context("herdr pane list entry has no pane ID")?;
                     Ok(MailPane {
                         pane_id: pane_id.to_owned(),
+                        terminal_id: terminals
+                            .get(pane_id)
+                            .copied()
+                            .unwrap_or_default()
+                            .to_owned(),
                         label: p["label"].as_str().unwrap_or_default().to_owned(),
                         status: p["agent_status"].as_str().unwrap_or("unknown").to_owned(),
                         seq: seqs.get(pane_id).copied().flatten(),
@@ -115,6 +128,7 @@ struct InFlight {
     capsule: Capsule,
     delivery: String,
     pane: String,
+    terminal_id: String,
     seq: Option<i64>,
     delivered_at: i64,
     /// When to check that the agent started (and press Enter once if not).
@@ -545,6 +559,7 @@ impl QueueService {
             capsule,
             delivery,
             pane: data["pane"].as_str().unwrap_or_default().to_owned(),
+            terminal_id: data["terminal_id"].as_str().unwrap_or_default().to_owned(),
             seq: data["state_change_seq"].as_i64(),
             delivered_at: last.map_or(item.started_at.unwrap_or(0), |e| e.at),
             confirm_at: None,
@@ -582,8 +597,8 @@ impl QueueService {
         // The report path the agent is told; `capsule reply` reads it back from
         // this event, so the agent's CLI need not share herdr-mcp's work dir.
         let report = herdr_capsule::report_path(&cfg, &capsule.task, &capsule.id);
-        let baseline = json!({"pane": pane.pane_id, "state_change_seq": pane.seq,
-            "submitted": false, "report": report});
+        let baseline = json!({"pane": pane.pane_id, "terminal_id": pane.terminal_id,
+            "state_change_seq": pane.seq, "submitted": false, "report": report});
         if !self
             .record_delivery(server, &lease, &delivery, baseline)
             .await?
@@ -596,8 +611,8 @@ impl QueueService {
             self.db(server, move |db| Ok(db.release(&l, now)?)).await?;
             return Ok(Step::Released(format!("{error:#}")));
         }
-        let typed = json!({"pane": pane.pane_id, "state_change_seq": pane.seq,
-            "submitted": true, "report": report});
+        let typed = json!({"pane": pane.pane_id, "terminal_id": pane.terminal_id,
+            "state_change_seq": pane.seq, "submitted": true, "report": report});
         if !self
             .record_delivery(server, &lease, &delivery, typed)
             .await?
@@ -619,6 +634,7 @@ impl QueueService {
                 capsule,
                 delivery: delivery.clone(),
                 pane: pane.pane_id.clone(),
+                terminal_id: pane.terminal_id.clone(),
                 seq: pane.seq,
                 delivered_at: now,
                 confirm_at: Some(now.saturating_add(confirm)),
@@ -669,7 +685,24 @@ impl QueueService {
             step
         };
         // An open flight follows its pane ID: the label may change after delivery.
-        let same_pane = panes.iter().find(|p| p.pane_id == flight.pane);
+        // A cross-workspace move gives the same terminal a new pane ID; only an
+        // unambiguous terminal match under that ID keeps the flight alive.
+        let moved = if pane_closed && !flight.terminal_id.is_empty() {
+            let mut matching = panes.iter().filter(|p| p.terminal_id == flight.terminal_id);
+            match (matching.next(), matching.next()) {
+                (Some(pane), None) => Some(pane),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let same_pane = panes.iter().find(|p| p.pane_id == flight.pane).or(moved);
+        if let Some(pane) = same_pane
+            && pane.pane_id != flight.pane
+        {
+            flight.pane = pane.pane_id.clone();
+        }
+        let pane_closed = pane_closed && same_pane.is_none();
         // Two known counters are needed to classify a change; missing is neither a
         // change nor equality.
         let known = same_pane.and_then(|p| p.seq).zip(flight.seq);

@@ -8,6 +8,7 @@ use tokio::time::advance;
 const LABEL: &str = "worker";
 const MAILBOX: &str = "mail-worker";
 const PANE: &str = "w1:p7";
+const TERMINAL: &str = "t-1";
 const CONFIRM: u64 = 500;
 const LEASE: u64 = 1_000;
 const WAIT: u64 = 60_000;
@@ -62,6 +63,7 @@ impl FakeMailHerdr {
     fn pane(&self, status: &str, seq: i64) {
         *lock(&self.panes) = vec![MailPane {
             pane_id: PANE.into(),
+            terminal_id: TERMINAL.into(),
             label: LABEL.into(),
             status: status.into(),
             seq: Some(seq),
@@ -281,6 +283,8 @@ async fn postman_soak_seeded() {
                 .unwrap_or(1);
             panes.push(MailPane {
                 pane_id,
+                terminal_id: old
+                    .map_or_else(|| format!("t-{tick}-{lane}"), |p| p.terminal_id.clone()),
                 label: (*label).into(),
                 status: status.into(),
                 seq: Some(seq),
@@ -1177,6 +1181,36 @@ async fn closed_pane_then_replacement_gets_one_redelivery() {
     assert_eq!(f.item(&id).status, ItemStatus::Done);
     assert_eq!(herdr.prompts(), 2);
     assert_eq!(herdr.enters(), 0);
+    herdr_queue::run_audit(&f.path(), None, None).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn pane_moved_across_workspace_keeps_flight_and_token() {
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    let capsule = task("one");
+    let id = f.push(&capsule);
+    f.tick(&postman).await;
+    let delivery = f.item(&id).delivery.unwrap();
+
+    // A cross-workspace move gives the same terminal a new public pane ID.
+    lock(&herdr.panes)[0].pane_id = "w2:p7".into();
+    f.step(&postman, Step::Waiting).await;
+    let item = f.item(&id);
+    assert_eq!(item.status, ItemStatus::Running);
+    assert_eq!(item.delivery.as_deref(), Some(delivery.as_str()));
+    assert_eq!(item.attempts, 1);
+    assert_eq!(herdr.prompts(), 1); // no redelivery prompt
+
+    let answer = f.push(&reply(&capsule, &delivery));
+    f.step(&postman, Step::Replied(answer)).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Done);
+    let events = f.db().item(&id).unwrap().unwrap().1;
+    assert!(
+        events
+            .iter()
+            .all(|e| e.kind != "failed" && e.kind != "requeued")
+    );
     herdr_queue::run_audit(&f.path(), None, None).unwrap();
 }
 
