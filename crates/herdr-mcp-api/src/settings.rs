@@ -245,6 +245,7 @@ pub const MAIL_ENABLED: &str = "mail.enabled";
 pub const MAIL_WORK_DIR: &str = "mail.work-dir";
 pub const MAIL_LABELS: &str = "mail.labels";
 pub const MAIL_REPLY_WAIT_MS: &str = "mail.reply-wait-ms";
+pub const MAIL_REMIND_AFTER_MS: &str = "mail.remind-after-ms";
 pub const MAIL_SUBMIT_CONFIRM_MS: &str = "mail.submit-confirm-ms";
 pub const MAIL_UNDELIVERABLE_AFTER_MS: &str = "mail.undeliverable-after-ms";
 pub const MAIL_CONSUMER_LEASE_MS: &str = "mail.consumer-lease-ms";
@@ -498,6 +499,14 @@ pub const SPECS: &[Spec] = &[
         "How long a delivered task waits for its reply before it is dead and the sender is told.",
         1_800_000,
         60_000,
+        86_400_000,
+    ),
+    ms(
+        MAIL_REMIND_AFTER_MS,
+        "reply reminder delay",
+        "How long after a task turn ends to wait before reminding the agent to reply.",
+        60_000,
+        0,
         86_400_000,
     ),
     ms(

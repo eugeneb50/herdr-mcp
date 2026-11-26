@@ -81,7 +81,7 @@ fn parse_data(raw: Option<&str>) -> Option<Map<String, Value>> {
 fn trans(kind: &str) -> (Option<&'static [&'static str]>, Option<&'static str>) {
     match kind {
         "enqueued" => (None, Some("queued")),
-        "delivered" => (Some(&["running"]), Some("running")),
+        "delivered" | "turn_ended" | "reminder_reserved" => (Some(&["running"]), Some("running")),
         "run_started" => (Some(&["running"]), Some("running")),
         "done" => (Some(&["running"]), Some("done")),
         "failed" => (Some(&["running"]), Some("running")),
@@ -202,6 +202,22 @@ fn fold(row: &Row, events: &[Event], v: &mut Vec<String>) -> (Option<&'static st
                     last_delivery = Some(delivery.to_owned());
                 } else {
                     bad(v, &row.id, seq, status, kind, "missing delivery ID");
+                }
+            }
+            "turn_ended" | "reminder_reserved" => {
+                if claim.is_none()
+                    || claim != last_claim
+                    || last_delivery.is_none()
+                    || data.get("delivery").and_then(Value::as_str) != last_delivery.as_deref()
+                {
+                    bad(
+                        v,
+                        &row.id,
+                        seq,
+                        status,
+                        kind,
+                        "event must name the current delivery",
+                    );
                 }
             }
             "dead" => {

@@ -791,6 +791,77 @@ async fn non_task_finishes_when_the_turn_changes_and_is_idle_again() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn turn_end_without_reply_gets_one_reminder() {
+    let f = Fixture::new(true).await;
+    f.setting(MAIL_REMIND_AFTER_MS, Setting::Number(2_000));
+    let (herdr, postman) = fake();
+    let capsule = task("one");
+    let id = f.push(&capsule);
+    f.tick(&postman).await;
+    let delivery = f.item(&id).delivery.unwrap();
+
+    herdr.pane("working", 2);
+    elapsed(2_000).await;
+    f.step(&postman, Step::Waiting).await;
+    assert_eq!(herdr.prompts(), 1);
+
+    herdr.pane("idle", 3);
+    f.step(&postman, Step::Waiting).await;
+    elapsed(1_999).await;
+    f.step(&postman, Step::Waiting).await;
+    assert_eq!(herdr.prompts(), 1);
+    elapsed(1).await;
+    f.step(&postman, Step::Reminded).await;
+
+    let command = reply_command(&capsule, &capsule_config(&f.server), Some(&delivery));
+    assert!(lock(&herdr.calls).iter().any(|call| matches!(
+        call,
+        Call::Prompt(pane, text)
+            if pane == PANE && text == &format!("Reminder: reply to capsule one with: {command}")
+    )));
+    assert_eq!(herdr.enters(), 0);
+    elapsed(WAIT - 4_000).await;
+    f.tick(&postman).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Dead);
+    assert_eq!(herdr.prompts(), 2);
+    herdr_queue::run_audit(&f.path(), None, None).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn reminder_survives_restart_once() {
+    let f = Fixture::new(true).await;
+    f.setting(MAIL_REMIND_AFTER_MS, Setting::Number(LEASE));
+    let (herdr, postman) = fake();
+    let capsule = task("one");
+    let id = f.push(&capsule);
+    f.tick(&postman).await;
+    let delivery = f.item(&id).delivery.unwrap();
+
+    herdr.pane("done", 3);
+    f.step(&postman, Step::Waiting).await;
+    drop(postman);
+    elapsed(LEASE).await;
+    let restarted = Postman::new(herdr.clone());
+    f.step(&restarted, Step::Reminded).await;
+    drop(restarted);
+
+    elapsed(LEASE).await;
+    let restarted = Postman::new(herdr.clone());
+    f.step(&restarted, Step::Waiting).await;
+    assert_eq!(herdr.prompts(), 2);
+    let events = f.db().item(&id).unwrap().unwrap().1;
+    for kind in ["turn_ended", "reminder_reserved"] {
+        let matching: Vec<_> = events.iter().filter(|event| event.kind == kind).collect();
+        assert_eq!(matching.len(), 1);
+        assert_eq!(matching[0].data.as_ref().unwrap()["delivery"], delivery);
+    }
+    let answer = f.push(&reply(&capsule, &delivery));
+    f.step(&restarted, Step::Replied(answer)).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Done);
+    herdr_queue::run_audit(&f.path(), None, None).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn missing_sequence_neither_admits_nor_confirms_a_turn() {
     let f = Fixture::new(true).await;
     let (herdr, postman) = fake();

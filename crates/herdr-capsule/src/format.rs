@@ -250,17 +250,24 @@ pub fn delivery_text(c: &Capsule, cfg: &CapsuleConfig, delivery: Option<&str>) -
     if c.status != "task" {
         return head + &read;
     }
+    let command = reply_command(c, cfg, delivery);
+    format!(
+        "{head}{read} Write your report to {} . When done or stuck, run ONE command: {command} ; then reply with its CAP line only and stop.",
+        q(&report_path(cfg, &c.task, &c.id).display().to_string()),
+    )
+}
+
+/// The command a task recipient runs to reply to this delivery.
+pub fn reply_command(c: &Capsule, cfg: &CapsuleConfig, delivery: Option<&str>) -> String {
     let token = match delivery {
         Some(d) => format!("{}@{d}", c.id),
         None => c.id.clone(),
     };
-    let reply = format!(
-        " Write your report to {} . When done or stuck, run ONE command: {} reply {} done|fail|block \"<=120 chars\" ; then reply with its CAP line only and stop.",
-        q(&report_path(cfg, &c.task, &c.id).display().to_string()),
-        q(&cfg.exe),
-        q(&token),
-    );
-    head + &read + &reply
+    format!(
+        "{} reply {} done|fail|block \"<=120 chars\"",
+        shlex_quote(&cfg.exe),
+        shlex_quote(&token),
+    )
 }
 /// Where the agent answering task capsule `id` writes its report.
 pub fn report_path(cfg: &CapsuleConfig, task: &str, id: &str) -> std::path::PathBuf {

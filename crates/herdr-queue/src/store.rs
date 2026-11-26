@@ -276,6 +276,63 @@ impl Queue {
         })
     }
 
+    /// Records the observed end of a delivery's turn and reserves at most one
+    /// reminder. Call only for a ready pane with evidence that the turn moved.
+    /// The reservation is durable before the caller sends terminal input.
+    pub fn reserve_reply_reminder(
+        &mut self,
+        lease: &Lease,
+        re: &str,
+        delivery: &str,
+        remind_after_ms: i64,
+        now_ms: i64,
+    ) -> Result<Fenced<bool>> {
+        self.write(|tx| {
+            let owns_delivery = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM queue_items
+                  WHERE id = ?1 AND claims = ?2 AND delivery = ?3 AND status = 'running')",
+                params![lease.id, lease.claim, delivery],
+                |row| row.get::<_, bool>(0),
+            )?;
+            if !owns_delivery {
+                return Ok(Fenced::Stale);
+            }
+            let reply_exists = tx
+                .query_row(FIND_REPLY, params![re, delivery], |_| Ok(()))
+                .optional()?
+                .is_some();
+            if reply_exists {
+                return Ok(Fenced::Applied(false));
+            }
+            let (ended_at, reserved): (Option<i64>, bool) = tx.query_row(
+                "SELECT MIN(at) FILTER (WHERE kind = 'turn_ended'),
+                        COUNT(*) FILTER (WHERE kind = 'reminder_reserved') > 0
+                   FROM queue_events
+                  WHERE item_id = ?1 AND kind IN ('turn_ended', 'reminder_reserved')
+                    AND json_extract(data, '$.claim') = ?2
+                    AND json_extract(data, '$.delivery') = ?3",
+                params![lease.id, lease.claim, delivery],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if reserved {
+                return Ok(Fenced::Applied(false));
+            }
+            let data = json!({"claim": lease.claim, "delivery": delivery});
+            let ended_at = match ended_at {
+                Some(at) => at,
+                None => {
+                    event(tx, &lease.id, now_ms, "turn_ended", Some(&data))?;
+                    now_ms
+                }
+            };
+            let due = now_ms.saturating_sub(ended_at) >= remind_after_ms;
+            if due {
+                event(tx, &lease.id, now_ms, "reminder_reserved", Some(&data))?;
+            }
+            Ok(Fenced::Applied(due))
+        })
+    }
+
     pub fn find_reply(&self, re: &str, delivery: &str) -> Result<Option<Item>> {
         Ok(self
             .conn

@@ -14,7 +14,9 @@
 
 use super::*;
 use futures_util::future::BoxFuture;
-use herdr_capsule::{Capsule, CapsuleConfig, delivery_text, no_control_chars};
+use herdr_capsule::{
+    Capsule, CapsuleConfig, delivery_text, format::reply_command, no_control_chars,
+};
 use herdr_queue::{Consumer, Fenced, Lease, Outcome};
 use serde_json::json;
 
@@ -127,6 +129,7 @@ pub(crate) enum Step {
     Delivered(String),
     Waiting,
     Nudged,
+    Reminded,
     Replied(String),
     TurnEnded,
     Dead(String),
@@ -668,6 +671,36 @@ impl QueueService {
             }));
         }
         let mut step = Step::Waiting;
+        if flight.capsule.status == "task" && ready && turn_moved {
+            let lease = flight.lease.clone();
+            let re = flight.capsule.id.clone();
+            let delivery = flight.delivery.clone();
+            let remind_after = ms(server, MAIL_REMIND_AFTER_MS);
+            match self
+                .db(server, move |db| {
+                    Ok(db.reserve_reply_reminder(&lease, &re, &delivery, remind_after, now)?)
+                })
+                .await?
+            {
+                Fenced::Stale => return Ok(done(Step::Empty)),
+                Fenced::Applied(true) => {
+                    let command = reply_command(
+                        &flight.capsule,
+                        &capsule_config(server),
+                        Some(&flight.delivery),
+                    );
+                    let text = format!(
+                        "Reminder: reply to capsule {} with: {command}",
+                        flight.capsule.id
+                    );
+                    match postman.herdr.prompt(&flight.pane, &text).await {
+                        Ok(()) => step = Step::Reminded,
+                        Err(error) => tracing::warn!("mail {label}: reply reminder: {error:#}"),
+                    }
+                }
+                Fenced::Applied(false) => {}
+            }
+        }
         if let Some(at) = flight.confirm_at
             && now >= at
         {
