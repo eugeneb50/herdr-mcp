@@ -445,8 +445,12 @@ impl Queue {
         self.write(|tx| {
             let expired = query_items(
                 tx,
+                // An item with a recorded delivery was typed to an agent: its
+                // consumer (the postman) adopts it again after a restart and
+                // settles it by reply, turn end or deadline. Requeueing it
+                // would type it twice and orphan the agent's reply.
                 "SELECT * FROM queue_items WHERE status = 'running' AND lease_until <= ?1
-                 AND (?2 IS NULL OR queue = ?2) ORDER BY queue, seq",
+                 AND delivery IS NULL AND (?2 IS NULL OR queue = ?2) ORDER BY queue, seq",
                 params![now_ms, queue],
             )?;
             expired

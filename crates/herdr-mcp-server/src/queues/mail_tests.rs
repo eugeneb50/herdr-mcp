@@ -746,6 +746,44 @@ async fn cancelled_flight_emits_no_dead_notice() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn reaper_leaves_a_delivered_task_for_the_next_postman() {
+    // herdr-mcp down longer than the item lease: the reaper used to requeue
+    // the delivered task, so it was typed again under a new token and the
+    // agent's reply (sent meanwhile) matched nothing.
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    let capsule = task("one");
+    let id = f.push(&capsule);
+    let mut db = f.db();
+    let consumer = db
+        .claim_consumer(MAILBOX, "crashed", LEASE, f.now())
+        .unwrap()
+        .unwrap();
+    let Fenced::Applied(Some((_, lease))) = db.claim_owned(&consumer, LEASE, f.now()).unwrap()
+    else {
+        panic!("expected owned claim")
+    };
+    db.set_delivery(
+        &lease,
+        "old",
+        json!({"pane":PANE,"state_change_seq":1,"submitted":true}),
+        f.now(),
+    )
+    .unwrap();
+    let answer = f.push(&reply(&capsule, "old"));
+    elapsed(LEASE * 4).await;
+    assert!(
+        db.reap(f.now()).unwrap().is_empty(),
+        "delivered mail is the postman's"
+    );
+
+    f.step(&postman, Step::Replied(answer)).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Done);
+    assert_eq!(herdr.prompts(), 0);
+    herdr_queue::run_audit(&f.path(), None, None).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn restart_resends_only_a_delivery_without_submission_record() {
     for submitted in [false, true] {
         let f = Fixture::new(true).await;
