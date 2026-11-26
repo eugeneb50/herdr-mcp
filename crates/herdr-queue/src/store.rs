@@ -395,6 +395,10 @@ impl Queue {
     ) -> Result<Fenced<Item>> {
         self.write(|tx| {
             let finished = finish_item(tx, lease, Outcome::Dead(reason), now_ms)?;
+            // A reply rechecked by finish_item wins: no deadline notice.
+            if matches!(&finished, Fenced::Applied(item) if item.status == ItemStatus::Done) {
+                return Ok(finished);
+            }
             if matches!(finished, Fenced::Applied(_)) {
                 push_item(tx, notice, now_ms)?;
             }
@@ -743,14 +747,40 @@ fn finish_item(
 ) -> Result<Fenced<Item>> {
     let running = tx
         .query_row(
-            "SELECT attempts, max_attempts FROM queue_items
+            "SELECT * FROM queue_items
              WHERE id = ?1 AND status = 'running' AND claims = ?2",
             params![lease.id, lease.claim],
-            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?)),
+            read_item,
         )
         .optional()?;
-    let Some((attempt, max_attempts)) = running else {
+    let Some(item) = running else {
         return Ok(Fenced::Stale);
+    };
+    let attempt = item.attempts;
+    let max_attempts = item.max_attempts;
+    // The caller may have looked up the reply before another process committed
+    // it. Recheck inside this write before recording a failure or death.
+    let outcome = if matches!(&outcome, Outcome::Failed(_) | Outcome::Dead(_))
+        && item.payload.get("status").and_then(Value::as_str) == Some("task")
+    {
+        let reply = match (
+            item.payload.get("id").and_then(Value::as_str),
+            item.delivery.as_deref(),
+        ) {
+            (Some(re), Some(delivery)) => tx
+                .query_row(FIND_REPLY, params![re, delivery], read_item)
+                .optional()?,
+            _ => None,
+        };
+        match reply {
+            Some(reply) => Outcome::Done(json!({
+                "reply": reply.id,
+                "delivery": item.delivery.clone(),
+            })),
+            None => outcome,
+        }
+    } else {
+        outcome
     };
     let (status, kind, result, data) = match outcome {
         Outcome::Done(value) => (

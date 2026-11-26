@@ -182,6 +182,15 @@ fn capsule_config(server: &HerdrMcpServer) -> CapsuleConfig {
     }
 }
 
+/// The reply id the store recorded on a task it settled as done.
+fn reply_id(item: &Item) -> String {
+    item.result
+        .as_ref()
+        .and_then(|r| r["reply"].as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
 fn parse_capsule(item: &Item) -> std::result::Result<Capsule, String> {
     let cap = Capsule::from_value(&Value::Object(item.payload.clone()))
         .map_err(|e| format!("not a capsule: {e}"))?;
@@ -706,6 +715,10 @@ impl QueueService {
                 .await?;
             return Ok(done(match finished {
                 Fenced::Stale => Step::Empty,
+                // The store found a reply committed after our lookup.
+                Fenced::Applied(item) if item.status == ItemStatus::Done => {
+                    Step::Replied(reply_id(&item))
+                }
                 Fenced::Applied(item) if item.status == ItemStatus::Dead => Step::Dead(reason),
                 Fenced::Applied(_) => Step::Released(reason),
             }));
@@ -726,18 +739,22 @@ impl QueueService {
                 let notice = Self::timeout_notice(&flight, &reason)?;
                 let notice_queue = notice.queue.clone();
                 let (lease, reason, now) = (flight.lease.clone(), reason.clone(), self.now());
-                let applied = self
+                let finished = self
                     .db(server, move |db| {
-                        Ok(matches!(
-                            db.finish_dead_with_notice(&lease, reason, notice, now)?,
-                            Fenced::Applied(_)
-                        ))
+                        Ok(db.finish_dead_with_notice(&lease, reason, notice, now)?)
                     })
                     .await?;
-                if applied {
-                    self.wake(&notice_queue);
+                match finished {
+                    // The store found a reply committed after our lookup.
+                    Fenced::Applied(item) if item.status == ItemStatus::Done => {
+                        return Ok(done(Step::Replied(reply_id(&item))));
+                    }
+                    Fenced::Applied(_) => {
+                        self.wake(&notice_queue);
+                        true
+                    }
+                    Fenced::Stale => false,
                 }
-                applied
             } else {
                 self.finish_mail(server, &flight.lease, Outcome::Dead(reason.clone()))
                     .await?
