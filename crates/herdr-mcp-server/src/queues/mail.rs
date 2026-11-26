@@ -673,7 +673,13 @@ impl QueueService {
         // Two known counters are needed to classify a change; missing is neither a
         // change nor equality.
         let known = same_pane.and_then(|p| p.seq).zip(flight.seq);
-        let turn_moved = known.is_some_and(|(now, before)| now != before);
+        // A herdr restart reuses the pane ID but starts the agent's counter
+        // over. A lower counter is a new baseline, not a completed turn.
+        let reset = known.filter(|(now, before)| now < before);
+        if let Some((now, _)) = reset {
+            flight.seq = Some(now);
+        }
+        let turn_moved = reset.is_none() && known.is_some_and(|(now, before)| now != before);
         let ready = same_pane.is_some_and(|p| READY.contains(&p.status.as_str()));
         if flight.capsule.status == "task" {
             let (re, d) = (flight.capsule.id.clone(), flight.delivery.clone());
@@ -804,7 +810,7 @@ impl QueueService {
             && now >= at
         {
             flight.confirm_at = None; // exactly one extra Enter, even if it fails
-            if ready && known.is_some() && !turn_moved {
+            if ready && known.is_some() && reset.is_none() && !turn_moved {
                 match postman.herdr.enter(&flight.pane).await {
                     Ok(()) => step = Step::Nudged,
                     Err(error) => tracing::warn!("mail {label}: extra enter: {error:#}"),

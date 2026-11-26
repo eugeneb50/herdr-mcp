@@ -961,6 +961,49 @@ async fn relabelled_pane_keeps_status_evidence_for_flight() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn restarted_lower_seq_is_not_a_turn_end() {
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    herdr.pane("idle", 7);
+    let id = f.push(&Capsule {
+        status: "wip".into(),
+        ..task("notice")
+    });
+    f.tick(&postman).await; // delivered at seq 7
+    assert_eq!(f.item(&id).status, ItemStatus::Running);
+
+    herdr.pane("idle", 1); // restart: same pane ID, counter reset
+    f.step(&postman, Step::Waiting).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Running);
+
+    herdr.pane("idle", 2); // a real turn after the reset still finishes it
+    f.step(&postman, Step::TurnEnded).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Done);
+}
+
+#[tokio::test(start_paused = true)]
+async fn restarted_lower_seq_does_not_remind_the_task() {
+    let f = Fixture::new(true).await;
+    f.setting(MAIL_REMIND_AFTER_MS, Setting::Number(0));
+    let (herdr, postman) = fake();
+    herdr.pane("idle", 7);
+    let id = f.push(&task("one"));
+    f.tick(&postman).await; // delivered at seq 7
+    let prompts = herdr.prompts();
+
+    herdr.pane("idle", 1); // restart: same pane ID, counter reset
+    f.step(&postman, Step::Waiting).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Running);
+    assert_eq!(herdr.prompts(), prompts); // no reminder prompt
+    let events = f.db().item(&id).unwrap().unwrap().1;
+    assert!(
+        events
+            .iter()
+            .all(|e| e.kind != "turn_ended" && e.kind != "reminder_reserved")
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn turn_end_without_reply_gets_one_reminder() {
     let f = Fixture::new(true).await;
     f.setting(MAIL_REMIND_AFTER_MS, Setting::Number(2_000));
