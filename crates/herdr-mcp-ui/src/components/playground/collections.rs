@@ -312,8 +312,13 @@ fn CollectionView(
             let Some(run_id) = *live.peek() else {
                 continue;
             };
-            let Ok(events) = client.run_events(run_id, 0).await else {
-                continue;
+            let events = match client.run_events(run_id, 0).await {
+                Ok(events) => events,
+                Err(e) => {
+                    msg.set(Some(Err(format!("run events: {e}"))));
+                    live.set(None);
+                    continue;
+                }
             };
             states.set(node_states(&events));
             if events.iter().any(|e| e.kind.is_terminal()) {

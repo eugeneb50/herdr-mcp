@@ -3,7 +3,6 @@
 //! `herdr-mcp-api`, so this module keeps no copy of it.
 
 use dioxus::prelude::*;
-use gloo_timers::future::TimeoutFuture;
 use herdr_mcp_api::{
     Uuid,
     mail::{MailItemResponse, MailLabelStats, MailListQuery, MailStatsQuery},
@@ -13,7 +12,7 @@ use serde_json::Value;
 
 use super::queue_rows::{
     Cause, Group, bridge_unreachable, buttons, event_note, field, fmt_ms, item_id, refetch,
-    selected_row_by, utc_ms,
+    selected_row_by, use_poll, utc_ms,
 };
 use crate::{client::use_api, components::Route};
 
@@ -224,19 +223,7 @@ fn ActivityView(to: Option<String>, item: Option<String>, mut status: Signal<Str
     });
 
     let refresh = move |cause: Cause| restart(cause, meta, tick);
-    let poll_refresh = refresh;
-    use_future(move || async move {
-        loop {
-            let delay = *interval.peek();
-            TimeoutFuture::new(delay).await;
-            let visible = web_sys::window()
-                .and_then(|w| w.document())
-                .is_some_and(|doc| !doc.hidden());
-            if visible && !tick.pending() {
-                poll_refresh(Cause::Poll);
-            }
-        }
-    });
+    use_poll(interval, move || tick.pending(), refresh);
 
     let metadata = meta.read();
     let snapshot = tick.read();
@@ -429,20 +416,12 @@ fn HealthView() -> Element {
     });
 
     let refresh = move |cause: Cause| restart_health(cause, meta, tick);
-    let poll_refresh = refresh;
     let action_refresh = refresh;
-    use_future(move || async move {
-        loop {
-            let delay = *interval.peek();
-            TimeoutFuture::new(delay).await;
-            let visible = web_sys::window()
-                .and_then(|w| w.document())
-                .is_some_and(|doc| !doc.hidden());
-            if visible && !tick.pending() && !*action_pending.peek() {
-                poll_refresh(Cause::Poll);
-            }
-        }
-    });
+    use_poll(
+        interval,
+        move || tick.pending() || *action_pending.peek(),
+        refresh,
+    );
 
     let act = move |id: String| {
         if *action_pending.peek() {
