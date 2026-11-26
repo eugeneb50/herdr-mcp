@@ -104,7 +104,7 @@ pub fn Playground(
                 None => rsx! { Runs {} },
             },
             "queues" => rsx! { Queues { key: "{queue_key}", queue, item, status } },
-            "mail" => rsx! { Mail { key: "{mail_key}", to: mail_to, item: mail_item, status } },
+            "mail" => rsx! { Mail { key: "{mail_key}", view: mail_view, to: mail_to, item: mail_item, status } },
             "map" => rsx! { Map {} },
             _ => rsx! { Collections {} },
         }

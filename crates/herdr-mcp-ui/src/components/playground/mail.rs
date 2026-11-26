@@ -1,12 +1,12 @@
-//! Mail Playground tab (P0): read-only activity. A filtered capsule list and
-//! the selected capsule's event timeline, read through the typed bridge client.
-//! Every wire type is owned by `herdr-mcp-api`; this module keeps no copy.
+//! Mail Playground tab: read-only activity and the dead-letter Health view.
+//! Both read through the typed bridge client; every wire type is owned by
+//! `herdr-mcp-api`, so this module keeps no copy of it.
 
 use dioxus::prelude::*;
 use gloo_timers::future::TimeoutFuture;
 use herdr_mcp_api::{
     Uuid,
-    mail::{MailItemResponse, MailListQuery},
+    mail::{MailItemResponse, MailLabelStats, MailListQuery, MailStatsQuery},
     settings::{Settings, UI_QUEUES_POLL_MS},
 };
 use serde_json::Value;
@@ -19,6 +19,8 @@ use crate::{client::use_api, components::Route};
 
 const ITEM_LIMIT: u32 = 100;
 const VIEW: &str = "activity";
+const HEALTH: &str = "health";
+const DEAD: &str = "dead";
 
 type MailRow = MailItemResponse;
 /// The filtered page and the open capsule's history, read in one tick.
@@ -99,6 +101,44 @@ pub(super) fn last_event_at(events: &[Value]) -> Option<i64> {
     events.iter().filter_map(|event| event["at"].as_i64()).max()
 }
 
+/// The queue records a death only as the dead event's `data.error`.
+pub(super) fn dead_reason(events: &[Value]) -> Option<&str> {
+    events
+        .iter()
+        .rev()
+        .filter(|event| event["kind"].as_str() == Some(DEAD))
+        .find_map(|event| event["data"]["error"].as_str())
+}
+
+/// Which Health sections have nothing to show. Kept separate so one empty
+/// section never hides the other's data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct HealthEmpty {
+    pub(super) dead: bool,
+    pub(super) stats: bool,
+}
+
+pub(super) fn health_empty(dead: &[MailRow], stats: &[MailLabelStats]) -> HealthEmpty {
+    HealthEmpty {
+        dead: dead.is_empty(),
+        stats: stats.is_empty(),
+    }
+}
+
+/// A stats row as label + counts + last activity, in table order.
+pub(super) fn stats_cells(stats: &MailLabelStats) -> [String; 8] {
+    [
+        stats.to.clone(),
+        stats.depth.to_string(),
+        stats.in_flight.to_string(),
+        stats.delivered.to_string(),
+        stats.replied.to_string(),
+        stats.failed.to_string(),
+        stats.dead.to_string(),
+        fmt_ms(stats.last_activity_at),
+    ]
+}
+
 fn restart(cause: Cause, mut meta: Resource<Option<String>>, mut tick: Resource<Tick>) {
     if refetch(cause) == Group::All {
         meta.restart();
@@ -106,12 +146,40 @@ fn restart(cause: Cause, mut meta: Resource<Option<String>>, mut tick: Resource<
     tick.restart();
 }
 
+/// The URL owns the sub-view; the parent keys on it, so switching remounts.
 #[component]
 pub(super) fn Mail(
+    view: Option<String>,
     to: Option<String>,
     item: Option<String>,
-    mut status: Signal<String>,
+    status: Signal<String>,
 ) -> Element {
+    let active = view.as_deref().unwrap_or(VIEW);
+    let activity_to = to.clone();
+    let activity_item = item.clone();
+    rsx! {
+        div { class: "tabs",
+            Link {
+                class: if active == HEALTH { "tab" } else { "tab tab-active" },
+                to: mail_link(VIEW, to.clone(), item),
+                "Activity"
+            }
+            Link {
+                class: if active == HEALTH { "tab tab-active" } else { "tab" },
+                to: mail_link(HEALTH, to, None),
+                "Health"
+            }
+        }
+        if active == HEALTH {
+            HealthView {}
+        } else {
+            ActivityView { to: activity_to, item: activity_item, status }
+        }
+    }
+}
+
+#[component]
+fn ActivityView(to: Option<String>, item: Option<String>, mut status: Signal<String>) -> Element {
     let api = use_api();
     let interval = use_signal(|| Settings::default().number(UI_QUEUES_POLL_MS) as u32);
     let navigator = use_navigator();
@@ -314,6 +382,216 @@ fn CapsuleDetail(detail: MailRow) -> Element {
     }
 }
 
+/// Health reads settings and per-label stats on mount/action, dead items on
+/// every tick. Polls reuse `ui.queues-poll-ms`, like the Queues tab.
+type HealthMeta = (Option<String>, Result<Vec<MailLabelStats>, String>);
+type HealthTick = Result<Vec<MailRow>, String>;
+
+fn restart_health(cause: Cause, mut meta: Resource<HealthMeta>, mut tick: Resource<HealthTick>) {
+    if refetch(cause) == Group::All {
+        meta.restart();
+    }
+    tick.restart();
+}
+
+#[component]
+fn HealthView() -> Element {
+    let api = use_api();
+    let interval = use_signal(|| Settings::default().number(UI_QUEUES_POLL_MS) as u32);
+    let mut action_pending = use_signal(|| false);
+    let mut action_message = use_signal(|| None::<Result<String, String>>);
+
+    let meta = use_resource(move || {
+        let client = api();
+        let mut interval = interval;
+        async move {
+            let settings = client.settings().await;
+            let error = settings.as_ref().err().map(ToString::to_string);
+            if let Ok(settings) = &settings {
+                interval.set(settings.overrides().number(UI_QUEUES_POLL_MS) as u32);
+            }
+            let stats = client
+                .mail_stats(&MailStatsQuery::default())
+                .await
+                .map_err(|error| error.to_string());
+            (error, stats)
+        }
+    });
+
+    let tick = use_resource(move || {
+        let client = api();
+        async move {
+            client
+                .mail_items(&list_query("", DEAD))
+                .await
+                .map_err(|error| error.to_string())
+        }
+    });
+
+    let refresh = move |cause: Cause| restart_health(cause, meta, tick);
+    let poll_refresh = refresh;
+    let action_refresh = refresh;
+    use_future(move || async move {
+        loop {
+            let delay = *interval.peek();
+            TimeoutFuture::new(delay).await;
+            let visible = web_sys::window()
+                .and_then(|w| w.document())
+                .is_some_and(|doc| !doc.hidden());
+            if visible && !tick.pending() && !*action_pending.peek() {
+                poll_refresh(Cause::Poll);
+            }
+        }
+    });
+
+    let act = move |id: String| {
+        if *action_pending.peek() {
+            return;
+        }
+        action_pending.set(true);
+        action_message.set(None);
+        let client = api();
+        let refresh = action_refresh;
+        spawn(async move {
+            let reply = client.queue_retry(&id).await;
+            action_message.set(Some(
+                reply
+                    .map(|item| format!("Item status: {}", field(&item, "status")))
+                    .map_err(|error| error.to_string()),
+            ));
+            action_pending.set(false);
+            refresh(Cause::Action);
+        });
+    };
+
+    let metadata = meta.read();
+    let snapshot = tick.read();
+    let Some((settings_error, stats)) = metadata.as_ref() else {
+        return rsx! { p { role: "status", "Loading health…" } };
+    };
+    let Some(dead) = snapshot.as_ref() else {
+        return rsx! { p { role: "status", "Loading health…" } };
+    };
+    let attempts = vec![
+        Some(
+            settings_error
+                .as_ref()
+                .map_or(Ok(()), |error| Err(error.clone())),
+        ),
+        Some(stats.as_ref().map(|_| ()).map_err(Clone::clone)),
+        Some(dead.as_ref().map(|_| ()).map_err(Clone::clone)),
+    ];
+    if bridge_unreachable(&attempts) {
+        return rsx! {
+            div { class: "btn-row",
+                button { class: "btn", onclick: move |_| refresh(Cause::Manual), "Refresh health" }
+            }
+            p { role: "alert", class: "send-error", "Bridge unreachable — no mail health data could be read." }
+        };
+    }
+    let empty = match (dead, stats) {
+        (Ok(dead), Ok(stats)) => health_empty(dead, stats),
+        _ => HealthEmpty::default(),
+    };
+    rsx! {
+        div { class: "btn-row",
+            button { class: "btn", onclick: move |_| refresh(Cause::Manual), "Refresh health" }
+            if *meta.state().read() == UseResourceState::Pending
+                || *tick.state().read() == UseResourceState::Pending
+            {
+                span { class: "muted", role: "status", "Refreshing…" }
+            }
+        }
+        if let Some(error) = settings_error {
+            p { role: "alert", class: "send-error", "Settings read failed. {error}" }
+        }
+        div { class: "runs",
+            div { class: "card",
+                h2 { "Dead letters" }
+                match dead {
+                    Err(error) => rsx! { p { role: "alert", class: "send-error", "Dead letters unavailable. {error}" } },
+                    Ok(dead) => rsx! {
+                        p { class: "muted", "{dead.len()} dead · up to {ITEM_LIMIT}" }
+                        if empty.dead { p { "No dead letters." } }
+                        for row in dead {
+                            if let Some(id) = item_id(&row.item) {
+                                DeadRow { key: "{id}", row: row.clone(), pending: action_pending(), on_action: act }
+                            }
+                        }
+                    },
+                }
+                if let Some(message) = action_message() {
+                    match message {
+                        Ok(text) => rsx! { p { role: "status", "{text}" } },
+                        Err(error) => rsx! { p { role: "alert", class: "send-error", "{error}" } },
+                    }
+                }
+            }
+            div { class: "card",
+                h2 { "Per-label numbers" }
+                match stats {
+                    Err(error) => rsx! { p { role: "alert", class: "send-error", "Mail stats unavailable. {error}" } },
+                    Ok(stats) => rsx! {
+                        if empty.stats { p { "No mail labels configured." } }
+                        table { class: "table",
+                            thead {
+                                tr {
+                                    th { "Label" }
+                                    th { "Queued" }
+                                    th { "Running" }
+                                    th { "Delivered" }
+                                    th { "Replied" }
+                                    th { "Failed" }
+                                    th { "Dead" }
+                                    th { "Last activity" }
+                                }
+                            }
+                            tbody {
+                                for row in stats {
+                                    StatsRow { key: "{row.to}", stats: row.clone() }
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn DeadRow(row: MailRow, pending: bool, on_action: EventHandler<String>) -> Element {
+    let item = &row.item;
+    let Some(id) = item_id(item) else {
+        return rsx! {};
+    };
+    let payload = &item["payload"];
+    let retry_id = id.to_owned();
+    let reason = dead_reason(&row.events).unwrap_or("—");
+    rsx! {
+        div { class: "tree-item run-row",
+            span { class: "pill", "dead" }
+            Link { class: "tree-name mono", to: mail_link(VIEW, None, Some(id.to_owned())), "{id}" }
+            span { class: "muted", "capsule " {field(payload, "id")} " · task " {field(payload, "task")} }
+            span { class: "muted", "from " {field(payload, "from")} }
+            span { class: "muted", "reason {reason}" }
+            button { class: "btn", disabled: pending, onclick: move |_| on_action.call(retry_id.clone()), "Retry" }
+        }
+    }
+}
+
+#[component]
+fn StatsRow(stats: MailLabelStats) -> Element {
+    let cells = stats_cells(&stats);
+    rsx! {
+        tr {
+            for cell in cells {
+                td { "{cell}" }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,6 +633,14 @@ mod tests {
         assert_eq!(tab.as_deref(), Some("mail"));
         let plain = mail_link(VIEW, None, None);
         assert_eq!(mail_selection(&plain), (Some(VIEW.into()), None, None));
+    }
+
+    #[test]
+    fn health_link_selects_the_health_view() {
+        assert_eq!(
+            mail_selection(&mail_link(HEALTH, None, None)),
+            (Some(HEALTH.into()), None, None)
+        );
     }
 
     #[test]
@@ -425,5 +711,105 @@ mod tests {
             Some(9)
         );
         assert_eq!(last_event_at(&[]), None);
+    }
+
+    #[test]
+    fn dead_reason_reads_only_the_dead_events_data_error() {
+        let events = [
+            json!({"kind": "dead", "data": {"error": "old failure"}}),
+            json!({"kind": "done", "data": {"error": "not a death"}}),
+            json!({"kind": "dead", "data": {"error": "pane closed"}}),
+        ];
+        assert_eq!(dead_reason(&events), Some("pane closed"));
+        // The queue writes only data.error; other reason keys are not guesses.
+        for event in [
+            json!({"kind": "dead", "data": {"reason": "retry limit"}}),
+            json!({"kind": "dead", "data": {"message": "no pane"}}),
+            json!({"kind": "dead", "data": {"detail": "timeout"}}),
+            json!({"kind": "dead", "error": "top level"}),
+        ] {
+            assert_eq!(dead_reason(&[event]), None);
+        }
+        assert_eq!(dead_reason(&[json!({"kind": "done", "data": {}})]), None);
+        assert_eq!(dead_reason(&[]), None);
+    }
+
+    #[test]
+    fn health_query_asks_for_dead_items_only() {
+        let query = list_query("", DEAD);
+        assert_eq!(query.to, None);
+        assert_eq!(query.status.as_deref(), Some("dead"));
+        assert_eq!(query.limit, Some(ITEM_LIMIT));
+    }
+
+    #[test]
+    fn stats_cells_formats_counts_and_last_activity() {
+        let stats = MailLabelStats {
+            to: "lead".into(),
+            depth: 2,
+            in_flight: 1,
+            delivered: 3,
+            replied: 4,
+            failed: 5,
+            dead: 6,
+            median_reply_ms: None,
+            p90_reply_ms: None,
+            last_activity_at: Some(0),
+        };
+        assert_eq!(
+            stats_cells(&stats),
+            [
+                "lead",
+                "2",
+                "1",
+                "3",
+                "4",
+                "5",
+                "6",
+                "1970-01-01 00:00:00 UTC"
+            ]
+            .map(String::from)
+        );
+        let mut missing = stats;
+        missing.last_activity_at = None;
+        assert_eq!(stats_cells(&missing)[7], "—");
+    }
+
+    #[test]
+    fn health_empty_tracks_each_section_independently() {
+        let stats = MailLabelStats {
+            to: "lead".into(),
+            depth: 0,
+            in_flight: 0,
+            delivered: 0,
+            replied: 0,
+            failed: 0,
+            dead: 0,
+            median_reply_ms: None,
+            p90_reply_ms: None,
+            last_activity_at: None,
+        };
+        assert_eq!(
+            health_empty(&[], &[]),
+            HealthEmpty {
+                dead: true,
+                stats: true
+            }
+        );
+        assert_eq!(
+            health_empty(&[row("a")], &[]),
+            HealthEmpty {
+                dead: false,
+                stats: true
+            }
+        );
+        assert_eq!(
+            health_empty(&[], std::slice::from_ref(&stats)),
+            HealthEmpty {
+                dead: true,
+                stats: false
+            }
+        );
+        assert_eq!(health_empty(&[row("a")], &[stats]), HealthEmpty::default());
     }
 }
