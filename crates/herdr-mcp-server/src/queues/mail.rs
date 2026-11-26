@@ -544,7 +544,11 @@ impl QueueService {
                 return Ok(None);
             }
         };
-        let last = events.iter().rev().find(|e| e.kind == "delivered");
+        // A release keeps the delivery column: only this claim's record counts.
+        let last = events.iter().rev().find(|e| {
+            e.kind == "delivered"
+                && e.data.as_ref().and_then(|d| d["claim"].as_i64()) == Some(item.claims)
+        });
         let data = last.and_then(|e| e.data.clone()).unwrap_or(Value::Null);
         let (Some(delivery), true) = (item.delivery.clone(), data["submitted"] == true) else {
             // Claimed, maybe recorded, never confirmed typed: put it back so
