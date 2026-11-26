@@ -72,6 +72,32 @@ impl Store {
             .filter_map(|it| it.dedupe_key.clone())
             .collect())
     }
+    /// The task delivered into `pane` that is still waiting for its reply:
+    /// (task capsule, delivery id). Read from the item's last `delivered` event.
+    pub fn open_delivery(&mut self, pane: &str) -> Result<Option<(Capsule, String)>> {
+        for item in self.q.list_running_delivered()? {
+            let Some((_, events)) = self.q.item(&item.id)? else {
+                continue;
+            };
+            let delivered_here = events
+                .iter()
+                .rev()
+                .find(|e| e.kind == "delivered")
+                .and_then(|e| e.data.as_ref())
+                .is_some_and(|d| d["pane"] == pane);
+            if !delivered_here {
+                continue;
+            }
+            if let (Ok(cap), Some(delivery)) = (
+                Capsule::from_value(&serde_json::Value::Object(item.payload.clone())),
+                item.delivery.clone(),
+            ) && cap.status == "task"
+            {
+                return Ok(Some((cap, delivery)));
+            }
+        }
+        Ok(None)
+    }
     pub fn find_capsule(&mut self, id: &str) -> Result<Option<Capsule>> {
         let mut found = Vec::new();
         for to in self.mailboxes()? {

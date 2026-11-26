@@ -250,23 +250,21 @@ pub fn delivery_text(c: &Capsule, cfg: &CapsuleConfig, delivery: Option<&str>) -
     if c.status != "task" {
         return head + &read;
     }
-    let delivery = delivery
-        .map(|d| format!(" --delivery {}", q(d)))
-        .unwrap_or_default();
-    let report = q(&format!(
-        "file={}/{}/{}-report.md::report",
-        cfg.work.display(),
-        c.task,
-        c.id
-    ));
+    let token = match delivery {
+        Some(d) => format!("{}@{d}", c.id),
+        None => c.id.clone(),
+    };
     let reply = format!(
-        " When done or stuck, reply with ONE command: {} send --re {}{delivery} --to {} --task {} --status done|fail|block --summary \"<=120 chars\" --artifact {report} ; then reply with its CAP line only and stop.",
+        " Write your report to {} . When done or stuck, run ONE command: {} reply {} done|fail|block \"<=120 chars\" ; then reply with its CAP line only and stop.",
+        q(&report_path(cfg, &c.task, &c.id).display().to_string()),
         q(&cfg.exe),
-        q(&c.id),
-        q(c.reply_to.as_deref().unwrap_or("lead")),
-        q(&c.task)
+        q(&token),
     );
     head + &read + &reply
+}
+/// Where the agent answering task capsule `id` writes its report.
+pub fn report_path(cfg: &CapsuleConfig, task: &str, id: &str) -> std::path::PathBuf {
+    cfg.work.join(task).join(format!("{id}-report.md"))
 }
 pub fn pack_summary(closer: &str, n: usize, k: usize, name: &str) -> String {
     let head = format!("rollup {n} \u{b7} ");

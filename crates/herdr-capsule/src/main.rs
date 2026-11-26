@@ -25,6 +25,23 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Send(#[command(flatten)] Box<SendSpec>),
+    /// Answer a delivered task: `capsule reply <id>@<delivery> done "summary"`.
+    /// Recipient, task and report artifact come from the task itself.
+    Reply {
+        /// `<capsule id>@<delivery>` exactly as the delivery text gives it.
+        #[arg(value_name = "id@delivery")]
+        token: String,
+        #[arg(value_parser = ["done", "fail", "block"])]
+        status: String,
+        /// At most 120 chars; the words may be unquoted.
+        #[arg(required = true, num_args = 1..)]
+        summary: Vec<String>,
+        /// Extra artifacts (KIND=REF); the report file is added when it exists.
+        #[arg(long)]
+        artifact: Vec<String>,
+        #[arg(long, value_parser = SKINS)]
+        skin: Option<String>,
+    },
     Brief {
         #[arg(long, default_value = "lead")]
         to: String,
@@ -208,6 +225,51 @@ fn announce(cfg: &CapsuleConfig, cap: &Capsule, herdr: &CliHerdr) -> AppResult<O
         Err(e) => Ok(Some(format!("trigger event failed: {e}"))),
     }
 }
+/// The send a `reply` stands for: the task names recipient, task and report.
+fn reply_spec(
+    token: &str,
+    status: String,
+    summary: String,
+    mut artifact: Vec<String>,
+    cfg: &CapsuleConfig,
+) -> AppResult<SendSpec> {
+    let (id, delivery) = match token.split_once('@') {
+        Some((id, d)) => (id, Some(d.to_string())),
+        None => (token, None),
+    };
+    let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
+    let task = store.find_capsule(id)?.ok_or_else(|| {
+        err(format!(
+            "no capsule {}: copy <id>@<delivery> from the delivery text",
+            herdr_capsule::py_repr(id)
+        ))
+    })?;
+    if task.status != "task" {
+        return Err(err(format!(
+            "{id} is a {} capsule, not a task",
+            task.status
+        )));
+    }
+    let report = herdr_capsule::report_path(cfg, &task.task, &task.id);
+    if report.is_file() {
+        artifact.insert(0, format!("file={}::report", report.display()));
+    } else if status == "done" && artifact.is_empty() {
+        return Err(err(format!(
+            "write your report first: {} (then run this reply again)",
+            report.display()
+        )));
+    }
+    Ok(SendSpec {
+        to: task.reply_to.clone().unwrap_or_else(|| task.from.clone()),
+        task: task.task.clone(),
+        status,
+        summary,
+        artifact,
+        re: Some(task.id.clone()),
+        delivery,
+        ..SendSpec::default()
+    })
+}
 fn send_impl(
     spec: SendSpec,
     cfg: &CapsuleConfig,
@@ -285,6 +347,23 @@ fn send_impl(
         roll = Some(Rollup { count: n });
     }
     let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
+    // An agent answering its delivered task without --re would leave the task
+    // open until its deadline: point it at the one reply that closes it.
+    if spec.re.is_none()
+        && matches!(spec.status.as_str(), "done" | "fail" | "block")
+        && let Some(pane) = cfg.pane.as_deref()
+        && let Some((task, delivery)) = store.open_delivery(pane)?
+        && task.task == spec.task
+    {
+        return Err(err(format!(
+            "task {} was delivered to you and is waiting for its reply; send it with: {} reply {}@{} {} \"<=120 chars>\"",
+            task.task,
+            herdr_capsule::shlex_quote(&cfg.exe),
+            task.id,
+            delivery,
+            spec.status
+        )));
+    }
     let cid = mint_id(&mut store)?;
     let check_cmd = if spec.re.is_some() && spec.status != "task" {
         reply_check_of(&mut store, re, spec.check.as_deref())?
@@ -686,6 +765,17 @@ fn real_main() -> AppResult<()> {
         Commands::Send(spec) => {
             let skin = skin_of(spec.skin.as_deref(), &cfg)?;
             println!("{}", send_impl(*spec, &cfg, &skin, &g)?);
+        }
+        Commands::Reply {
+            token,
+            status,
+            summary,
+            artifact,
+            skin,
+        } => {
+            let skin = skin_of(skin.as_deref(), &cfg)?;
+            let spec = reply_spec(&token, status, summary.join(" "), artifact, &cfg)?;
+            println!("{}", send_impl(spec, &cfg, &skin, &g)?);
         }
         Commands::Brief {
             to,

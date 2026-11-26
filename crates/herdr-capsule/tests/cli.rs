@@ -119,8 +119,11 @@ fn test_idle_agent_gets_the_task_with_its_reply_command() {
     let (pane, text) = &prompts[0];
     assert_eq!(pane, "w1:p2");
     assert!(text.contains(&cid));
-    assert!(text.contains(&format!("--re {cid}")));
-    assert!(text.contains("--to lead"));
+    assert!(
+        text.contains(&format!("reply {cid} done|fail|block")),
+        "{text}"
+    );
+    assert!(text.contains(&format!("t1/{cid}-report.md")), "{text}");
     // The check's shell text is never typed: `send --re` runs the task's
     // pinned check itself (agent-executor contract, "Formatter").
     assert!(!text.contains("sh /x/check.sh"), "{text}");
@@ -565,17 +568,16 @@ fn test_delivery_quotes_every_field_of_the_reply_command() {
     let prompts = f.prompts();
     let text = &prompts[0].1;
     let cmd = text
-        .split("reply with ONE command: ")
+        .split("Write your report to ")
         .nth(1)
         .unwrap()
-        .split(" ; then reply")
+        .split(" . When done")
         .next()
         .unwrap();
+    // The report path carries the task name: it must stay one shell word.
     let words = shlex_split(cmd);
-    assert!(
-        words.iter().any(|w| w == &task_name),
-        "the task name was split or unquoted: {cmd}"
-    );
+    assert_eq!(words.len(), 1, "the report path was split: {cmd}");
+    assert!(words[0].contains(&task_name), "{cmd}");
 }
 
 #[test]
@@ -764,4 +766,119 @@ fn a_reply_names_the_delivery_it_answers() {
         !bare.status.success(),
         "--delivery without --re must be refused"
     );
+}
+
+/// What the postman does when it types a task: claim it and record the
+/// delivery (with its pane) on the item.
+fn mark_delivered(f: &Fixture, to: &str, delivery: &str, pane: &str) {
+    let mut q = herdr_queue::Queue::open(&f.queue_db).expect("open queue");
+    let (_, lease) = q
+        .claim(&format!("mail-{to}"), 600_000, 1)
+        .expect("claim")
+        .expect("a queued task");
+    let set = q
+        .set_delivery(
+            &lease,
+            delivery,
+            json!({"pane": pane, "submitted": true}),
+            2,
+        )
+        .expect("set delivery");
+    assert_eq!(set, herdr_queue::Fenced::Applied(()));
+}
+
+#[test]
+fn reply_closes_its_task_with_one_short_command() {
+    // Weak models drop or mangle `send --re X --delivery Y --to Z --task T`;
+    // `reply <id>@<delivery>` takes everything else from the task.
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    let report = f.work.join("t1").join(format!("{cid}-report.md"));
+    fs::create_dir_all(report.parent().unwrap()).unwrap();
+    fs::write(&report, "all good\n").unwrap();
+    let token = format!("{cid}@d-1");
+    let out = f.run(&["reply", &token, "done", "built", "it", "fine"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let reply = f
+        .items("lead", None)
+        .into_iter()
+        .find(|i| i["payload"]["re"] == cid.as_str())
+        .expect("reply in mail-lead");
+    let p = &reply["payload"];
+    assert_eq!(p["delivery"], "d-1");
+    assert_eq!(p["task"], "t1");
+    assert_eq!(p["status"], "done");
+    assert_eq!(p["summary"], "built it fine");
+    assert_eq!(p["artifacts"][0]["ref"], report.display().to_string());
+    assert_eq!(p["check"]["exit"], 0, "the task's pinned check ran: {p}");
+}
+
+#[test]
+fn reply_done_without_its_report_says_where_to_write_it() {
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    let token = format!("{cid}@d-1");
+    let out = f.run(&["reply", &token, "done", "x"], &[]);
+    assert!(!out.status.success());
+    let want = format!("t1/{cid}-report.md");
+    assert!(stderr(&out).contains(&want), "{}", stderr(&out));
+    assert!(f.items("lead", None).is_empty(), "nothing sent");
+    // Stuck is fine without a report.
+    let out = f.run(&["reply", &token, "block", "need", "access"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn reply_to_an_unknown_capsule_is_refused() {
+    let f = Fixture::new();
+    let out = f.run(&["reply", "nosuch@d-1", "fail", "x"], &[]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("no capsule 'nosuch'"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn send_without_re_for_a_delivered_task_names_the_reply_command() {
+    // Live failure 2026-11-25: hermes answered `send --to lead --task T
+    // --status done` without --re; the task stayed open until its deadline.
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    mark_delivered(&f, "builder", "d-9", "w1:p2");
+    let args = [
+        "send",
+        "--to",
+        "lead",
+        "--task",
+        "t1",
+        "--status",
+        "fail",
+        "--summary",
+        "x",
+    ];
+    let out = f.run(&args, &[("HERDR_PANE_ID", "w1:p2")]);
+    assert!(
+        !out.status.success(),
+        "the open delivery must be answered by reply"
+    );
+    let want = format!("reply {cid}@d-9 fail");
+    assert!(stderr(&out).contains(&want), "{}", stderr(&out));
+    // Another pane, or another task, is not this delivery.
+    let out = f.run(&args, &[("HERDR_PANE_ID", "w1:p3")]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let other = [
+        "send",
+        "--to",
+        "lead",
+        "--task",
+        "t2",
+        "--status",
+        "fail",
+        "--summary",
+        "x",
+    ];
+    let out = f.run(&other, &[("HERDR_PANE_ID", "w1:p2")]);
+    assert!(out.status.success(), "{}", stderr(&out));
 }

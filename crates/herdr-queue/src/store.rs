@@ -510,6 +510,16 @@ impl Queue {
         )
     }
 
+    /// Running items that a consumer has recorded a delivery for.
+    pub fn list_running_delivered(&mut self) -> Result<Vec<Item>> {
+        query_items(
+            &self.conn,
+            "SELECT * FROM queue_items WHERE status = 'running' AND delivery IS NOT NULL
+             ORDER BY queue, seq",
+            [],
+        )
+    }
+
     pub fn get(&self, id: &str) -> Result<Item> {
         get_item(&self.conn, id)
     }

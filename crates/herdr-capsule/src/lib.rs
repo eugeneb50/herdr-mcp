@@ -15,7 +15,7 @@ pub use config::CapsuleConfig;
 pub use deliver::{
     CliHerdr, Herdr, Pane, confirm_submitted, deliver_pass, fenced, panes_by_label, replied,
 };
-pub use format::{card, delivery_text, head, line, pack_summary, shlex_quote};
+pub use format::{card, delivery_text, head, line, pack_summary, report_path, shlex_quote};
 pub use id::{confusable, mint, mint_id, syllables};
 use std::path::PathBuf;
 pub use store::Store;
