@@ -83,6 +83,22 @@ pub fn json_pretty(value: &serde_json::Value) -> Result<String> {
 pub fn normalize_summary(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+/// `task` and `id` become directories and file names of the report path
+/// (`<work>/<task>/<id>-report.md`): one plain path part each.
+pub fn report_path_parts(fields: &[(&str, &str)]) -> Result<()> {
+    for (name, value) in fields {
+        let plain = value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if !plain || value.is_empty() || matches!(*value, "." | "..") {
+            return Err(fail(format!(
+                "--{name} {value:?} names a directory of the report path: use letters, digits, . _ - (not . or ..)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn no_control_chars(fields: &[(&str, &str)], specs: &[String]) -> Result<()> {
     for (name, value) in fields {
         let v = if *name == "summary" {

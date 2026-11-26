@@ -23,7 +23,7 @@ enum Commands {
         /// `<capsule id>@<delivery>` exactly as the delivery text gives it.
         #[arg(value_name = "id@delivery")]
         token: String,
-        #[arg(value_parser = ["done", "fail", "block"])]
+        #[arg(value_parser = ["done", "fail", "block"], ignore_case = true)]
         status: String,
         /// At most 120 chars; the words may be unquoted.
         #[arg(required = true, num_args = 1..)]
@@ -321,6 +321,12 @@ fn send_impl(
         ],
         &spec.artifact,
     )?;
+    herdr_capsule::report_path_parts(&[("task", spec.task.as_str())])?;
+    if !reply_to.is_empty() && !herdr_queue::valid_queue_name(&format!("mail-{reply_to}")) {
+        return Err(err(format!(
+            "--reply-to {reply_to:?}: use a mailbox label (lowercase letters, digits, - and _)"
+        )));
+    }
     let summary = normalize_summary(&spec.summary);
     if summary.is_empty() {
         return Err(err("--summary is empty"));
@@ -764,6 +770,7 @@ fn real_main() -> AppResult<()> {
             skin,
         } => {
             let skin = skin_of(skin.as_deref(), &cfg)?;
+            let status = status.to_ascii_lowercase();
             let spec = reply_spec(&token, status, summary.join(" "), artifact, &cfg)?;
             println!("{}", send_impl(spec, &cfg, &skin, &g)?);
         }

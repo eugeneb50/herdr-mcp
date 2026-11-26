@@ -204,6 +204,8 @@ fn parse_capsule(item: &Item) -> std::result::Result<Capsule, String> {
     let mut refs: Vec<String> = cap.artifacts.iter().map(|a| a.reference.clone()).collect();
     refs.extend(cap.artifacts.iter().filter_map(|a| a.note.clone()));
     no_control_chars(&fields, &refs).map_err(|e| e.to_string())?;
+    herdr_capsule::report_path_parts(&[("id", cap.id.as_str()), ("task", cap.task.as_str())])
+        .map_err(|e| e.to_string())?;
     Ok(cap)
 }
 
@@ -816,11 +818,15 @@ impl QueueService {
     }
 
     fn notice_push(task: &Capsule, id: String, reason: &str) -> Result<Push> {
-        let to = task
-            .reply_to
-            .clone()
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| task.from.clone());
+        // A name no mailbox can have would roll back the whole dead + notice
+        // write on every pass: fall back to the sender, then the lead.
+        let mailbox = |t: &&String| herdr_queue::valid_queue_name(&format!("mail-{t}"));
+        let to = [task.reply_to.as_ref(), Some(&task.from)]
+            .into_iter()
+            .flatten()
+            .find(mailbox)
+            .cloned()
+            .unwrap_or_else(|| "lead".into());
         let queue = format!("mail-{to}");
         let notice = Capsule {
             v: 2,

@@ -7,7 +7,7 @@ pub mod id;
 pub mod store;
 pub use capsule::{
     Artifact, Capsule, Check, KINDS, Rollup, SKINS, STATUSES, artifact, no_control_chars,
-    normalize_summary,
+    normalize_summary, report_path_parts,
 };
 pub use check::{check_files, decisive, reply_check_of, run_check};
 pub use config::CapsuleConfig;

@@ -983,15 +983,20 @@ fn lease_until(lease_ms: u64, now_ms: i64) -> Option<i64> {
         .and_then(|ms| now_ms.checked_add(ms))
 }
 
-fn validate_name(queue: &str) -> Result<()> {
+/// Whether `queue` is a name a push accepts: `[a-z0-9][a-z0-9_-]*`, at most
+/// 64 bytes, or a UUID.
+pub fn valid_queue_name(queue: &str) -> bool {
     let alphanumeric = |byte: &u8| byte.is_ascii_lowercase() || byte.is_ascii_digit();
-    if queue.len() <= 64
+    queue.len() <= 64
         && queue.as_bytes().first().is_some_and(alphanumeric)
         && queue
             .bytes()
             .all(|byte| alphanumeric(&byte) || matches!(byte, b'_' | b'-'))
         || Uuid::parse_str(queue).is_ok()
-    {
+}
+
+fn validate_name(queue: &str) -> Result<()> {
+    if valid_queue_name(queue) {
         Ok(())
     } else {
         Err(QueueError::InvalidQueueName(queue.into()))

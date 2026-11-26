@@ -510,6 +510,22 @@ fn reply_closes_its_task_with_one_short_command() {
 }
 
 #[test]
+fn reply_status_ignores_case() {
+    // A model that types DONE must not leave its task open until the deadline.
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    let token = format!("{cid}@d-1");
+    let out = f.run(&["reply", &token, "BLOCK", "need", "input"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let reply = f
+        .items("lead", None)
+        .into_iter()
+        .find(|i| i["payload"]["re"] == cid.as_str())
+        .expect("reply in mail-lead");
+    assert_eq!(reply["payload"]["status"], "block");
+}
+
+#[test]
 fn reply_done_without_its_report_says_where_to_write_it() {
     let f = Fixture::new();
     let (cid, _) = f.task_with_check("true");
@@ -534,6 +550,52 @@ fn reply_to_an_unknown_capsule_is_refused() {
         "{}",
         stderr(&out)
     );
+}
+
+#[test]
+fn a_task_name_that_is_a_path_is_refused() {
+    let f = Fixture::new();
+    for task in ["../escape", "a/b", "..", "a::b"] {
+        let args = [
+            "send",
+            "--to",
+            "builder",
+            "--task",
+            task,
+            "--status",
+            "task",
+            "--summary",
+            "x",
+        ];
+        let out = f.run(&args, &[]);
+        assert!(!out.status.success(), "{task} accepted");
+        assert!(
+            stderr(&out).contains("names a directory"),
+            "{}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
+fn a_task_whose_reply_to_is_no_mailbox_name_is_refused() {
+    let f = Fixture::new();
+    let args = [
+        "send",
+        "--to",
+        "builder",
+        "--task",
+        "t1",
+        "--status",
+        "task",
+        "--summary",
+        "x",
+        "--reply-to",
+        "Bad Label",
+    ];
+    let out = f.run(&args, &[]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("--reply-to"), "{}", stderr(&out));
 }
 
 #[test]

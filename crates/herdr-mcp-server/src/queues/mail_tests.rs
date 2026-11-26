@@ -681,6 +681,29 @@ async fn reply_deadline_retries_after_notice_enqueue_rolls_back() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn bad_reply_label_sends_the_dead_notice_to_the_sender() {
+    // A stored reply_to that is no mailbox name must not roll back the
+    // dead + notice write forever (the lease would keep the mailbox busy).
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    let capsule = Capsule {
+        reply_to: Some("Bad Label".into()),
+        ..task("one")
+    };
+    let id = f.push(&capsule);
+    f.tick(&postman).await;
+    herdr.pane("blocked", 2);
+    elapsed(WAIT).await;
+    f.tick(&postman).await;
+
+    assert_eq!(f.item(&id).status, ItemStatus::Dead);
+    let notices = f.db().list(Some("mail-lead"), None, 10).unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].payload["re"], capsule.id);
+    herdr_queue::run_audit(&f.path(), None, None).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn cancelled_flight_emits_no_dead_notice() {
     let f = Fixture::new(true).await;
     let (herdr, postman) = fake();
@@ -840,6 +863,11 @@ async fn raw_capsule_control_characters_never_reach_a_pane() {
         Capsule {
             from: "lead\u{1b}".into(),
             ..task("control")
+        },
+        // The task names the report directory: no path escape.
+        Capsule {
+            task: "../escape".into(),
+            ..task("escape")
         },
     ] {
         let id = f.push(&capsule);
