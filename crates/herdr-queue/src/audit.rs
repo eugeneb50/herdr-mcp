@@ -1,5 +1,5 @@
 //! Offline audit oracle for herdr-queue histories.
-//! Byte-identical to briefs/checks/queue-audit.py.
+//! Also verifies delivery history and terminal failures introduced in schema v2.
 
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Map, Value};
@@ -28,7 +28,7 @@ impl fmt::Display for AuditError {
 }
 impl std::error::Error for AuditError {}
 
-/// Only the nine columns the oracle reads; no `claims`, so old DBs work.
+/// Columns used to reconcile the row with its event history.
 struct Row {
     id: String,
     queue: String,
@@ -39,6 +39,7 @@ struct Row {
     coalesce_key: Option<String>,
     run_id: Option<String>,
     lease_until: Option<i64>,
+    delivery: Option<String>,
 }
 struct Event {
     seq: i64,
@@ -80,6 +81,7 @@ fn parse_data(raw: Option<&str>) -> Option<Map<String, Value>> {
 fn trans(kind: &str) -> (Option<&'static [&'static str]>, Option<&'static str>) {
     match kind {
         "enqueued" => (None, Some("queued")),
+        "delivered" | "turn_ended" | "reminder_reserved" => (Some(&["running"]), Some("running")),
         "run_started" => (Some(&["running"]), Some("running")),
         "done" => (Some(&["running"]), Some("done")),
         "failed" => (Some(&["running"]), Some("running")),
@@ -107,6 +109,8 @@ fn fold(row: &Row, events: &[Event], v: &mut Vec<String>) -> (Option<&'static st
     let ma = row.max_attempts;
     let mut last_claim: Option<i64> = None;
     let mut cycled = false;
+    let mut last_delivery = None;
+    let mut explicit_dead = false;
     for ev in events {
         let (kind, seq) = (ev.kind.as_str(), ev.seq);
         let data = match parse_data(ev.data.as_deref()) {
@@ -121,7 +125,13 @@ fn fold(row: &Row, events: &[Event], v: &mut Vec<String>) -> (Option<&'static st
         if kind == "deduped" || kind == "coalesced" {
             continue;
         }
-        let (exp, nxt) = trans(kind);
+        let undeliverable =
+            kind == "dead" && data.get("undeliverable").and_then(Value::as_bool) == Some(true);
+        let (exp, nxt) = if undeliverable {
+            (Some(&["queued"][..]), Some("dead"))
+        } else {
+            trans(kind)
+        };
         match exp {
             None => {
                 let known = matches!(
@@ -143,7 +153,12 @@ fn fold(row: &Row, events: &[Event], v: &mut Vec<String>) -> (Option<&'static st
             }
             Some(exp) => {
                 if !status.is_some_and(|s| exp.contains(&s)) {
-                    let what = msg(kind).replacen("%s", status.unwrap_or("None"), 1);
+                    let template = if undeliverable {
+                        "expected queued, got %s"
+                    } else {
+                        msg(kind)
+                    };
+                    let what = template.replacen("%s", status.unwrap_or("None"), 1);
                     bad(v, &row.id, seq, status, kind, &what);
                     continue;
                 }
@@ -182,7 +197,43 @@ fn fold(row: &Row, events: &[Event], v: &mut Vec<String>) -> (Option<&'static st
                     attempts = 0;
                 }
             }
+            "delivered" => {
+                if let Some(delivery) = data.get("delivery").and_then(Value::as_str) {
+                    last_delivery = Some(delivery.to_owned());
+                } else {
+                    bad(v, &row.id, seq, status, kind, "missing delivery ID");
+                }
+            }
+            "turn_ended" | "reminder_reserved" => {
+                if claim.is_none()
+                    || claim != last_claim
+                    || last_delivery.is_none()
+                    || data.get("delivery").and_then(Value::as_str) != last_delivery.as_deref()
+                {
+                    bad(
+                        v,
+                        &row.id,
+                        seq,
+                        status,
+                        kind,
+                        "event must name the current delivery",
+                    );
+                }
+            }
+            "dead" => {
+                let terminal = if undeliverable {
+                    attempt.is_none() && claim.is_none()
+                } else {
+                    attempt == Some(attempts) && claim.is_some() && claim == last_claim
+                };
+                explicit_dead = terminal && data.get("error").and_then(Value::as_str).is_some();
+                if undeliverable && !explicit_dead {
+                    bad(v, &row.id, seq, status, kind, "invalid undeliverable event");
+                }
+                status = nxt;
+            }
             "stalled" => {
+                explicit_dead = false;
                 status = if attempts >= ma {
                     Some("dead")
                 } else {
@@ -197,6 +248,21 @@ fn fold(row: &Row, events: &[Event], v: &mut Vec<String>) -> (Option<&'static st
         if attempts > ma {
             let what = format!("attempts {attempts} > max_attempts {ma}");
             bad(v, &row.id, seq, status, kind, &what);
+        }
+    }
+    if row.delivery != last_delivery {
+        rowbad(v, row, "delivery does not match the last delivered event");
+    }
+    if row.status == "dead" {
+        if status.is_none() {
+            rowbad(v, row, "dead row has no terminal event");
+        }
+        if row.attempts != row.max_attempts && !(status == Some("dead") && explicit_dead) {
+            let what = format!(
+                "dead at attempts {} != max_attempts {}",
+                row.attempts, row.max_attempts
+            );
+            rowbad(v, row, &what);
         }
     }
     (status, attempts, cycled)
@@ -297,13 +363,28 @@ pub fn run_audit(
 ) -> Result<(), AuditError> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(AuditError::Sqlite)?;
+    // One read transaction pins the snapshot across both statements: a writer
+    // committing between the row and event reads must not yield a torn audit.
+    let tx = conn.unchecked_transaction().map_err(AuditError::Sqlite)?;
+    let has_delivery = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('queue_items') WHERE name = 'delivery')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(AuditError::Sqlite)?;
+    let delivery = if has_delivery {
+        "delivery"
+    } else {
+        "NULL AS delivery"
+    };
     let mut rows: Vec<Row> = Vec::new();
     {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, queue, status, attempts, max_attempts, dedupe_key, coalesce_key, \
-                 run_id, lease_until FROM queue_items",
-            )
+        let mut stmt = tx
+            .prepare(&format!(
+                "SELECT id, queue, status, attempts, max_attempts, dedupe_key, coalesce_key,
+                 run_id, lease_until, {delivery} FROM queue_items"
+            ))
             .map_err(AuditError::Sqlite)?;
         let mapped = stmt
             .query_map([], |r| {
@@ -317,6 +398,7 @@ pub fn run_audit(
                     coalesce_key: r.get("coalesce_key")?,
                     run_id: r.get("run_id")?,
                     lease_until: r.get("lease_until")?,
+                    delivery: r.get("delivery")?,
                 })
             })
             .map_err(AuditError::Sqlite)?;
@@ -326,7 +408,7 @@ pub fn run_audit(
     }
     let mut events: HashMap<String, Vec<Event>> = HashMap::new();
     {
-        let mut stmt = conn
+        let mut stmt = tx
             .prepare("SELECT item_id, seq, kind, data FROM queue_events ORDER BY item_id, seq")
             .map_err(AuditError::Sqlite)?;
         let mapped = stmt
@@ -371,13 +453,6 @@ pub fn run_audit(
         }
         if row.status == "queued" && row.run_id.is_some() {
             rowbad(&mut v, row, "queued row has run_id");
-        }
-        if row.status == "dead" && row.attempts != row.max_attempts {
-            let what = format!(
-                "dead at attempts {} != max_attempts {}",
-                row.attempts, row.max_attempts
-            );
-            rowbad(&mut v, row, &what);
         }
     }
 

@@ -2,20 +2,12 @@ use anyhow::{Context, Error as AppError, Result as AppResult};
 use clap::{Parser, Subcommand};
 use herdr_capsule::format as fmt;
 use herdr_capsule::{
-    Artifact, Capsule, CapsuleConfig, Check, CliHerdr, Herdr, Rollup, SKINS, STATUSES, Store,
-    artifact, card, check_files, decisive, fail, id::mint_id, line, no_control_chars,
-    normalize_summary, reply_check_of, run_check,
+    Artifact, Capsule, CapsuleConfig, Check, Rollup, SKINS, STATUSES, Store, artifact, card,
+    check_files, decisive, fail, id::mint_id, line, no_control_chars, normalize_summary,
+    reply_check_of, run_check,
 };
 use serde_json::{Value, json};
-use std::{
-    collections::HashSet,
-    fs,
-    io::Write,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    thread,
-    time::Duration,
-};
+use std::{collections::HashSet, fs, io::Write, path::Path, thread, time::Duration};
 #[derive(Parser)]
 #[command(name = "capsule", about = "short messages that point at work")]
 struct Cli {
@@ -24,7 +16,24 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Commands {
-    Send(#[command(flatten)] SendSpec),
+    Send(#[command(flatten)] Box<SendSpec>),
+    /// Answer a delivered task: `capsule reply <id>@<delivery> done "summary"`.
+    /// Recipient, task and report artifact come from the task itself.
+    Reply {
+        /// `<capsule id>@<delivery>` exactly as the delivery text gives it.
+        #[arg(value_name = "id@delivery")]
+        token: String,
+        #[arg(value_parser = ["done", "fail", "block"], ignore_case = true)]
+        status: String,
+        /// At most 120 chars; the words may be unquoted.
+        #[arg(required = true, num_args = 1..)]
+        summary: Vec<String>,
+        /// Extra artifacts (KIND=REF); the report file is added when it exists.
+        #[arg(long)]
+        artifact: Vec<String>,
+        #[arg(long, value_parser = SKINS)]
+        skin: Option<String>,
+    },
     Brief {
         #[arg(long, default_value = "lead")]
         to: String,
@@ -84,12 +93,6 @@ enum Commands {
         #[arg(long, value_parser = SKINS)]
         skin: Option<String>,
     },
-    Deliver {
-        #[arg(long)]
-        once: bool,
-        #[arg(long, default_value_t = 2.0)]
-        interval: f64,
-    },
     Rollup {
         #[arg(long, default_value = "lead")]
         to: String,
@@ -121,6 +124,9 @@ struct SendSpec {
     check: Option<String>,
     #[arg(long)]
     re: Option<String>,
+    /// The delivery this reply answers (from the delivery text).
+    #[arg(long, requires = "re")]
+    delivery: Option<String>,
     #[arg(long)]
     rollup: Option<String>,
     #[arg(long)]
@@ -188,6 +194,41 @@ fn callsign(cfg: &CapsuleConfig) -> AppResult<String> {
     fs::write(&path, serde_json::to_string_pretty(&known)?)?;
     Ok(name)
 }
+/// The herdr CLI used for send's optional metadata announcement.
+struct CliHerdr(String);
+impl CliHerdr {
+    fn output(&self, args: &[&str]) -> AppResult<std::process::Output> {
+        Ok(std::process::Command::new(&self.0).args(args).output()?)
+    }
+    fn report_metadata(&self, workspace: &str, tokens: &[(&str, &str)]) -> AppResult<()> {
+        let mut args = vec![
+            "workspace",
+            "report-metadata",
+            workspace,
+            "--source",
+            "capsule",
+            "--ttl-ms",
+            "5000",
+        ];
+        let pairs: Vec<String> = tokens.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        for pair in &pairs {
+            args.push("--token");
+            args.push(pair);
+        }
+        let out = self.output(&args)?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let bytes = if out.stderr.is_empty() {
+                &out.stdout
+            } else {
+                &out.stderr
+            };
+            let msg = String::from_utf8_lossy(bytes).trim().to_string();
+            Err(err(format!("herdr workspace report-metadata: {msg}")))
+        }
+    }
+}
 fn announce(cfg: &CapsuleConfig, cap: &Capsule, herdr: &CliHerdr) -> AppResult<Option<String>> {
     let Some(workspace) = cfg.workspace.as_deref() else {
         return Ok(Some("not in a herdr pane: no trigger event".to_string()));
@@ -205,6 +246,57 @@ fn announce(cfg: &CapsuleConfig, cap: &Capsule, herdr: &CliHerdr) -> AppResult<O
         Err(e) => Ok(Some(format!("trigger event failed: {e}"))),
     }
 }
+/// The send a `reply` stands for: the task names recipient, task and report.
+fn reply_spec(
+    token: &str,
+    status: String,
+    summary: String,
+    mut artifact: Vec<String>,
+    cfg: &CapsuleConfig,
+) -> AppResult<SendSpec> {
+    let (id, delivery) = match token.split_once('@') {
+        Some((id, d)) => (id, Some(d.to_string())),
+        None => (token, None),
+    };
+    let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
+    let task = store.find_capsule(id)?.ok_or_else(|| {
+        err(format!(
+            "no capsule {}: copy <id>@<delivery> from the delivery text",
+            herdr_capsule::py_repr(id)
+        ))
+    })?;
+    if task.status != "task" {
+        return Err(err(format!(
+            "{id} is a {} capsule, not a task",
+            task.status
+        )));
+    }
+    // The path the postman told the agent wins over this CLI's own work dir.
+    let report = delivery
+        .as_deref()
+        .map(|d| store.delivery_report(&task.id, d))
+        .transpose()?
+        .flatten()
+        .unwrap_or_else(|| herdr_capsule::report_path(cfg, &task.task, &task.id));
+    if report.is_file() {
+        artifact.insert(0, format!("file={}::report", report.display()));
+    } else if status == "done" && artifact.is_empty() {
+        return Err(err(format!(
+            "write your report first: {} (then run this reply again)",
+            report.display()
+        )));
+    }
+    Ok(SendSpec {
+        to: task.reply_to.clone().unwrap_or_else(|| task.from.clone()),
+        task: task.task.clone(),
+        status,
+        summary,
+        artifact,
+        re: Some(task.id.clone()),
+        delivery,
+        ..SendSpec::default()
+    })
+}
 fn send_impl(
     spec: SendSpec,
     cfg: &CapsuleConfig,
@@ -215,6 +307,7 @@ fn send_impl(
     let reply_to = spec.reply_to.as_deref().unwrap_or("");
     let reply_check = spec.reply_check.as_deref().unwrap_or("");
     let check_arg = spec.check.as_deref().unwrap_or("");
+    let delivery = spec.delivery.as_deref().unwrap_or("");
     no_control_chars(
         &[
             ("summary", spec.summary.as_str()),
@@ -224,9 +317,16 @@ fn send_impl(
             ("reply_to", reply_to),
             ("reply_check", reply_check),
             ("check", check_arg),
+            ("delivery", delivery),
         ],
         &spec.artifact,
     )?;
+    herdr_capsule::report_path_parts(&[("task", spec.task.as_str())])?;
+    if !reply_to.is_empty() && !herdr_queue::valid_queue_name(&format!("mail-{reply_to}")) {
+        return Err(err(format!(
+            "--reply-to {reply_to:?}: use a mailbox label (lowercase letters, digits, - and _)"
+        )));
+    }
     let summary = normalize_summary(&spec.summary);
     if summary.is_empty() {
         return Err(err("--summary is empty"));
@@ -280,6 +380,23 @@ fn send_impl(
         roll = Some(Rollup { count: n });
     }
     let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
+    // An agent answering its delivered task without --re would leave the task
+    // open until its deadline: point it at the one reply that closes it.
+    if spec.re.is_none()
+        && matches!(spec.status.as_str(), "done" | "fail" | "block")
+        && let Some(pane) = cfg.pane.as_deref()
+        && let Some((task, delivery)) = store.open_delivery(pane)?
+        && task.task == spec.task
+    {
+        return Err(err(format!(
+            "task {} was delivered to you and is waiting for its reply; send it with: {} reply {}@{} {} \"<=120 chars>\"",
+            task.task,
+            herdr_capsule::shlex_quote(&cfg.exe),
+            task.id,
+            delivery,
+            spec.status
+        )));
+    }
     let cid = mint_id(&mut store)?;
     let check_cmd = if spec.re.is_some() && spec.status != "task" {
         reply_check_of(&mut store, re, spec.check.as_deref())?
@@ -288,7 +405,7 @@ fn send_impl(
     };
     let mut check_record = None;
     if let Some(cmd) = check_cmd {
-        let (exit, output) = run_check(&cmd)?;
+        let (exit, output) = run_check(&cmd, cfg.check_timeout)?;
         let why = decisive(&output.lines().map(str::to_string).collect::<Vec<_>>());
         if exit != 0 && spec.status == "done" {
             for w in &why {
@@ -327,6 +444,7 @@ fn send_impl(
         summary,
         artifacts: arts,
         re: spec.re.clone(),
+        delivery: spec.delivery.clone(),
         pane: cfg.pane.clone(),
         at: send_time(cfg)?,
         ..Capsule::default()
@@ -459,43 +577,6 @@ fn watch_cmd(
         }
     }
     Ok(())
-}
-fn deliver_cmd(cfg: &CapsuleConfig, once: bool, interval: f64) -> AppResult<()> {
-    let Some(bin) = cfg.herdr.clone().or_else(which_herdr) else {
-        return Err(err("deliver needs herdr on PATH (or HERDR_BIN_PATH)"));
-    };
-    let herdr = CliHerdr(bin.display().to_string());
-    loop {
-        let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
-        match herdr_capsule::deliver_pass(cfg, &mut store, &herdr) {
-            Ok(()) => {}
-            Err(e) => {
-                println!("deliver: {e:#}");
-                std::io::stdout().flush()?;
-                if once {
-                    return Err(e.into());
-                }
-            }
-        }
-        if once {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_secs_f64(interval.max(0.0)));
-    }
-}
-fn which_herdr() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join("herdr");
-        if candidate.is_file()
-            && fs::metadata(&candidate)
-                .ok()
-                .is_some_and(|m| m.permissions().mode() & 0o111 != 0)
-        {
-            return Some(candidate);
-        }
-    }
-    None
 }
 fn rollup_cmd(
     store: &mut Store,
@@ -679,6 +760,18 @@ fn real_main() -> AppResult<()> {
     match cli.cmd {
         Commands::Send(spec) => {
             let skin = skin_of(spec.skin.as_deref(), &cfg)?;
+            println!("{}", send_impl(*spec, &cfg, &skin, &g)?);
+        }
+        Commands::Reply {
+            token,
+            status,
+            summary,
+            artifact,
+            skin,
+        } => {
+            let skin = skin_of(skin.as_deref(), &cfg)?;
+            let status = status.to_ascii_lowercase();
+            let spec = reply_spec(&token, status, summary.join(" "), artifact, &cfg)?;
             println!("{}", send_impl(spec, &cfg, &skin, &g)?);
         }
         Commands::Brief {
@@ -745,7 +838,6 @@ fn real_main() -> AppResult<()> {
             let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
             watch_cmd(&mut store, &to, max, &skin, &g)?;
         }
-        Commands::Deliver { once, interval } => deliver_cmd(&cfg, once, interval)?,
         Commands::Rollup { to, task, send } => {
             let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
             rollup_cmd(&mut store, &cfg, &to, &task, send)?;

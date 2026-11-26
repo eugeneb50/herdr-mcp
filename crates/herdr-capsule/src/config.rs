@@ -1,12 +1,10 @@
 use crate::{Error, Result, home_dir};
-use std::{env, path::PathBuf, str::FromStr, time::Duration};
+use std::{env, num::NonZeroU64, path::PathBuf, str::FromStr, time::Duration};
 #[derive(Debug, Clone)]
 pub struct CapsuleConfig {
     pub summary_max: usize,
+    pub check_timeout: Duration,
     pub artifact_max_bytes: u64,
-    pub reply_wait: Duration,
-    pub submit_confirm: Duration,
-    pub deliver_every: Duration,
     pub work: PathBuf,
     pub max_attempts: u32,
     pub home: PathBuf,
@@ -26,10 +24,8 @@ impl Default for CapsuleConfig {
             .unwrap_or_else(|| home_dir().join("code/herdr-mcp-refs/mailbox"));
         Self {
             summary_max: 120,
+            check_timeout: Duration::from_secs(600),
             artifact_max_bytes: 10_485_760,
-            reply_wait: Duration::from_millis(1_800_000),
-            submit_confirm: Duration::from_millis(5_000),
-            deliver_every: Duration::from_millis(2_000),
             work: env::var_os("CAPSULE_WORK")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| home_dir().join("obsidian/herdrmcp/work")),
@@ -68,18 +64,10 @@ impl CapsuleConfig {
         if let Some(v) = parsed("CAPSULE_ARTIFACT_MAX_BYTES")? {
             c.artifact_max_bytes = v;
         }
-        let reply_wait: Option<f64> = parsed("CAPSULE_REPLY_WAIT_S")?;
-        if let Some(v) = reply_wait {
-            c.reply_wait = Duration::from_millis((v * 1000.0) as u64);
-        }
-        let submit_confirm: Option<f64> = parsed("CAPSULE_SUBMIT_CONFIRM_S")?;
-        if let Some(v) = submit_confirm {
-            c.submit_confirm = Duration::from_millis((v * 1000.0) as u64);
+        if let Some(seconds) = parsed::<NonZeroU64>("CAPSULE_CHECK_TIMEOUT_S")? {
+            c.check_timeout = Duration::from_secs(seconds.get());
         }
         Ok(c)
-    }
-    pub fn reply_wait_s(&self) -> f64 {
-        self.reply_wait.as_secs_f64()
     }
 }
 #[cfg(test)]
@@ -89,10 +77,8 @@ mod tests {
     fn defaults_match_the_contract() {
         let c = CapsuleConfig::default();
         assert_eq!(c.summary_max, 120);
+        assert_eq!(c.check_timeout, Duration::from_secs(600));
         assert_eq!(c.artifact_max_bytes, 10_485_760);
-        assert_eq!(c.reply_wait.as_millis(), 1_800_000);
-        assert_eq!(c.submit_confirm.as_millis(), 5_000);
-        assert_eq!(c.deliver_every.as_millis(), 2_000);
         assert_eq!(c.max_attempts, 2);
     }
 }

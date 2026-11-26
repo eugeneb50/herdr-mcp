@@ -2,20 +2,16 @@
 pub mod capsule;
 mod check;
 mod config;
-pub mod deliver;
 pub mod format;
 pub mod id;
 pub mod store;
 pub use capsule::{
     Artifact, Capsule, Check, KINDS, Rollup, SKINS, STATUSES, artifact, no_control_chars,
-    normalize_summary,
+    normalize_summary, report_path_parts,
 };
 pub use check::{check_files, decisive, reply_check_of, run_check};
 pub use config::CapsuleConfig;
-pub use deliver::{
-    CliHerdr, Herdr, Pane, confirm_submitted, deliver_pass, fenced, panes_by_label, replied,
-};
-pub use format::{card, delivery_text, head, line, pack_summary, shlex_quote};
+pub use format::{card, delivery_text, head, line, pack_summary, report_path, shlex_quote};
 pub use id::{confusable, mint, mint_id, syllables};
 use std::path::PathBuf;
 pub use store::Store;

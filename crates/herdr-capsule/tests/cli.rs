@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{Fixture, shlex_split, stderr, stdout, which};
+use common::{Fixture, stderr, stdout, which};
 use serde_json::json;
 use std::{
     collections::{HashMap, HashSet},
@@ -70,25 +70,6 @@ fn test_a_work_dir_in_tmp_is_refused_for_the_real_mailbox() {
 }
 
 #[test]
-fn test_delivery_names_a_report_path_in_the_work_dir() {
-    let f = Fixture::new();
-    f.task("builder");
-    f.cap(&["deliver", "--once"]);
-    let prompts = f.prompts();
-    assert_eq!(prompts.len(), 1);
-    assert!(
-        prompts[0]
-            .1
-            .contains(&f.work.join("t1").display().to_string())
-    );
-    let tmp = format!("{}/", std::env::temp_dir().display());
-    let mut paths = prompts[0]
-        .1
-        .split(|c: char| c.is_whitespace() || c == ':' || c == '=');
-    assert!(!paths.any(|p| p.starts_with(&tmp)), "{}", prompts[0].1);
-}
-
-#[test]
 fn test_task_needs_a_brief_artifact() {
     let f = Fixture::new();
     let out = f.run(
@@ -107,136 +88,6 @@ fn test_task_needs_a_brief_artifact() {
     );
     assert!(!out.status.success());
     assert!(stderr(&out).contains("artifact"), "{}", stderr(&out));
-}
-
-#[test]
-fn test_idle_agent_gets_the_task_with_its_reply_command() {
-    let f = Fixture::new();
-    let cid = f.task("builder");
-    f.cap(&["deliver", "--once"]);
-    let prompts = f.prompts();
-    assert_eq!(prompts.len(), 1);
-    let (pane, text) = &prompts[0];
-    assert_eq!(pane, "w1:p2");
-    assert!(text.contains(&cid));
-    assert!(text.contains(&format!("--re {cid}")));
-    assert!(text.contains("--to lead"));
-    assert!(text.contains("sh /x/check.sh"));
-    assert_eq!(f.unread("builder"), 0);
-    let log = fs::read_to_string(f.home.join("delivered.jsonl")).unwrap();
-    let first: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
-    assert_eq!(first["id"].as_str().unwrap(), cid);
-}
-
-#[test]
-fn test_busy_agent_waits_and_gets_it_once_idle() {
-    let f = Fixture::new();
-    f.task("builder");
-    f.set_panes_opts(false, "builder", 7, "w1:p2");
-    f.cap(&["deliver", "--once"]);
-    assert!(f.prompts().is_empty());
-    f.set_panes(true);
-    f.cap(&["deliver", "--once"]);
-    assert_eq!(f.prompts().len(), 1);
-    f.cap(&["deliver", "--once"]);
-    assert_eq!(f.prompts().len(), 1, "delivered twice");
-}
-
-#[test]
-fn test_next_capsule_waits_for_the_delivered_turn_to_finish() {
-    let f = Fixture::new();
-    for n in ["one", "two"] {
-        f.cap(&[
-            "send",
-            "--to",
-            "builder",
-            "--task",
-            "n",
-            "--status",
-            "wip",
-            "--summary",
-            n,
-        ]);
-    }
-    f.cap(&["deliver", "--once"]);
-    f.cap(&["deliver", "--once"]);
-    assert_eq!(
-        f.prompts().len(),
-        1,
-        "second capsule typed into a fresh turn"
-    );
-    f.set_panes_opts(true, "builder", 8, "w1:p2");
-    f.cap(&["deliver", "--once"]);
-    assert_eq!(f.prompts().len(), 2);
-}
-
-#[test]
-fn test_a_restarted_agent_in_a_new_pane_is_not_fenced() {
-    let f = Fixture::new();
-    f.task("builder");
-    f.task("builder");
-    f.cap(&["deliver", "--once"]);
-    f.set_panes_opts(true, "builder", 0, "w1:p9");
-    f.cap(&["deliver", "--once"]);
-    let prompts = f.prompts();
-    let panes: Vec<&str> = prompts.iter().map(|(p, _)| p.as_str()).collect();
-    assert_eq!(panes, ["w1:p2", "w1:p9"]);
-}
-
-#[test]
-fn test_one_capsule_per_agent_per_pass() {
-    let f = Fixture::new();
-    f.task("builder");
-    f.task("builder");
-    f.cap(&["deliver", "--once"]);
-    assert_eq!(f.prompts().len(), 1);
-    assert_eq!(f.unread("builder"), 1);
-}
-
-#[test]
-fn test_blocked_agent_is_not_typed_into_and_keeps_its_capsule() {
-    let f = Fixture::new();
-    f.task("builder");
-    let out = f.cap_env(&["deliver", "--once"], &[("FAKE_BLOCKED", "w1:p2")]);
-    assert!(f.prompts().is_empty());
-    assert_eq!(f.unread("builder"), 1);
-    let items = f.items("builder", None);
-    assert_eq!(items.len(), 1);
-    assert_eq!(
-        items[0]["attempts"].as_i64().unwrap(),
-        0,
-        "a refused prompt must refund the attempt"
-    );
-    let both = format!("{}{}", stdout(&out), stderr(&out));
-    assert!(both.contains("agent_blocked"), "{both}");
-}
-
-#[test]
-fn test_mailbox_without_a_pane_is_left_alone() {
-    let f = Fixture::new();
-    f.task("nobody");
-    f.cap(&["deliver", "--once"]);
-    assert!(f.prompts().is_empty());
-    assert_eq!(f.unread("nobody"), 1);
-}
-
-#[test]
-fn test_lead_mailbox_is_never_delivered_to_a_pane() {
-    let f = Fixture::new();
-    f.set_panes_opts(true, "lead", 7, "w1:p2");
-    f.cap(&[
-        "send",
-        "--to",
-        "lead",
-        "--task",
-        "t",
-        "--status",
-        "wip",
-        "--summary",
-        "x",
-    ]);
-    f.cap(&["deliver", "--once"]);
-    assert!(f.prompts().is_empty());
 }
 
 #[test]
@@ -301,36 +152,6 @@ fn test_watch_with_nothing_new_prints_nothing_again() {
 }
 
 #[test]
-fn test_fence_is_per_agent() {
-    let f = Fixture::new();
-    // Delivering to a second agent must not lift the first one's fence.
-    fs::write(
-        &f.panes,
-        json!({"result": {"panes": [
-            {"pane_id": "w1:p2", "label": "builder", "agent_status": "idle"},
-            {"pane_id": "w1:p3", "label": "tester", "agent_status": "idle"}]}})
-        .to_string(),
-    )
-    .unwrap();
-    fs::write(
-        &f.agents,
-        json!({"result": {"agents": [
-            {"pane_id": "w1:p2", "agent_status": "idle", "state_change_seq": 7},
-            {"pane_id": "w1:p3", "agent_status": "idle", "state_change_seq": 4}]}})
-        .to_string(),
-    )
-    .unwrap();
-    f.task("builder");
-    f.task("builder");
-    f.task("tester");
-    f.cap(&["deliver", "--once"]);
-    f.cap(&["deliver", "--once"]);
-    let mut panes: Vec<String> = f.prompts().iter().map(|(p, _)| p.clone()).collect();
-    panes.sort();
-    assert_eq!(panes, ["w1:p2", "w1:p3"]);
-}
-
-#[test]
 fn test_a_reply_runs_the_tasks_check_not_its_own() {
     let f = Fixture::new();
     let (cid, _) = f.task_with_check("exit 3\n");
@@ -388,88 +209,6 @@ fn test_a_follow_up_task_does_not_run_the_earlier_tasks_check() {
     );
     assert!(out.status.success(), "{}", stderr(&out));
     assert!(!stdout(&out).contains(" chk:"), "{}", stdout(&out));
-}
-
-#[test]
-fn test_after_a_task_the_next_capsule_waits_for_its_reply() {
-    let f = Fixture::new();
-    let first = f.task("builder");
-    f.task("builder");
-    f.cap(&["deliver", "--once"]);
-    f.set_panes_opts(true, "builder", 8, "w1:p2");
-    f.cap(&["deliver", "--once"]);
-    assert_eq!(
-        f.prompts().len(),
-        1,
-        "next capsule typed into a task still in progress"
-    );
-    let report = f.work.join("r.md");
-    fs::write(&report, "done\n").unwrap();
-    let artifact = format!("file={}::report", report.display());
-    f.cap(&[
-        "send",
-        "--to",
-        "lead",
-        "--task",
-        "t1",
-        "--status",
-        "fail",
-        "--re",
-        &first,
-        "--summary",
-        "tried it",
-        "--artifact",
-        &artifact,
-    ]);
-    f.set_panes_opts(true, "builder", 9, "w1:p2");
-    f.cap(&["deliver", "--once"]);
-    assert_eq!(f.prompts().len(), 2);
-}
-
-#[test]
-fn test_a_task_without_a_reply_stops_holding_after_the_wait() {
-    let f = Fixture::new();
-    f.task("builder");
-    f.task("builder");
-    f.cap(&["deliver", "--once"]);
-    f.set_panes_opts(true, "builder", 8, "w1:p2");
-    f.cap_env(&["deliver", "--once"], &[("CAPSULE_REPLY_WAIT_S", "0")]);
-    assert_eq!(f.prompts().len(), 2);
-}
-
-#[test]
-fn test_a_prompt_the_agent_never_starts_gets_one_more_enter() {
-    let f = Fixture::new();
-    f.task("builder");
-    f.cap(&["deliver", "--once"]);
-    assert_eq!(f.prompts().len(), 1);
-    assert_eq!(f.keys(), ["w1:p2\tenter"]);
-}
-
-#[test]
-fn test_a_prompt_the_agent_starts_gets_no_extra_enter() {
-    let f = Fixture::new();
-    let starts = f.tmp.path().join("starts.sh");
-    let working = f.tmp.path().join("working.json");
-    fs::write(
-        &working,
-        json!({"result": {"agents": [
-            {"pane_id": "w1:p2", "agent_status": "working", "state_change_seq": 8}]}})
-        .to_string(),
-    )
-    .unwrap();
-    fs::write(
-        &starts,
-        format!("cp \"{}\" \"{}\"\n", working.display(), f.agents.display()),
-    )
-    .unwrap();
-    f.task("builder");
-    f.cap_env(
-        &["deliver", "--once"],
-        &[("FAKE_ON_PROMPT", starts.to_str().unwrap())],
-    );
-    assert_eq!(f.prompts().len(), 1);
-    assert!(f.keys().is_empty(), "{:?}", f.keys());
 }
 
 #[test]
@@ -535,45 +274,6 @@ fn test_a_check_given_as_a_symlink_is_refused() {
     );
     assert!(!out.status.success());
     assert!(stderr(&out).contains("symlink"), "{}", stderr(&out));
-}
-
-#[test]
-fn test_delivery_quotes_every_field_of_the_reply_command() {
-    let f = Fixture::new();
-    let sentinel = f.tmp.path().join("pwned");
-    let task_name = format!("x;touch {}", sentinel.display());
-    let artifact = format!("file={}::brief", f.brief.display());
-    f.run(
-        &[
-            "send",
-            "--to",
-            "builder",
-            "--task",
-            &task_name,
-            "--status",
-            "task",
-            "--summary",
-            "s",
-            "--artifact",
-            &artifact,
-        ],
-        &[],
-    );
-    f.cap(&["deliver", "--once"]);
-    let prompts = f.prompts();
-    let text = &prompts[0].1;
-    let cmd = text
-        .split("reply with ONE command: ")
-        .nth(1)
-        .unwrap()
-        .split(" ; then reply")
-        .next()
-        .unwrap();
-    let words = shlex_split(cmd);
-    assert!(
-        words.iter().any(|w| w == &task_name),
-        "the task name was split or unquoted: {cmd}"
-    );
 }
 
 #[test]
@@ -726,4 +426,355 @@ fn the_read_command_in_a_delivery_finds_the_capsule_by_its_id() {
         .to_string();
     let out = f.cap(&["line", &uuid[..8], "--to", "builder"]);
     assert!(stdout(&out).contains(&cid), "{}", stdout(&out));
+}
+
+#[test]
+fn a_reply_names_the_delivery_it_answers() {
+    // The postman types `send --re <task> --delivery <attempt>`; the reply
+    // must carry it so an answer to an older attempt can't close a newer one.
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    let out = f.reply(&cid, &["--delivery", "d-1"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let reply = f
+        .items("lead", None)
+        .into_iter()
+        .find(|i| i["payload"]["re"] == cid)
+        .expect("reply in mail-lead");
+    assert_eq!(reply["payload"]["delivery"], "d-1");
+    let bare = f.run(
+        &[
+            "send",
+            "--to",
+            "lead",
+            "--task",
+            "t",
+            "--status",
+            "wip",
+            "--summary",
+            "x",
+            "--delivery",
+            "d-2",
+        ],
+        &[],
+    );
+    assert!(
+        !bare.status.success(),
+        "--delivery without --re must be refused"
+    );
+}
+
+/// What the postman does when it types a task: claim it and record the
+/// delivery (with its pane) on the item.
+fn mark_delivered(f: &Fixture, to: &str, delivery: &str, pane: &str) {
+    let mut q = herdr_queue::Queue::open(&f.queue_db).expect("open queue");
+    let (_, lease) = q
+        .claim(&format!("mail-{to}"), 600_000, 1)
+        .expect("claim")
+        .expect("a queued task");
+    let set = q
+        .set_delivery(
+            &lease,
+            delivery,
+            json!({"pane": pane, "submitted": true}),
+            2,
+        )
+        .expect("set delivery");
+    assert_eq!(set, herdr_queue::Fenced::Applied(()));
+}
+
+#[test]
+fn reply_closes_its_task_with_one_short_command() {
+    // Weak models drop or mangle `send --re X --delivery Y --to Z --task T`;
+    // `reply <id>@<delivery>` takes everything else from the task.
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    let report = f.work.join("t1").join(format!("{cid}-report.md"));
+    fs::create_dir_all(report.parent().unwrap()).unwrap();
+    fs::write(&report, "all good\n").unwrap();
+    let token = format!("{cid}@d-1");
+    let out = f.run(&["reply", &token, "done", "built", "it", "fine"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let reply = f
+        .items("lead", None)
+        .into_iter()
+        .find(|i| i["payload"]["re"] == cid.as_str())
+        .expect("reply in mail-lead");
+    let p = &reply["payload"];
+    assert_eq!(p["delivery"], "d-1");
+    assert_eq!(p["task"], "t1");
+    assert_eq!(p["status"], "done");
+    assert_eq!(p["summary"], "built it fine");
+    assert_eq!(p["artifacts"][0]["ref"], report.display().to_string());
+    assert_eq!(p["check"]["exit"], 0, "the task's pinned check ran: {p}");
+}
+
+#[test]
+fn reply_status_ignores_case() {
+    // A model that types DONE must not leave its task open until the deadline.
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    let token = format!("{cid}@d-1");
+    let out = f.run(&["reply", &token, "BLOCK", "need", "input"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let reply = f
+        .items("lead", None)
+        .into_iter()
+        .find(|i| i["payload"]["re"] == cid.as_str())
+        .expect("reply in mail-lead");
+    assert_eq!(reply["payload"]["status"], "block");
+}
+
+#[test]
+fn reply_done_without_its_report_says_where_to_write_it() {
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    let token = format!("{cid}@d-1");
+    let out = f.run(&["reply", &token, "done", "x"], &[]);
+    assert!(!out.status.success());
+    let want = format!("t1/{cid}-report.md");
+    assert!(stderr(&out).contains(&want), "{}", stderr(&out));
+    assert!(f.items("lead", None).is_empty(), "nothing sent");
+    // Stuck is fine without a report.
+    let out = f.run(&["reply", &token, "block", "need", "access"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn reply_to_an_unknown_capsule_is_refused() {
+    let f = Fixture::new();
+    let out = f.run(&["reply", "nosuch@d-1", "fail", "x"], &[]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("no capsule 'nosuch'"),
+        "{}",
+        stderr(&out)
+    );
+}
+
+#[test]
+fn a_task_name_that_is_a_path_is_refused() {
+    let f = Fixture::new();
+    for task in ["../escape", "a/b", "..", "a::b"] {
+        let args = [
+            "send",
+            "--to",
+            "builder",
+            "--task",
+            task,
+            "--status",
+            "task",
+            "--summary",
+            "x",
+        ];
+        let out = f.run(&args, &[]);
+        assert!(!out.status.success(), "{task} accepted");
+        assert!(
+            stderr(&out).contains("names a directory"),
+            "{}",
+            stderr(&out)
+        );
+    }
+}
+
+#[test]
+fn a_task_whose_reply_to_is_no_mailbox_name_is_refused() {
+    let f = Fixture::new();
+    let args = [
+        "send",
+        "--to",
+        "builder",
+        "--task",
+        "t1",
+        "--status",
+        "task",
+        "--summary",
+        "x",
+        "--reply-to",
+        "Bad Label",
+    ];
+    let out = f.run(&args, &[]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("--reply-to"), "{}", stderr(&out));
+}
+
+#[test]
+fn send_without_re_for_a_delivered_task_names_the_reply_command() {
+    // Live failure 2026-11-25: hermes answered `send --to lead --task T
+    // --status done` without --re; the task stayed open until its deadline.
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    mark_delivered(&f, "builder", "d-9", "w1:p2");
+    let args = [
+        "send",
+        "--to",
+        "lead",
+        "--task",
+        "t1",
+        "--status",
+        "fail",
+        "--summary",
+        "x",
+    ];
+    let out = f.run(&args, &[("HERDR_PANE_ID", "w1:p2")]);
+    assert!(
+        !out.status.success(),
+        "the open delivery must be answered by reply"
+    );
+    let want = format!("reply {cid}@d-9 fail");
+    assert!(stderr(&out).contains(&want), "{}", stderr(&out));
+    // Another pane, or another task, is not this delivery.
+    let out = f.run(&args, &[("HERDR_PANE_ID", "w1:p3")]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let other = [
+        "send",
+        "--to",
+        "lead",
+        "--task",
+        "t2",
+        "--status",
+        "fail",
+        "--summary",
+        "x",
+    ];
+    let out = f.run(&other, &[("HERDR_PANE_ID", "w1:p2")]);
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
+fn reply_finds_the_report_where_the_postman_said_it_is() {
+    // herdr-mcp's mail.work-dir may differ from this CLI's CAPSULE_WORK: the
+    // delivered event's `report` is the path the agent was told.
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    let told = f.work.join("elsewhere").join("r.md");
+    {
+        let mut q = herdr_queue::Queue::open(&f.queue_db).expect("open queue");
+        let (_, lease) = q
+            .claim("mail-builder", 600_000, 1)
+            .expect("claim")
+            .expect("a queued task");
+        let data = json!({"pane": "w1:p2", "submitted": true, "report": told});
+        q.set_delivery(&lease, "d-5", data, 2)
+            .expect("set delivery");
+    }
+    fs::create_dir_all(told.parent().unwrap()).unwrap();
+    fs::write(&told, "ok\n").unwrap();
+    let token = format!("{cid}@d-5");
+    let out = f.run(&["reply", &token, "done", "ok"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let reply = f
+        .items("lead", None)
+        .into_iter()
+        .find(|i| i["payload"]["re"] == cid.as_str())
+        .expect("reply");
+    assert_eq!(
+        reply["payload"]["artifacts"][0]["ref"],
+        told.display().to_string()
+    );
+}
+
+#[test]
+fn hung_check_times_out_and_kills_its_children() {
+    let f = Fixture::new();
+    let pids = f.work.join("sleep-pids");
+    let (cid, _) = f.task_with_check(
+        r#"trap '' TERM
+sh -c 'printf "%s\n" "$$" >> "$1"; exec sleep 300' sh "$CHECK_PID_FILE" &
+sh -c 'printf "%s\n" "$$" >> "$1"; exec sleep 300' sh "$CHECK_PID_FILE"
+"#,
+    );
+    let reply = f.run_timeout(
+        &["reply", &cid, "fail", "check hung"],
+        &[
+            ("CAPSULE_CHECK_TIMEOUT_S", "1"),
+            ("CHECK_PID_FILE", pids.to_str().unwrap()),
+        ],
+        10,
+    );
+    let pids: Vec<_> = fs::read_to_string(pids)
+        .unwrap()
+        .lines()
+        .map(|pid| pid.parse::<i32>().unwrap())
+        .collect();
+    assert_eq!(pids.len(), 2);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let still_running = loop {
+        let live: Vec<_> = pids
+            .iter()
+            .copied()
+            .filter(|pid| {
+                let ps = std::process::Command::new("ps")
+                    .args(["-o", "state=", "-p", &pid.to_string()])
+                    .output()
+                    .unwrap();
+                // The reparented process may briefly remain as a zombie.
+                let state = stdout(&ps);
+                let state = state.trim();
+                !state.is_empty() && !state.starts_with('Z')
+            })
+            .collect();
+        if live.is_empty() || std::time::Instant::now() >= deadline {
+            break live;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    // Keep a failing regression test from leaking long-lived fixture sleeps.
+    for pid in &still_running {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(*pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    assert!(
+        still_running.is_empty(),
+        "surviving sleeps: {still_running:?}"
+    );
+
+    let reply = reply.expect("capsule reply must finish within the test deadline");
+    assert!(reply.status.success(), "{}", stderr(&reply));
+    let replies = f.items("lead", None);
+    assert_eq!(replies[0]["payload"]["check"]["exit"], 124);
+}
+
+#[test]
+fn timed_out_check_refuses_done_but_allows_fail() {
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("printf 'warning: check started\\n'; exec sleep 300\n");
+    let report = f.work.join("t1").join(format!("{cid}-report.md"));
+    fs::create_dir_all(report.parent().unwrap()).unwrap();
+    fs::write(&report, "Report exists before replying.\n").unwrap();
+    let env = [("CAPSULE_CHECK_TIMEOUT_S", "1")];
+
+    let done = f
+        .run_timeout(&["reply", &cid, "done", "finished"], &env, 10)
+        .expect("done reply must finish within the test deadline");
+    assert!(!done.status.success());
+    let error = stderr(&done);
+    assert!(error.contains("warning: check started"), "{error}");
+    assert!(error.contains("check timed out after 1 s"), "{error}");
+    assert!(error.contains("check failed (exit 124)"), "{error}");
+    assert!(f.items("lead", None).is_empty());
+
+    let failure = f
+        .run_timeout(&["reply", &cid, "fail", "check hung"], &env, 10)
+        .expect("fail reply must finish within the test deadline");
+    assert!(failure.status.success(), "{}", stderr(&failure));
+    let replies = f.items("lead", None);
+    assert_eq!(replies.len(), 1);
+    let payload = &replies[0]["payload"];
+    assert_eq!(payload["status"], "fail");
+    assert_eq!(payload["check"]["exit"], 124);
+    assert_eq!(
+        payload["check"]["why"].as_array().unwrap().last().unwrap(),
+        "check timed out after 1 s"
+    );
+    let artifacts = payload["artifacts"].as_array().unwrap();
+    let log = artifacts
+        .iter()
+        .find(|artifact| artifact["kind"] == "log")
+        .unwrap();
+    let text = fs::read_to_string(log["ref"].as_str().unwrap()).unwrap();
+    assert!(text.ends_with("check timed out after 1 s"), "{text}");
 }

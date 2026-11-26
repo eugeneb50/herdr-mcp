@@ -275,6 +275,9 @@ fn OptionRow(
     let unit = if info.kind == Kind::Millis { " ms" } else { "" };
     let bounds = match info.kind {
         Kind::Keys => "comma-separated chords, e.g. alt+right, ctrl+tab".to_string(),
+        Kind::Bool => "on or off".to_string(),
+        Kind::Labels => "comma-separated pane labels, e.g. flow-sh, pg-review".to_string(),
+        Kind::Path => "absolute path (~ for home; no temp dirs)".to_string(),
         _ => format!("{}–{}{unit}", info.min, info.max),
     };
     let restart = if info.restart {

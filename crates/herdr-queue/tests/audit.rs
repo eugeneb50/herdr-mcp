@@ -3,9 +3,9 @@
     reason = "test fixtures build temp DBs; a failure there fails the test"
 )]
 
-use herdr_queue::{Item, ItemStatus, QueueEvent, run_audit};
+use herdr_queue::{Fenced, Item, ItemStatus, Push, Pushed, Queue, QueueEvent, run_audit};
 use serde_json::{Map, Value, json};
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
 use tempfile::TempDir;
 
 fn schema_path() -> PathBuf {
@@ -45,6 +45,7 @@ fn item(
         requester: None,
         waiters: vec![],
         run_id: None,
+        delivery: None,
         lease_until,
         result: None,
         enqueued_at: 1000,
@@ -110,6 +111,7 @@ fn full_item(
         requester: None,
         waiters: vec![],
         run_id: None,
+        delivery: None,
         lease_until,
         result: None,
         enqueued_at: 1000,
@@ -261,6 +263,88 @@ fn bad_data_is_violation_not_crash() {
         1,
         None,
     );
+}
+
+/// B5: rows and events are two statements. A legal dead+notice commit between
+/// them must not make the audit reject a history that was consistent when it
+/// started. Filler rows widen the rows-scan window so the commit lands inside it.
+#[test]
+fn audit_snapshot_survives_dead_commit_between_reads() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("queue.db");
+    let mut queue = Queue::open(&path).expect("open queue");
+    let Pushed::New(item) = queue
+        .push(
+            Push {
+                queue: "build".into(),
+                payload: Map::new(),
+                dedupe_key: None,
+                coalesce_key: None,
+                requester: None,
+                max_attempts: 1,
+                max_depth: None,
+            },
+            1000,
+        )
+        .expect("push queued item")
+    else {
+        panic!("expected a new item");
+    };
+    let consumer = queue
+        .claim_consumer("build", "postman", 10_000, 1001)
+        .expect("claim consumer")
+        .expect("live consumer");
+
+    // Bulk filler (raw SQL, not the public API): every filler has a valid
+    // queued/enqueued history, so only the interleaved commit can be a violation.
+    // 200k rows keep the rows SELECT open long enough for the writer to commit.
+    let filler = rusqlite::Connection::open(&path).expect("open filler connection");
+    filler
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000)
+               INSERT INTO queue_items (id, queue, seq, status, attempts, max_attempts, payload, enqueued_at)
+               SELECT 'f' || i, 'filler', i, 'queued', 0, 1, '{}', 1000 FROM n;
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000)
+               INSERT INTO queue_events (item_id, seq, at, kind)
+               SELECT 'f' || i, 1, 1000, 'enqueued' FROM n;
+             COMMIT;",
+        )
+        .expect("seed filler rows");
+    drop(filler);
+
+    let (started_tx, started_rx) = mpsc::channel();
+    let audit_path = path.clone();
+    let audit = thread::spawn(move || {
+        started_tx.send(()).expect("signal audit start");
+        run_audit(&audit_path, None, None)
+    });
+    started_rx.recv().expect("audit started");
+    thread::sleep(Duration::from_millis(25));
+
+    let mut writer = Queue::open(&path).expect("open writer queue");
+    let expired = writer
+        .expire_queued_with_notice(
+            &consumer,
+            &item.id,
+            1005,
+            "undeliverable: no pane",
+            Push {
+                queue: "notice".into(),
+                payload: Map::new(),
+                dedupe_key: None,
+                coalesce_key: None,
+                requester: None,
+                max_attempts: 1,
+                max_depth: None,
+            },
+            1010,
+        )
+        .expect("expire queued item with notice");
+    assert!(matches!(expired, Fenced::Applied(())));
+
+    let rc = audit.join().expect("audit thread");
+    assert!(rc.is_ok(), "audit rejected its own snapshot: {rc:?}");
 }
 
 #[test]

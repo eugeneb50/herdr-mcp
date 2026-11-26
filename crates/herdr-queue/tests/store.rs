@@ -444,15 +444,15 @@ fn newer_schema_is_refused_without_overwriting_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("queue.db");
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 2).unwrap();
+    conn.pragma_update(None, "user_version", 3).unwrap();
     assert!(matches!(
         Queue::open(&path),
-        Err(QueueError::UnsupportedSchema { version: 2 })
+        Err(QueueError::UnsupportedSchema { version: 3 })
     ));
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
 }
 
@@ -539,7 +539,7 @@ fn concurrent_first_opens_initialize_one_database() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
 }
 
 #[test]
@@ -567,4 +567,89 @@ fn release_and_retry_never_reuse_a_fencing_token() {
         assert_eq!(q.item(&item.id).unwrap(), snapshot);
         applied(q.finish(&current, Outcome::Done(Value::Null), 7).unwrap());
     }
+}
+
+fn task() -> Push {
+    Push {
+        queue: "mail-builder".into(),
+        payload: [
+            ("id".into(), json!("task-1")),
+            ("status".into(), json!("task")),
+        ]
+        .into_iter()
+        .collect(),
+        ..request()
+    }
+}
+
+fn reply(reply_id: &str) -> Push {
+    Push {
+        queue: "mail-lead".into(),
+        payload: [
+            ("id".into(), json!(reply_id)),
+            ("re".into(), json!("task-1")),
+            ("delivery".into(), json!("d1")),
+            ("status".into(), json!("done")),
+        ]
+        .into_iter()
+        .collect(),
+        ..request()
+    }
+}
+
+fn notice() -> Push {
+    Push {
+        queue: "mail-notice".into(),
+        max_attempts: 1,
+        ..request()
+    }
+}
+
+#[test]
+fn reply_committed_during_settlement_wins_over_dead_notice() {
+    let (dir, mut q) = db();
+    let path = dir.path().join("queue.db");
+    let item = new_item(&mut q, task());
+    let (_, current) = q.claim("mail-builder", 10, 2).unwrap().unwrap();
+    applied(q.set_delivery(&current, "d1", json!({}), 3).unwrap());
+    let mut other = Queue::open(&path).unwrap();
+    let reply = new_item(&mut other, reply("reply-1"));
+    let finished = applied(
+        q.finish_dead_with_notice(&current, "unanswered".into(), notice(), 4)
+            .unwrap(),
+    );
+    assert_eq!(finished.status, Done);
+    assert_eq!(
+        finished.result,
+        Some(json!({"reply": reply.id, "delivery": "d1"}))
+    );
+    assert!(q.list(Some("mail-notice"), None, 10).unwrap().is_empty());
+    let events = q.item(&item.id).unwrap().unwrap().1;
+    assert!(events.iter().all(|e| e.kind != "dead"));
+}
+
+#[test]
+fn reply_committed_during_failed_settlement_becomes_done() {
+    let (dir, mut q) = db();
+    let path = dir.path().join("queue.db");
+    let item = new_item(&mut q, task());
+    let (_, current) = q.claim("mail-builder", 10, 2).unwrap().unwrap();
+    applied(q.set_delivery(&current, "d1", json!({}), 3).unwrap());
+    let mut other = Queue::open(&path).unwrap();
+    let reply = new_item(&mut other, reply("reply-2"));
+    let finished = applied(
+        q.finish(&current, Outcome::Failed("pane closed".into()), 4)
+            .unwrap(),
+    );
+    assert_eq!(finished.status, Done);
+    assert_eq!(
+        finished.result,
+        Some(json!({"reply": reply.id, "delivery": "d1"}))
+    );
+    let events = q.item(&item.id).unwrap().unwrap().1;
+    assert!(
+        events
+            .iter()
+            .all(|e| e.kind != "failed" && e.kind != "requeued")
+    );
 }

@@ -100,6 +100,9 @@ impl Executor for RunExecutor {
 impl QueueService {
     pub fn start(&self, server: &HerdrMcpServer) {
         self.start_with(server, Arc::new(RunExecutor(server.clone())));
+        // Idle until `mail.enabled` is on.
+        let events = server.herdr_client.get().map(|client| client.events());
+        self.start_mail(server, Arc::new(super::mail::CliMailHerdr), events);
     }
 
     fn start_with(&self, server: &HerdrMcpServer, executor: Arc<dyn Executor>) {

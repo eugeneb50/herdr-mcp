@@ -134,6 +134,14 @@ impl AgentRegistry {
         self.inner.read().await.get(pane_id).cloned()
     }
 
+    pub(crate) async fn pane_label(&self, pane_id: &str) -> Option<String> {
+        self.inner
+            .read()
+            .await
+            .get(pane_id)
+            .map(|handle| handle.label.clone())
+    }
+
     pub async fn list_for_ws(&self, ws: &str) -> Vec<AgentHandle> {
         self.inner
             .read()

@@ -1,8 +1,13 @@
+mod mail;
 mod worker;
 
 use crate::{HerdrMcpServer, Recipe, lock};
 use anyhow::{Context, Result};
-use herdr_mcp_api::{recipe::QueueConfig, settings::*};
+use herdr_mcp_api::{
+    mail::{MailItemResponse, MailLabelStats, MailListQuery, MailStatsQuery},
+    recipe::QueueConfig,
+    settings::*,
+};
 use herdr_queue::{Item, ItemStatus, Push, Pushed, Queue, QueueDepth, QueueError, QueueEvent};
 use serde_json::{Map, Value};
 use std::{
@@ -10,10 +15,12 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 #[cfg(test)]
 use tokio::time::Instant;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
+
+pub(crate) type MailItemHistory = MailItemResponse<Item, QueueEvent>;
 
 type Active = HashMap<(String, i64), ActiveClaim>;
 
@@ -32,6 +39,7 @@ struct Runtime {
     root: CancellationToken,
     tracker: TaskTracker,
     wakes: Mutex<HashMap<String, mpsc::Sender<()>>>,
+    mail_wake: Notify,
     active: Mutex<Active>,
     #[cfg(test)]
     clock: std::sync::OnceLock<(Instant, i64)>,
@@ -137,6 +145,9 @@ impl QueueService {
     }
 
     fn wake(&self, queue: &str) {
+        if queue.starts_with("mail-") {
+            self.0.mail_wake.notify_one();
+        }
         if let Some(tx) = lock(&self.0.wakes).get(queue) {
             // The periodic DB check also picks up pushes from other processes.
             let _ = tx.try_send(());
@@ -233,6 +244,84 @@ impl QueueService {
         let id = id.to_owned();
         self.db(server, move |db| {
             db.item(&id)?.ok_or_else(|| QueueError::NotFound(id).into())
+        })
+        .await
+    }
+
+    pub(crate) async fn mail_list(
+        &self,
+        server: &HerdrMcpServer,
+        query: MailListQuery,
+    ) -> Result<Vec<MailItemHistory>> {
+        let queue = query
+            .to
+            .map(|label| {
+                if !valid_mail_label(&label) {
+                    return Err(invalid("invalid mailbox label"));
+                }
+                Ok(format!("mail-{label}"))
+            })
+            .transpose()?;
+        let status = query
+            .status
+            .map(|status| status.parse().map_err(|_| invalid("unknown queue status")))
+            .transpose()?;
+        let limit = query.limit.unwrap_or(100).min(1000);
+        self.db(server, move |db| {
+            Ok(db
+                .list_prefixed_with_events("mail-", queue.as_deref(), status, limit)?
+                .into_iter()
+                .map(|(item, events)| MailItemResponse { item, events })
+                .collect())
+        })
+        .await
+    }
+
+    pub(crate) async fn mail_item(
+        &self,
+        server: &HerdrMcpServer,
+        id: &str,
+    ) -> Result<MailItemHistory> {
+        let id = id.to_owned();
+        self.db(server, move |db| {
+            let (item, events) = db
+                .prefixed_item(&id, "mail-")?
+                .ok_or(QueueError::NotFound(id))?;
+            Ok(MailItemResponse { item, events })
+        })
+        .await
+    }
+
+    pub(crate) async fn mail_stats(
+        &self,
+        server: &HerdrMcpServer,
+        query: MailStatsQuery,
+    ) -> Result<Vec<MailLabelStats>> {
+        if query.since.is_some_and(|since| since < 0) {
+            return Err(invalid(
+                "since must be a nonnegative Unix epoch millisecond",
+            ));
+        }
+        self.db(server, move |db| {
+            Ok(db.mail_stats(query.since, |row| {
+                // SQLite counts are i64 and never negative.
+                let count = |key: &str| {
+                    row.get::<_, i64>(key)
+                        .map(|n| u64::try_from(n).unwrap_or_default())
+                };
+                Ok(MailLabelStats {
+                    to: row.get("to")?,
+                    depth: count("depth")?,
+                    in_flight: count("in_flight")?,
+                    delivered: count("delivered")?,
+                    replied: count("replied")?,
+                    failed: count("failed")?,
+                    dead: count("dead")?,
+                    median_reply_ms: row.get("median_reply_ms")?,
+                    p90_reply_ms: row.get("p90_reply_ms")?,
+                    last_activity_at: row.get("last_activity_at")?,
+                })
+            })?)
         })
         .await
     }

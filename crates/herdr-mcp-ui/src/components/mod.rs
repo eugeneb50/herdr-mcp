@@ -24,8 +24,8 @@ pub enum Route {
         Home {},
         #[route("/overview")]
         Overview {},
-        #[route("/playground?:tab&:queue&:item&:run")]
-        Playground { tab: Option<String>, queue: Option<String>, item: Option<String>, run: Option<String> },
+        #[route("/playground?:tab&:queue&:item&:run&:mail_view&:mail_to&:mail_item")]
+        Playground { tab: Option<String>, queue: Option<String>, item: Option<String>, run: Option<String>, mail_view: Option<String>, mail_to: Option<String>, mail_item: Option<String> },
         #[route("/variables")]
         Variables {},
         #[route("/settings")]

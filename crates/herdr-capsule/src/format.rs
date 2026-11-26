@@ -233,7 +233,10 @@ pub fn card(c: &Capsule, skin: &str, g: &Glyphs) -> String {
     }
     out.join("\n")
 }
-pub fn delivery_text(c: &Capsule, cfg: &CapsuleConfig) -> String {
+/// What a postman types into the agent: the capsule, how to read it and,
+/// for a task, the one reply command (`delivery` = this attempt's id; the
+/// reply's check is the task's pinned one, resolved by `send`).
+pub fn delivery_text(c: &Capsule, cfg: &CapsuleConfig, delivery: Option<&str>) -> String {
     let rendered = line(c, "raw", &Glyphs::defaults());
     let raw = rendered.strip_prefix("> ").unwrap_or(&rendered);
     let head = format!("Capsule {} for you: {}", c.id, raw);
@@ -247,25 +250,28 @@ pub fn delivery_text(c: &Capsule, cfg: &CapsuleConfig) -> String {
     if c.status != "task" {
         return head + &read;
     }
-    let check = c
-        .reply_check
-        .as_deref()
-        .map(|x| format!(" --check {}", q(x)))
-        .unwrap_or_default();
-    let report = q(&format!(
-        "file={}/{}/{}-report.md::report",
-        cfg.work.display(),
-        c.task,
-        c.id
-    ));
-    let reply = format!(
-        " When done or stuck, reply with ONE command: {} send --re {} --to {} --task {} --status done|fail|block --summary \"<=120 chars\" --artifact {report}{check} ; then reply with its CAP line only and stop.",
-        q(&cfg.exe),
-        q(&c.id),
-        q(c.reply_to.as_deref().unwrap_or("lead")),
-        q(&c.task)
-    );
-    head + &read + &reply
+    let command = reply_command(c, cfg, delivery);
+    format!(
+        "{head}{read} Write your report to {} . When done or stuck you MUST run this ONE shell command (always allowed, even where a brief says not to build or run things): {command} ; then reply with its CAP line only and stop.",
+        q(&report_path(cfg, &c.task, &c.id).display().to_string()),
+    )
+}
+
+/// The command a task recipient runs to reply to this delivery.
+pub fn reply_command(c: &Capsule, cfg: &CapsuleConfig, delivery: Option<&str>) -> String {
+    let token = match delivery {
+        Some(d) => format!("{}@{d}", c.id),
+        None => c.id.clone(),
+    };
+    format!(
+        "{} reply {} done|fail|block \"<=120 chars\"",
+        shlex_quote(&cfg.exe),
+        shlex_quote(&token),
+    )
+}
+/// Where the agent answering task capsule `id` writes its report.
+pub fn report_path(cfg: &CapsuleConfig, task: &str, id: &str) -> std::path::PathBuf {
+    cfg.work.join(task).join(format!("{id}-report.md"))
 }
 pub fn pack_summary(closer: &str, n: usize, k: usize, name: &str) -> String {
     let head = format!("rollup {n} \u{b7} ");
@@ -340,6 +346,36 @@ pub fn legend(home: &Path, g: &Glyphs) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delivery_text_quotes_every_typed_field() {
+        // The daemon types this into a shell-capable agent: a hostile task
+        // name, id or work dir must stay one inert shell word each.
+        let evil = "x;touch /tmp/pwned";
+        let c = Capsule {
+            task: evil.into(),
+            to: "builder".into(),
+            ..cap()
+        };
+        let cfg = CapsuleConfig {
+            exe: "/opt/my bin/capsule".into(),
+            work: "/w$(id)".into(),
+            ..CapsuleConfig::default()
+        };
+        let text = delivery_text(&c, &cfg, Some("d-1"));
+        let path = format!("/w$(id)/{evil}/rotisu-report.md");
+        assert!(text.contains(&shlex_quote(&path)), "{text}");
+        assert!(
+            text.contains(&format!(
+                "{} reply rotisu@d-1 ",
+                shlex_quote("/opt/my bin/capsule")
+            )),
+            "{text}"
+        );
+        assert!(
+            !text.contains(&format!(" {path} ")),
+            "unquoted report path: {text}"
+        );
+    }
     fn cap() -> Capsule {
         Capsule {
             v: 2,

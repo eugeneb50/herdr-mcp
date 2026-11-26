@@ -200,7 +200,7 @@ pub struct QueuePushResponse<T = serde_json::Value> {
 }
 
 /// The native bridge uses the store's canonical item and event records.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueItemResponse<T = serde_json::Value, E = serde_json::Value> {
     pub item: T,
     pub events: Vec<E>,

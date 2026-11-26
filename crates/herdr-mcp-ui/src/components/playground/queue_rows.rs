@@ -5,9 +5,50 @@ pub(super) fn item_id(item: &Value) -> Option<&str> {
     item["id"].as_str().filter(|id| !id.is_empty())
 }
 
-pub(super) fn selected_row(rows: &[Value], selected: Option<&str>) -> Option<usize> {
+/// Selection follows an id, not a row index, so a refresh can reorder rows.
+pub(super) fn selected_row_by<T>(
+    rows: &[T],
+    selected: Option<&str>,
+    id: impl Fn(&T) -> Option<&str>,
+) -> Option<usize> {
     let selected = selected?;
-    rows.iter().position(|row| item_id(row) == Some(selected))
+    rows.iter().position(|row| id(row) == Some(selected))
+}
+
+pub(super) fn selected_row(rows: &[Value], selected: Option<&str>) -> Option<usize> {
+    selected_row_by(rows, selected, item_id)
+}
+
+/// A JSON string field, or an em dash when absent.
+pub(super) fn field<'a>(value: &'a Value, name: &str) -> &'a str {
+    value[name].as_str().unwrap_or("—")
+}
+
+/// Epoch milliseconds in UTC, or an em dash for a missing/invalid value.
+pub(super) fn fmt_ms(value: Option<i64>) -> String {
+    value
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map_or_else(
+            || "—".into(),
+            |time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+        )
+}
+
+pub(super) fn utc_ms(value: &Value) -> String {
+    fmt_ms(value.as_i64())
+}
+
+/// The attempt/claim annotations shared by queue and mail event timelines.
+pub(super) fn event_note(event: &Value) -> Option<String> {
+    let data = &event["data"];
+    let mut notes = Vec::new();
+    if let Some(attempt) = data["attempt"].as_u64() {
+        notes.push(format!("attempt {attempt}"));
+    }
+    if let Some(claim) = data["claim"].as_u64() {
+        notes.push(format!("claim {claim}"));
+    }
+    (!notes.is_empty()).then(|| notes.join(" · "))
 }
 
 /// Whether the item can be cancelled and whether it can be retried.
@@ -94,6 +135,15 @@ mod tests {
         assert_eq!(selected_row(&[a.clone(), b.clone()], Some("a")), Some(0));
         assert_eq!(selected_row(&[b.clone(), a], Some("a")), Some(1));
         assert_eq!(selected_row(&[b], Some("a")), None);
+    }
+
+    #[test]
+    fn event_note_lists_attempt_and_claim() {
+        assert_eq!(event_note(&json!({"data": {}})), None);
+        assert_eq!(
+            event_note(&json!({"data": {"attempt": 2, "claim": 7}})).as_deref(),
+            Some("attempt 2 · claim 7")
+        );
     }
 
     #[test]

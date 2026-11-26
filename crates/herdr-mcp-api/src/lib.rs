@@ -11,6 +11,7 @@ pub mod client;
 pub mod config;
 pub mod flow;
 pub mod herdr;
+pub mod mail;
 pub mod playground;
 pub mod profile;
 pub mod recipe;

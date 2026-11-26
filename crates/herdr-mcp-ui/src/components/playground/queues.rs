@@ -9,7 +9,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use super::queue_rows::{
-    Cause, Group, bridge_unreachable, buttons, item_id, refetch, selected_row,
+    Cause, Group, bridge_unreachable, buttons, event_note, field, item_id, refetch, selected_row,
+    utc_ms,
 };
 use crate::{client::use_api, components::Route};
 
@@ -21,21 +22,10 @@ fn queue_link(queue: Option<String>, item: Option<String>) -> Route {
         queue,
         item,
         run: None,
+        mail_view: None,
+        mail_to: None,
+        mail_item: None,
     }
-}
-
-fn field<'a>(value: &'a Value, name: &str) -> &'a str {
-    value[name].as_str().unwrap_or("—")
-}
-
-fn utc(value: &Value) -> String {
-    value
-        .as_i64()
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .map_or_else(
-            || "—".into(),
-            |time| time.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
-        )
 }
 
 struct QueueRow {
@@ -292,7 +282,7 @@ pub(super) fn Queues(
                                         span { class: "pill", {field(row, "status")} }
                                         span { class: "tree-name mono", "{id}" }
                                         span { class: "muted", {field(row, "requester")} " · attempt " {row["attempts"].to_string()} }
-                                        span { class: "muted", {utc(&row["enqueued_at"])} }
+                                        span { class: "muted", {utc_ms(&row["enqueued_at"])} }
                                     }
                                 }
                             }
@@ -355,9 +345,8 @@ fn ItemHistory(
                 li {
                     key: "{event[\"seq\"]}",
                     strong { {field(event, "kind")} }
-                    span { class: "muted", " · " {utc(&event["at"])} }
-                    if let Some(attempt) = event["data"]["attempt"].as_u64() { " · attempt {attempt}" }
-                    if let Some(claim) = event["data"]["claim"].as_u64() { " · claim {claim}" }
+                    span { class: "muted", " · " {utc_ms(&event["at"])} }
+                    if let Some(note) = event_note(event) { span { class: "muted", " · {note}" } }
                     if let Some(error) = event["data"]["error"].as_str() { p { "{error}" } }
                 }
             }

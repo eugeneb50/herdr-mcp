@@ -1,7 +1,21 @@
 use crate::{Result, Store, fail};
+use nix::{
+    errno::Errno,
+    sys::signal::{Signal, killpg},
+    unistd::Pid,
+};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, process::Command};
-const DECISIVE: &str = "error,fail,panic,warning,assert,expected,exception,denied,not found";
+use std::{
+    collections::BTreeMap,
+    fs::{self, File},
+    io::{self, Read, Seek},
+    os::unix::process::CommandExt,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
+const DECISIVE: &str =
+    "error,fail,panic,warning,assert,expected,exception,denied,not found,check timed out";
 fn shlex_split(s: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
@@ -84,14 +98,67 @@ pub fn decisive(lines: &[String]) -> Vec<String> {
     let from = if hits.is_empty() { lines } else { &hits };
     from.iter().rev().take(12).rev().cloned().collect()
 }
-pub fn run_check(cmd: &str) -> Result<(i32, String)> {
-    let out = Command::new("sh").arg("-c").arg(cmd).output()?;
-    let text = format!(
+fn signal_group(group: Pid, signal: Signal) -> io::Result<()> {
+    match killpg(group, signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(error) => Err(io::Error::from_raw_os_error(error as i32)),
+    }
+}
+
+fn read_capture(mut file: File) -> io::Result<Vec<u8>> {
+    let len = file.metadata()?.len();
+    file.rewind()?;
+    let mut output = Vec::new();
+    file.take(len).read_to_end(&mut output)?;
+    Ok(output)
+}
+
+pub fn run_check(cmd: &str, timeout: Duration) -> Result<(i32, String)> {
+    // Files keep output draining independent of child pipe ownership.
+    let stdout = tempfile::tempfile()?;
+    let stderr = tempfile::tempfile()?;
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .process_group(0)
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?)
+        .spawn()?;
+    let group = Pid::from_raw(child.id() as i32);
+    let started = Instant::now();
+    let (exit, timed_out) = loop {
+        if let Some(status) = child.try_wait()? {
+            break (status.code().unwrap_or(-1), false);
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            // Keep the leader unreaped during the grace period so its group ID
+            // cannot be recycled before SIGKILL.
+            let term = signal_group(group, Signal::SIGTERM);
+            thread::sleep(Duration::from_secs(2));
+            let kill = signal_group(group, Signal::SIGKILL);
+            kill?;
+            child.wait()?;
+            term?;
+            break (124, true);
+        }
+        thread::sleep(remaining.min(Duration::from_millis(20)));
+    };
+
+    let stdout = read_capture(stdout)?;
+    let stderr = read_capture(stderr)?;
+    let mut text = format!(
         "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&stdout),
+        String::from_utf8_lossy(&stderr)
     );
-    Ok((out.status.code().unwrap_or(-1), text))
+    if timed_out {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&format!("check timed out after {} s", timeout.as_secs()));
+    }
+    Ok((exit, text))
 }
 pub fn reply_check_of(
     store: &mut Store,

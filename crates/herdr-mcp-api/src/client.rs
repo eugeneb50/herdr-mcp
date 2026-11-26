@@ -455,6 +455,35 @@ impl ApiClient {
         Self::json(self.request(Method::POST, &["api", "queues", "items", id, "retry"])).await
     }
 
+    /// `GET /api/mail/items`.
+    pub async fn mail_items(
+        &self,
+        query: &mail::MailListQuery,
+    ) -> Result<Vec<mail::MailItemResponse>, ApiError> {
+        Self::json(
+            self.request(Method::GET, &["api", "mail", "items"])
+                .query(query),
+        )
+        .await
+    }
+
+    /// `GET /api/mail/items/{id}`.
+    pub async fn mail_item(&self, id: &str) -> Result<mail::MailItemResponse, ApiError> {
+        self.get(&["api", "mail", "items", id]).await
+    }
+
+    /// `GET /api/mail/stats`.
+    pub async fn mail_stats(
+        &self,
+        query: &mail::MailStatsQuery,
+    ) -> Result<Vec<mail::MailLabelStats>, ApiError> {
+        Self::json(
+            self.request(Method::GET, &["api", "mail", "stats"])
+                .query(query),
+        )
+        .await
+    }
+
     // ── runs ───────────────────────────────────────────────────────────
 
     /// `POST /api/runs` — start a run in the background; returns its first record.

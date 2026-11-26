@@ -25,6 +25,9 @@ pub struct Capsule {
     pub artifacts: Vec<Artifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub re: Option<String>,
+    /// The delivery attempt a reply answers (`--re X --delivery D`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,6 +83,22 @@ pub fn json_pretty(value: &serde_json::Value) -> Result<String> {
 pub fn normalize_summary(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
+/// `task` and `id` become directories and file names of the report path
+/// (`<work>/<task>/<id>-report.md`): one plain path part each.
+pub fn report_path_parts(fields: &[(&str, &str)]) -> Result<()> {
+    for (name, value) in fields {
+        let plain = value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+        if !plain || value.is_empty() || matches!(*value, "." | "..") {
+            return Err(fail(format!(
+                "--{name} {value:?} names a directory of the report path: use letters, digits, . _ - (not . or ..)"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn no_control_chars(fields: &[(&str, &str)], specs: &[String]) -> Result<()> {
     for (name, value) in fields {
         let v = if *name == "summary" {
