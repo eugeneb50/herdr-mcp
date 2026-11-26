@@ -12,6 +12,65 @@ The binary, TUI and trim changes are all breaking; the rest are marked
   `CAPSULE_SUBMIT_CONFIRM_S` overrides and the `fences/mail-<to>.json` and
   `delivered.jsonl` sidecars are no longer read or written by the CLI; capsules
   already queued in `mail-*` remain usable.
+- **Capsule mail: herdr-mcp is the postman.** Enable `mail.enabled=true` and
+  set `mail.labels` to the pane labels that should receive work. Send a task
+  with `capsule send --to <label> --task <name> --status task --summary
+  "..." --artifact file=brief.md::brief --reply-to lead --reply-check "sh
+  check.sh"`. The daemon delivers it by typing the capsule into the agent's
+  pane; the agent writes a report and replies with `capsule reply
+  <id>@<delivery> done "summary"`. No external broker — runs on herdr-queue.
+- **Reply checks with timeout.** A `--reply-check` command runs in its own
+  process group with output to temp files. `CAPSULE_CHECK_TIMEOUT_S`
+  (default 600s) sends SIGTERM, then 2s later SIGKILL; a timed-out check
+  exits 124 and refuses `done` like any failing check.
+- **One reply reminder.** After a delivered task's turn ends and no reply
+  for `mail.remind-after-ms` (default 60s), the postman types the exact
+  `capsule reply` command once. The reminder is a durable fenced event
+  (`reminder_reserved`); a restart never sends a second one.
+- **Undeliverable expiry.** After `mail.undeliverable-after-ms` (default 10
+  min) with no pane carrying the label, the oldest waiting capsule is marked
+  dead and its sender gets one fail notice. The pane must have been missing
+  the whole delay; a brief agent restart behind a busy agent does not expire
+  mail. Duplicate labels and unreadable snapshots never expire mail.
+- **Playground Mail tab (Activity + Health).** Sixth tab: Activity view
+  filters by recipient and status, shows capsule list and detail card with
+  event timeline. Health view lists dead mail (`GET
+  /api/mail/items?status=dead`) with its reason and a Retry button and
+  per-label stats from `/api/mail/stats` (depth, in flight, delivered,
+  replied, failed, dead, median/p90 reply time).
+- **TUI Runs tab shows mail queues.** Runs tab now displays `mail N queued /
+  N in flight / N dead` for mail queues alongside recipe runs.
+- **HTTP API for mail.** `GET /api/mail/items?to=<label>` lists items; `GET
+  /api/mail/items/{id}` gets one with events; `GET /api/mail/stats` returns
+  per-label stats. MCP tools `mail_list`, `mail_item`, `mail_stats` and
+  `ApiClient` methods expose the same.
+- **Configurable work directory.** `mail.work-dir` (Path setting, ~
+  expanded, absolute, temp dirs refused) sets where agent reports are
+  written. The delivered event records the report path and `capsule reply`
+  reads it back, so an agent's CLI with a different `CAPSULE_WORK` still
+  finds the report it was told to write.
+- **Reliable delivery.** Lead mail is never claimed. A pane without a turn
+  counter is not admitted. A delivered pane confirmed closed fails the
+  attempt and requeues (attempt budget applies) instead of waiting out the
+  reply deadline; a committed reply still wins. The reply-deadline dead
+  transition and its sender notice commit in one fenced write, so a
+  cancelled or taken-over item never sends a notice.
+- **Restart-safe flights.** A herdr restart starts the pane's
+  `state_change_seq` over. The postman now treats a lower counter as a new
+  baseline, not a turn end. Items with a recorded delivery are not reaped on
+  restart; the postman adopts them and settles by reply, turn end or
+  deadline. An open delivery follows its pane ID, not its label, so a
+  relabelled pane keeps its status evidence.
+- **Reply status is case-insensitive.** `capsule reply X DONE`, `Done`,
+  `done` all work.
+- **Report path safety.** `task` and `id` are directories/filenames: send
+  and the postman refuse anything but letters, digits, `. _ -` (no `../`
+  escape, no `::`).
+- **Bad `reply_to` cannot wedge a mailbox.** A task with an invalid
+  `reply_to` made the dead+notice write roll back every pass while the lease
+  renewed (mailbox busy forever). Now the notice goes to `reply_to` (if a
+  valid mailbox), else the sender, else `lead`. `send` refuses a bad
+  `--reply-to` at send time.
 - **Flows (breaking).** A collection is a flow, not a request list with an
   end gate. `Recipe.steps` and `gate` are gone; `Recipe.flow` is nodes
   (`start`, `tool`, `branch`, `run`, `wait`, `fail`) and edges from a
