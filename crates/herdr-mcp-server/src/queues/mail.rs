@@ -137,6 +137,9 @@ pub(crate) struct Postman {
     owner: String,
     herdr: Arc<dyn MailHerdr>,
     flights: Mutex<HashMap<String, InFlight>>,
+    /// When each label was first seen with no pane (cleared when one shows).
+    /// In memory: a restart restarts the clock, which only delays expiry.
+    missing_since: Mutex<HashMap<String, i64>>,
 }
 
 impl Postman {
@@ -145,6 +148,7 @@ impl Postman {
             owner: format!("herdr-mcp:{}:{}", std::process::id(), uuid::Uuid::new_v4()),
             herdr,
             flights: Mutex::default(),
+            missing_since: Mutex::default(),
         }
     }
 }
@@ -345,14 +349,64 @@ impl QueueService {
         if !readable {
             return Ok(Step::Empty); // herdr unreadable: try again next tick
         }
+        let missing_for = {
+            let mut missing = lock(&postman.missing_since);
+            if here.is_empty() {
+                let since = *missing.entry(label.to_owned()).or_insert(now);
+                now.saturating_sub(since)
+            } else {
+                missing.remove(label);
+                0
+            }
+        };
         let Some(pane) = pane else {
-            return Ok(Step::NoPane);
+            // Undeliverable only after the pane has been gone for the whole
+            // delay, not merely because old mail met a brief absence.
+            return if here.is_empty() && missing_for >= ms(server, MAIL_UNDELIVERABLE_AFTER_MS) {
+                self.expire_undeliverable(server, consumer, label).await
+            } else {
+                Ok(Step::NoPane)
+            };
         };
         // No turn counter means no baseline: never type into an unknown turn.
         if !READY.contains(&pane.status.as_str()) || pane.seq.is_none() {
             return Ok(Step::Busy);
         }
         self.deliver(server, postman, &consumer, label, pane).await
+    }
+
+    async fn expire_undeliverable(
+        &self,
+        server: &HerdrMcpServer,
+        consumer: Consumer,
+        label: &str,
+    ) -> Result<Step> {
+        let cutoff = self
+            .now()
+            .saturating_sub(ms(server, MAIL_UNDELIVERABLE_AFTER_MS));
+        let queue = consumer.queue.clone();
+        let Some(item) = self
+            .db(server, move |db| Ok(db.queued_before(&queue, cutoff)?))
+            .await?
+        else {
+            return Ok(Step::NoPane);
+        };
+        let capsule = parse_capsule(&item).map_err(anyhow::Error::msg)?;
+        let reason = format!("undeliverable: no pane with label {label}");
+        let notice = Self::notice_push(&capsule, format!("undeliverable-{}", item.id), &reason)?;
+        let db_reason = reason.clone();
+        let now = self.now();
+        let finished = self
+            .db(server, move |db| {
+                Ok(db.expire_queued_with_notice(
+                    &consumer, &item.id, cutoff, &db_reason, notice, now,
+                )?)
+            })
+            .await?;
+        Ok(match finished {
+            Fenced::Applied(()) => Step::Dead(reason),
+            Fenced::Stale => Step::Empty,
+        })
     }
 
     /// A running delivery left by an earlier run of this mailbox's owner (we
@@ -638,13 +692,20 @@ impl QueueService {
 
     fn timeout_notice(flight: &InFlight, reason: &str) -> Result<Push> {
         let task = &flight.capsule;
+        Self::notice_push(
+            task,
+            format!("dead-{}-{}", task.id, flight.delivery),
+            reason,
+        )
+    }
+
+    fn notice_push(task: &Capsule, id: String, reason: &str) -> Result<Push> {
         let to = task
             .reply_to
             .clone()
             .filter(|t| !t.is_empty())
             .unwrap_or_else(|| task.from.clone());
         let queue = format!("mail-{to}");
-        let id = format!("dead-{}-{}", task.id, flight.delivery);
         let notice = Capsule {
             v: 2,
             id: id.clone(),

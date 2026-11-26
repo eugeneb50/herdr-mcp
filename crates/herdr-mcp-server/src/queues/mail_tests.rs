@@ -818,3 +818,122 @@ async fn prompt_failure_refunds_the_claim_for_clean_redelivery() {
     assert_eq!(item.attempts, 0);
     herdr_queue::run_audit(&f.path(), None, None).unwrap();
 }
+
+#[tokio::test(start_paused = true)]
+async fn unknown_label_mail_goes_dead_with_one_notice() {
+    let f = Fixture::new(true).await;
+    f.setting(MAIL_UNDELIVERABLE_AFTER_MS, Setting::Number(1_000));
+    let (herdr, postman) = fake();
+    lock(&herdr.panes).clear();
+    let capsule = task("missing");
+    let id = f.push(&capsule);
+    f.step(&postman, Step::NoPane).await; // the absence starts here
+
+    elapsed(1_000).await;
+    f.step(&postman, Step::NoPane).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Queued);
+
+    let conn = rusqlite::Connection::open(f.path()).unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER reject_notice BEFORE INSERT ON queue_items
+         WHEN NEW.queue = 'mail-return'
+         BEGIN SELECT RAISE(ABORT, 'notice insertion failed'); END;",
+    )
+    .unwrap();
+    elapsed(1).await;
+    f.tick(&postman).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Queued);
+    assert_eq!(f.db().item(&id).unwrap().unwrap().1.len(), 1);
+    conn.execute_batch("DROP TRIGGER reject_notice").unwrap();
+
+    f.step(
+        &postman,
+        Step::Dead(format!("undeliverable: no pane with label {LABEL}")),
+    )
+    .await;
+    f.step(&postman, Step::NoPane).await;
+    let (item, events) = f.db().item(&id).unwrap().unwrap();
+    assert_eq!(item.status, ItemStatus::Dead);
+    assert_eq!(item.attempts, 0);
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[1].kind, "dead");
+    assert_eq!(events[1].data.as_ref().unwrap()["undeliverable"], true);
+    let notices = f.db().list(Some("mail-return"), None, 10).unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].payload["status"], "fail");
+    assert_eq!(notices[0].payload["re"], capsule.id);
+    assert!(!notices[0].payload.contains_key("delivery"));
+    assert!(f.db().list(Some("mail-lead"), None, 10).unwrap().is_empty());
+    assert_eq!(herdr.prompts(), 0);
+    herdr_queue::run_audit(&f.path(), None, None).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn duplicate_label_mail_is_never_undeliverable() {
+    let f = Fixture::new(true).await;
+    f.setting(MAIL_UNDELIVERABLE_AFTER_MS, Setting::Number(1_000));
+    let (herdr, postman) = fake();
+    let id = f.push(&task("ambiguous"));
+    elapsed(1_001).await;
+
+    let step = f
+        .server
+        .queues
+        .mail_step(&f.server, &postman, LABEL, &[], true, false)
+        .await
+        .unwrap();
+    assert_eq!(step, Step::Empty);
+    assert_eq!(f.item(&id).status, ItemStatus::Queued);
+
+    {
+        let mut panes = lock(&herdr.panes);
+        let duplicate = MailPane {
+            pane_id: "w1:p8".into(),
+            ..panes[0].clone()
+        };
+        panes.push(duplicate);
+    }
+
+    f.step(&postman, Step::NoPane).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Queued);
+    assert!(
+        f.db()
+            .list(Some("mail-return"), None, 10)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(herdr.prompts(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn old_mail_survives_a_brief_pane_absence() {
+    // An agent restart hides its pane for a moment; a backlog that waited
+    // longer than the delay behind a busy agent must not all go dead.
+    let f = Fixture::new(true).await;
+    f.setting(MAIL_UNDELIVERABLE_AFTER_MS, Setting::Number(1_000));
+    let (herdr, postman) = fake();
+    herdr.pane("working", 1);
+    let id = f.push(&task("backlog"));
+    f.step(&postman, Step::Busy).await;
+    elapsed(5_000).await;
+    f.step(&postman, Step::Busy).await;
+
+    let gone = std::mem::take(&mut *lock(&herdr.panes));
+    f.step(&postman, Step::NoPane).await;
+    elapsed(999).await;
+    f.step(&postman, Step::NoPane).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Queued);
+
+    *lock(&herdr.panes) = gone;
+    f.step(&postman, Step::Busy).await;
+    lock(&herdr.panes).clear();
+    elapsed(999).await;
+    f.step(&postman, Step::NoPane).await; // the clock restarted when it came back
+    assert_eq!(f.item(&id).status, ItemStatus::Queued);
+    assert!(
+        f.db()
+            .list(Some("mail-return"), None, 10)
+            .unwrap()
+            .is_empty()
+    );
+}

@@ -150,6 +150,62 @@ impl Queue {
         })
     }
 
+    /// Oldest eligible queued item by mailbox sequence.
+    pub fn queued_before(&self, queue: &str, cutoff_ms: i64) -> Result<Option<Item>> {
+        validate_name(queue)?;
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT * FROM queue_items WHERE queue = ?1 AND status = 'queued'
+               AND enqueued_at < ?2 ORDER BY seq LIMIT 1",
+                params![queue, cutoff_ms],
+                read_item,
+            )
+            .optional()?)
+    }
+
+    /// Settles an unclaimed, aged item and enqueues its notice under the mailbox
+    /// consumer fence. Either both writes commit or neither does.
+    pub fn expire_queued_with_notice(
+        &mut self,
+        consumer: &Consumer,
+        id: &str,
+        cutoff_ms: i64,
+        reason: &str,
+        notice: Push,
+        now_ms: i64,
+    ) -> Result<Fenced<()>> {
+        self.write(|tx| {
+            let updated = tx.execute(
+                "UPDATE queue_items SET status = 'dead', finished_at = ?6, result = ?7
+                  WHERE id = ?1 AND queue = ?2 AND status = 'queued' AND enqueued_at < ?3
+                    AND EXISTS (SELECT 1 FROM queue_consumers
+                     WHERE queue = ?2 AND owner = ?4 AND token = ?5 AND until > ?6)",
+                params![
+                    id,
+                    consumer.queue,
+                    cutoff_ms,
+                    consumer.owner,
+                    consumer.token,
+                    now_ms,
+                    json!(reason).to_string(),
+                ],
+            )?;
+            if updated == 0 {
+                return Ok(Fenced::Stale);
+            }
+            event(
+                tx,
+                id,
+                now_ms,
+                "dead",
+                Some(&json!({"error": reason, "undeliverable": true})),
+            )?;
+            push_item(tx, notice, now_ms)?;
+            Ok(Fenced::Applied(()))
+        })
+    }
+
     pub fn release_consumer(&mut self, consumer: &Consumer) -> Result<Fenced<()>> {
         self.write(|tx| {
             let changed = tx.execute(

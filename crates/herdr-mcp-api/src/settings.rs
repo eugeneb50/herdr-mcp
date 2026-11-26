@@ -228,6 +228,7 @@ pub const MAIL_ENABLED: &str = "mail.enabled";
 pub const MAIL_LABELS: &str = "mail.labels";
 pub const MAIL_REPLY_WAIT_MS: &str = "mail.reply-wait-ms";
 pub const MAIL_SUBMIT_CONFIRM_MS: &str = "mail.submit-confirm-ms";
+pub const MAIL_UNDELIVERABLE_AFTER_MS: &str = "mail.undeliverable-after-ms";
 pub const MAIL_CONSUMER_LEASE_MS: &str = "mail.consumer-lease-ms";
 
 /// Every setting, in display order.
@@ -482,6 +483,14 @@ pub const SPECS: &[Spec] = &[
         5_000,
         500,
         60_000,
+    ),
+    ms(
+        MAIL_UNDELIVERABLE_AFTER_MS,
+        "undeliverable mail delay",
+        "How long mail may wait before a missing recipient makes it undeliverable.",
+        600_000,
+        1,
+        86_400_000,
     ),
     ms(
         MAIL_CONSUMER_LEASE_MS,

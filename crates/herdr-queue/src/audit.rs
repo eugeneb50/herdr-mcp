@@ -125,7 +125,13 @@ fn fold(row: &Row, events: &[Event], v: &mut Vec<String>) -> (Option<&'static st
         if kind == "deduped" || kind == "coalesced" {
             continue;
         }
-        let (exp, nxt) = trans(kind);
+        let undeliverable =
+            kind == "dead" && data.get("undeliverable").and_then(Value::as_bool) == Some(true);
+        let (exp, nxt) = if undeliverable {
+            (Some(&["queued"][..]), Some("dead"))
+        } else {
+            trans(kind)
+        };
         match exp {
             None => {
                 let known = matches!(
@@ -147,7 +153,12 @@ fn fold(row: &Row, events: &[Event], v: &mut Vec<String>) -> (Option<&'static st
             }
             Some(exp) => {
                 if !status.is_some_and(|s| exp.contains(&s)) {
-                    let what = msg(kind).replacen("%s", status.unwrap_or("None"), 1);
+                    let template = if undeliverable {
+                        "expected queued, got %s"
+                    } else {
+                        msg(kind)
+                    };
+                    let what = template.replacen("%s", status.unwrap_or("None"), 1);
                     bad(v, &row.id, seq, status, kind, &what);
                     continue;
                 }
@@ -194,10 +205,15 @@ fn fold(row: &Row, events: &[Event], v: &mut Vec<String>) -> (Option<&'static st
                 }
             }
             "dead" => {
-                explicit_dead = attempt == Some(attempts)
-                    && claim.is_some()
-                    && claim == last_claim
-                    && data.get("error").and_then(Value::as_str).is_some();
+                let terminal = if undeliverable {
+                    attempt.is_none() && claim.is_none()
+                } else {
+                    attempt == Some(attempts) && claim.is_some() && claim == last_claim
+                };
+                explicit_dead = terminal && data.get("error").and_then(Value::as_str).is_some();
+                if undeliverable && !explicit_dead {
+                    bad(v, &row.id, seq, status, kind, "invalid undeliverable event");
+                }
                 status = nxt;
             }
             "stalled" => {
