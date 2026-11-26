@@ -74,63 +74,7 @@ impl Queue {
     }
 
     pub fn push(&mut self, push: Push, now_ms: i64) -> Result<Pushed> {
-        validate_name(&push.queue)?;
-        if push.max_attempts == 0 {
-            return Err(QueueError::InvalidMaxAttempts);
-        }
-        self.write(|tx| {
-            if let Some(key) = &push.dedupe_key
-                && let Some(item) = unfinished_by_key(tx, &push.queue, key)?
-            {
-                event(tx, &item.id, now_ms, "deduped", None)?;
-                return Ok(Pushed::Deduped(item));
-            }
-            if let Some(key) = &push.coalesce_key
-                && let Some(mut item) = tx.query_row(
-                    "SELECT * FROM queue_items WHERE queue = ? AND coalesce_key = ?
-                     AND status = 'queued' ORDER BY seq LIMIT 1",
-                    params![push.queue, key],
-                    read_item,
-                ).optional()?
-            {
-                if let Some(requester) = push.requester
-                    && !item.waiters.contains(&requester)
-                {
-                    item.waiters.push(requester);
-                }
-                item.payload = push.payload;
-                tx.execute(
-                    "UPDATE queue_items SET payload = ?, waiters = ? WHERE id = ?",
-                    params![json!(item.payload).to_string(), json!(item.waiters).to_string(), item.id],
-                )?;
-                event(tx, &item.id, now_ms, "coalesced", None)?;
-                return Ok(Pushed::Coalesced(item));
-            }
-            if let Some(max_depth) = push.max_depth {
-                let depth = tx.query_row(
-                    "SELECT COUNT(*) FROM queue_items WHERE queue = ?
-                     AND status IN ('queued', 'running')",
-                    [&push.queue],
-                    |row| row.get(0),
-                )?;
-                if depth >= i64::from(max_depth) {
-                    return Err(QueueError::Full { depth });
-                }
-            }
-            let id = Uuid::new_v4().to_string();
-            let waiters: Vec<_> = push.requester.iter().filter(|_| push.coalesce_key.is_some()).collect();
-            tx.execute(
-                "INSERT INTO queue_items
-                 (id, queue, seq, status, max_attempts, dedupe_key, coalesce_key,
-                  payload, requester, waiters, enqueued_at)
-                 VALUES (?1, ?2, (SELECT COALESCE(MAX(seq), 0) + 1 FROM queue_items WHERE queue = ?2),
-                         'queued', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                params![id, push.queue, push.max_attempts, push.dedupe_key, push.coalesce_key,
-                    json!(push.payload).to_string(), push.requester, json!(waiters).to_string(), now_ms],
-            )?;
-            event(tx, &id, now_ms, "enqueued", None)?;
-            Ok(Pushed::New(get_item(tx, &id)?))
-        })
+        self.write(|tx| push_item(tx, push, now_ms))
     }
 
     pub fn claim(
@@ -324,62 +268,24 @@ impl Queue {
     }
 
     pub fn finish(&mut self, lease: &Lease, outcome: Outcome, now_ms: i64) -> Result<Fenced<Item>> {
+        self.write(|tx| finish_item(tx, lease, outcome, now_ms))
+    }
+
+    /// Marks the current claim dead and enqueues its notice in one transaction.
+    /// A stale claim has no effect. An enqueue error rolls back the dead transition.
+    pub fn finish_dead_with_notice(
+        &mut self,
+        lease: &Lease,
+        reason: String,
+        notice: Push,
+        now_ms: i64,
+    ) -> Result<Fenced<Item>> {
         self.write(|tx| {
-            let running = tx
-                .query_row(
-                    "SELECT attempts, max_attempts FROM queue_items
-                 WHERE id = ?1 AND status = 'running' AND claims = ?2",
-                    params![lease.id, lease.claim],
-                    |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?)),
-                )
-                .optional()?;
-            let Some((attempt, max_attempts)) = running else {
-                return Ok(Fenced::Stale);
-            };
-            let (status, kind, result, data) = match outcome {
-                Outcome::Done(value) => (
-                    ItemStatus::Done,
-                    "done",
-                    Some(value),
-                    Some(json!({"attempt": attempt, "claim": lease.claim})),
-                ),
-                Outcome::Cancelled => (ItemStatus::Cancelled, "cancelled", None, None),
-                Outcome::Dead(error) => {
-                    let data = json!({"attempt": attempt, "claim": lease.claim, "error": error});
-                    (
-                        ItemStatus::Dead,
-                        "dead",
-                        Some(Value::String(error)),
-                        Some(data),
-                    )
-                }
-                Outcome::Failed(error) => {
-                    event(
-                        tx,
-                        &lease.id,
-                        now_ms,
-                        "failed",
-                        Some(&json!({"attempt": attempt, "claim": lease.claim, "error": error})),
-                    )?;
-                    let (status, kind) = if attempt < max_attempts {
-                        (ItemStatus::Queued, "requeued")
-                    } else {
-                        (ItemStatus::Dead, "dead")
-                    };
-                    (status, kind, Some(Value::String(error)), None)
-                }
-            };
-            end_run(
-                tx,
-                &lease.id,
-                lease.claim,
-                status,
-                result.as_ref(),
-                now_ms,
-                false,
-            )?;
-            event(tx, &lease.id, now_ms, kind, data.as_ref())?;
-            Ok(Fenced::Applied(get_item(tx, &lease.id)?))
+            let finished = finish_item(tx, lease, Outcome::Dead(reason), now_ms)?;
+            if matches!(finished, Fenced::Applied(_)) {
+                push_item(tx, notice, now_ms)?;
+            }
+            Ok(finished)
         })
     }
 
@@ -582,6 +488,146 @@ impl Queue {
         tx.commit()?;
         Ok(value)
     }
+}
+
+fn push_item(tx: &Transaction<'_>, push: Push, now_ms: i64) -> Result<Pushed> {
+    validate_name(&push.queue)?;
+    if push.max_attempts == 0 {
+        return Err(QueueError::InvalidMaxAttempts);
+    }
+    if let Some(key) = &push.dedupe_key
+        && let Some(item) = unfinished_by_key(tx, &push.queue, key)?
+    {
+        event(tx, &item.id, now_ms, "deduped", None)?;
+        return Ok(Pushed::Deduped(item));
+    }
+    if let Some(key) = &push.coalesce_key
+        && let Some(mut item) = tx
+            .query_row(
+                "SELECT * FROM queue_items WHERE queue = ? AND coalesce_key = ?
+                 AND status = 'queued' ORDER BY seq LIMIT 1",
+                params![push.queue, key],
+                read_item,
+            )
+            .optional()?
+    {
+        if let Some(requester) = push.requester
+            && !item.waiters.contains(&requester)
+        {
+            item.waiters.push(requester);
+        }
+        item.payload = push.payload;
+        tx.execute(
+            "UPDATE queue_items SET payload = ?, waiters = ? WHERE id = ?",
+            params![
+                json!(item.payload).to_string(),
+                json!(item.waiters).to_string(),
+                item.id
+            ],
+        )?;
+        event(tx, &item.id, now_ms, "coalesced", None)?;
+        return Ok(Pushed::Coalesced(item));
+    }
+    if let Some(max_depth) = push.max_depth {
+        let depth = tx.query_row(
+            "SELECT COUNT(*) FROM queue_items WHERE queue = ?
+                 AND status IN ('queued', 'running')",
+            [&push.queue],
+            |row| row.get(0),
+        )?;
+        if depth >= i64::from(max_depth) {
+            return Err(QueueError::Full { depth });
+        }
+    }
+    let id = Uuid::new_v4().to_string();
+    let waiters: Vec<_> = push
+        .requester
+        .iter()
+        .filter(|_| push.coalesce_key.is_some())
+        .collect();
+    tx.execute(
+        "INSERT INTO queue_items
+             (id, queue, seq, status, max_attempts, dedupe_key, coalesce_key,
+              payload, requester, waiters, enqueued_at)
+             VALUES (?1, ?2, (SELECT COALESCE(MAX(seq), 0) + 1 FROM queue_items WHERE queue = ?2),
+                     'queued', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            id,
+            push.queue,
+            push.max_attempts,
+            push.dedupe_key,
+            push.coalesce_key,
+            json!(push.payload).to_string(),
+            push.requester,
+            json!(waiters).to_string(),
+            now_ms
+        ],
+    )?;
+    event(tx, &id, now_ms, "enqueued", None)?;
+    Ok(Pushed::New(get_item(tx, &id)?))
+}
+
+fn finish_item(
+    tx: &Transaction<'_>,
+    lease: &Lease,
+    outcome: Outcome,
+    now_ms: i64,
+) -> Result<Fenced<Item>> {
+    let running = tx
+        .query_row(
+            "SELECT attempts, max_attempts FROM queue_items
+             WHERE id = ?1 AND status = 'running' AND claims = ?2",
+            params![lease.id, lease.claim],
+            |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?)),
+        )
+        .optional()?;
+    let Some((attempt, max_attempts)) = running else {
+        return Ok(Fenced::Stale);
+    };
+    let (status, kind, result, data) = match outcome {
+        Outcome::Done(value) => (
+            ItemStatus::Done,
+            "done",
+            Some(value),
+            Some(json!({"attempt": attempt, "claim": lease.claim})),
+        ),
+        Outcome::Cancelled => (ItemStatus::Cancelled, "cancelled", None, None),
+        Outcome::Dead(error) => {
+            let data = json!({"attempt": attempt, "claim": lease.claim, "error": error});
+            (
+                ItemStatus::Dead,
+                "dead",
+                Some(Value::String(error)),
+                Some(data),
+            )
+        }
+        Outcome::Failed(error) => {
+            event(
+                tx,
+                &lease.id,
+                now_ms,
+                "failed",
+                Some(&json!({"attempt": attempt, "claim": lease.claim, "error": error})),
+            )?;
+            let (status, kind) = if attempt < max_attempts {
+                (ItemStatus::Queued, "requeued")
+            } else {
+                (ItemStatus::Dead, "dead")
+            };
+            (status, kind, Some(Value::String(error)), None)
+        }
+    };
+    end_run(
+        tx,
+        &lease.id,
+        lease.claim,
+        status,
+        result.as_ref(),
+        now_ms,
+        false,
+    )?;
+    event(tx, &lease.id, now_ms, kind, data.as_ref())?;
+    Ok(Fenced::Applied(get_item(tx, &lease.id)?))
 }
 
 fn read_consumer(row: &Row<'_>) -> rusqlite::Result<Consumer> {

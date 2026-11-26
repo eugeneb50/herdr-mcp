@@ -65,20 +65,23 @@ impl MailHerdr for CliMailHerdr {
                 .flatten()
                 .filter_map(|a| Some((a["pane_id"].as_str()?, a["state_change_seq"].as_i64())))
                 .collect();
-            Ok(panes["panes"]
+            panes["panes"]
                 .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|p| {
-                    let pane_id = p["pane_id"].as_str()?;
-                    Some(MailPane {
+                .context("herdr pane list has no panes array")?
+                .iter()
+                .map(|p| {
+                    let pane_id = p["pane_id"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .context("herdr pane list entry has no pane ID")?;
+                    Ok(MailPane {
                         pane_id: pane_id.to_owned(),
-                        label: p["label"].as_str().filter(|l| !l.is_empty())?.to_owned(),
+                        label: p["label"].as_str().unwrap_or_default().to_owned(),
                         status: p["agent_status"].as_str().unwrap_or("unknown").to_owned(),
                         seq: seqs.get(pane_id).copied().flatten(),
                     })
                 })
-                .collect())
+                .collect()
         })
     }
 
@@ -214,7 +217,16 @@ impl QueueService {
             let s = crate::read(&server.settings);
             (s.flag(MAIL_ENABLED), s.labels(MAIL_LABELS))
         };
-        let open: Vec<String> = if enabled { labels } else { Vec::new() };
+        // `lead` belongs to `capsule watch`: never claim its consumer or
+        // deliver its mail, even when an operator lists the label.
+        let open: Vec<String> = if enabled {
+            labels
+                .into_iter()
+                .filter(|label| label.as_str() != "lead")
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut all = open.clone();
         all.extend(
             lock(&postman.flights)
@@ -320,7 +332,12 @@ impl QueueService {
             None => self.adopt(server, &queue).await?,
         };
         if let Some(flight) = flight {
-            return self.follow(server, postman, label, flight, pane).await;
+            let pane_closed = readable
+                && !flight.pane.is_empty()
+                && !panes.iter().any(|pane| pane.pane_id == flight.pane);
+            return self
+                .follow(server, postman, label, flight, pane, pane_closed)
+                .await;
         }
         if !is_open {
             return Ok(Step::NotOwner);
@@ -331,7 +348,8 @@ impl QueueService {
         let Some(pane) = pane else {
             return Ok(Step::NoPane);
         };
-        if !READY.contains(&pane.status.as_str()) {
+        // No turn counter means no baseline: never type into an unknown turn.
+        if !READY.contains(&pane.status.as_str()) || pane.seq.is_none() {
             return Ok(Step::Busy);
         }
         self.deliver(server, postman, &consumer, label, pane).await
@@ -483,6 +501,7 @@ impl QueueService {
         label: &str,
         mut flight: InFlight,
         pane: Option<&MailPane>,
+        pane_closed: bool,
     ) -> Result<Step> {
         let reply_wait = ms(server, MAIL_REPLY_WAIT_MS);
         let (l, wait, now) = (
@@ -502,7 +521,10 @@ impl QueueService {
             step
         };
         let same_pane = pane.filter(|p| p.pane_id == flight.pane);
-        let turn_moved = same_pane.is_some_and(|p| p.seq != flight.seq);
+        // Two known counters are needed to classify a change; missing is neither a
+        // change nor equality.
+        let known = same_pane.and_then(|p| p.seq).zip(flight.seq);
+        let turn_moved = known.is_some_and(|(now, before)| now != before);
         let ready = same_pane.is_some_and(|p| READY.contains(&p.status.as_str()));
         if flight.capsule.status == "task" {
             let (re, d) = (flight.capsule.id.clone(), flight.delivery.clone());
@@ -535,7 +557,24 @@ impl QueueService {
                 },
             );
         }
-        // Every delivery ends by the deadline, task or not, pane or not.
+        if pane_closed {
+            let reason = format!(
+                "pane {} closed during delivery {}",
+                flight.pane, flight.delivery
+            );
+            let (lease, failure) = (flight.lease.clone(), reason.clone());
+            let finished = self
+                .db(server, move |db| {
+                    Ok(db.finish(&lease, Outcome::Failed(failure), now)?)
+                })
+                .await?;
+            return Ok(done(match finished {
+                Fenced::Stale => Step::Empty,
+                Fenced::Applied(item) if item.status == ItemStatus::Dead => Step::Dead(reason),
+                Fenced::Applied(_) => Step::Released(reason),
+            }));
+        }
+        // A live or unconfirmed delivery still uses its original deadline.
         if now.saturating_sub(flight.delivered_at) >= reply_wait {
             let what = if flight.capsule.status == "task" {
                 "no reply"
@@ -547,22 +586,32 @@ impl QueueService {
                 reply_wait / 60_000,
                 flight.delivery
             );
-            if flight.capsule.status == "task"
-                && let Err(error) = self.notify_sender(server, &flight, &reason).await
-            {
-                // The dead event below still records it; never block on the notice.
-                tracing::warn!("mail {label}: notice for {}: {error:#}", flight.capsule.id);
-            }
-            self.finish_mail(server, &flight.lease, Outcome::Dead(reason.clone()))
-                .await?;
-            return Ok(done(Step::Dead(reason)));
+            let applied = if flight.capsule.status == "task" {
+                let notice = Self::timeout_notice(&flight, &reason)?;
+                let (lease, reason, now) = (flight.lease.clone(), reason.clone(), self.now());
+                self.db(server, move |db| {
+                    Ok(matches!(
+                        db.finish_dead_with_notice(&lease, reason, notice, now)?,
+                        Fenced::Applied(_)
+                    ))
+                })
+                .await?
+            } else {
+                self.finish_mail(server, &flight.lease, Outcome::Dead(reason.clone()))
+                    .await?
+            };
+            return Ok(done(if applied {
+                Step::Dead(reason)
+            } else {
+                Step::Empty
+            }));
         }
         let mut step = Step::Waiting;
         if let Some(at) = flight.confirm_at
             && now >= at
         {
             flight.confirm_at = None; // exactly one extra Enter, even if it fails
-            if ready && !turn_moved {
+            if ready && known.is_some() && !turn_moved {
                 match postman.herdr.enter(&flight.pane).await {
                     Ok(()) => step = Step::Nudged,
                     Err(error) => tracing::warn!("mail {label}: extra enter: {error:#}"),
@@ -587,15 +636,7 @@ impl QueueService {
         .await
     }
 
-    /// One `fail` capsule to whoever should hear that a task went unanswered.
-    /// Its id is fixed per delivery and checked in every status, so a retry
-    /// after a crash never sends a second one.
-    async fn notify_sender(
-        &self,
-        server: &HerdrMcpServer,
-        flight: &InFlight,
-        reason: &str,
-    ) -> Result<()> {
+    fn timeout_notice(flight: &InFlight, reason: &str) -> Result<Push> {
         let task = &flight.capsule;
         let to = task
             .reply_to
@@ -620,29 +661,15 @@ impl QueueService {
         let Value::Object(payload) = serde_json::to_value(&notice)? else {
             anyhow::bail!("a capsule serializes to an object");
         };
-        let now = self.now();
-        self.db(server, move |db| {
-            let sent = db
-                .list(Some(&queue), None, u32::MAX)?
-                .iter()
-                .any(|i| i.dedupe_key.as_deref() == Some(id.as_str()));
-            if !sent {
-                db.push(
-                    Push {
-                        queue,
-                        payload,
-                        dedupe_key: Some(id),
-                        coalesce_key: None,
-                        requester: Some("herdr-mcp".into()),
-                        max_attempts: 1,
-                        max_depth: None,
-                    },
-                    now,
-                )?;
-            }
-            Ok(())
+        Ok(Push {
+            queue,
+            payload,
+            dedupe_key: Some(id),
+            coalesce_key: None,
+            requester: Some("herdr-mcp".into()),
+            max_attempts: 1,
+            max_depth: None,
         })
-        .await
     }
 }
 

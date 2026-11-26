@@ -219,6 +219,38 @@ async fn default_disabled_never_calls_herdr() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn postman_never_types_to_lead() {
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    // The existing ready pane fixture, relabelled to the mailbox `capsule watch` owns.
+    lock(&herdr.panes)[0].label = "lead".into();
+    f.labels(&["lead"]);
+    let id = f.push(&Capsule {
+        to: "lead".into(),
+        ..task("lead-capsule")
+    });
+
+    assert!(f.tick(&postman).await.is_empty());
+    assert_eq!(herdr.prompts(), 0);
+    assert_eq!(herdr.enters(), 0);
+    assert_eq!(f.item(&id).status, ItemStatus::Queued);
+    // No consumer lease was taken: `capsule watch` can own the mailbox.
+    assert!(
+        f.db()
+            .claim_consumer("mail-lead", "capsule-watch", LEASE, f.now())
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        f.db()
+            .list(Some("mail-lead"), None, 10)
+            .unwrap()
+            .iter()
+            .any(|item| item.id == id)
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn second_task_waits_for_the_first_delivery_reply() {
     let f = Fixture::new(true).await;
     let (herdr, postman) = fake();
@@ -347,69 +379,96 @@ async fn sees_reply_committed_by_an_independent_connection() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn reply_deadline_sends_one_notice_even_after_interrupted_finish() {
-    for interrupted in [false, true] {
-        let f = Fixture::new(true).await;
-        let (herdr, postman) = fake();
-        let capsule = task("one");
-        let id = f.push(&capsule);
-        f.tick(&postman).await;
+async fn reply_deadline_retries_after_notice_enqueue_rolls_back() {
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    let capsule = task("one");
+    let id = f.push(&capsule);
+    f.tick(&postman).await;
 
-        let connection = rusqlite::Connection::open(f.path()).unwrap();
-        if interrupted {
-            connection
-                .execute_batch(
-                    "CREATE TRIGGER interrupt_finish BEFORE UPDATE OF status ON queue_items
-                 WHEN NEW.status = 'dead'
-                 BEGIN SELECT RAISE(ABORT, 'interrupted after notice'); END;",
-                )
-                .unwrap();
-        }
-        herdr.pane("blocked", 2);
-        elapsed(WAIT - 1).await;
-        f.step(&postman, Step::Waiting).await;
-        assert_eq!(f.item(&id).status, ItemStatus::Running);
-        assert!(
-            f.db()
-                .list(Some("mail-return"), None, 10)
-                .unwrap()
-                .is_empty()
-        );
-        elapsed(1).await;
-        f.tick(&postman).await;
+    let connection = rusqlite::Connection::open(f.path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER interrupt_notice BEFORE INSERT ON queue_items
+             WHEN NEW.queue = 'mail-return'
+             BEGIN SELECT RAISE(ABORT, 'interrupted notice'); END;",
+        )
+        .unwrap();
 
-        let notices = f.db().list(Some("mail-return"), None, 10).unwrap();
-        assert_eq!(notices.len(), 1);
-        assert_eq!(notices[0].payload["status"], "fail");
-        assert_eq!(notices[0].payload["re"], capsule.id);
-        assert!(!notices[0].payload.contains_key("delivery"));
-        assert!(f.db().list(Some("mail-lead"), None, 10).unwrap().is_empty());
+    herdr.pane("blocked", 2);
+    elapsed(WAIT - 1).await;
+    f.step(&postman, Step::Waiting).await;
+    elapsed(1).await;
+    f.tick(&postman).await;
 
-        if interrupted {
-            assert_eq!(f.item(&id).status, ItemStatus::Running);
-            connection
-                .execute_batch("DROP TRIGGER interrupt_finish")
-                .unwrap();
-            let (_, lease) = f
-                .db()
-                .claim("mail-return", LEASE, f.now())
-                .unwrap()
-                .unwrap();
-            f.db()
-                .finish(&lease, Outcome::Done(Value::Null), f.now())
-                .unwrap();
-            drop(postman);
-            elapsed(LEASE).await;
-            f.tick(&Postman::new(herdr.clone())).await;
-        } else {
-            f.tick(&postman).await;
-        }
+    assert_eq!(f.item(&id).status, ItemStatus::Running);
+    assert!(
+        f.db()
+            .item(&id)
+            .unwrap()
+            .unwrap()
+            .1
+            .iter()
+            .all(|event| event.kind != "dead")
+    );
+    assert!(
+        f.db()
+            .list(Some("mail-return"), None, 10)
+            .unwrap()
+            .is_empty()
+    );
 
-        assert_eq!(f.item(&id).status, ItemStatus::Dead);
-        assert_eq!(f.db().list(Some("mail-return"), None, 10).unwrap().len(), 1);
-        assert_eq!(herdr.prompts(), 1);
-        herdr_queue::run_audit(&f.path(), None, None).unwrap();
-    }
+    connection
+        .execute_batch("DROP TRIGGER interrupt_notice")
+        .unwrap();
+    f.tick(&postman).await;
+    f.tick(&postman).await;
+
+    assert_eq!(f.item(&id).status, ItemStatus::Dead);
+    let notices = f.db().list(Some("mail-return"), None, 10).unwrap();
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].payload["status"], "fail");
+    assert_eq!(notices[0].payload["re"], capsule.id);
+    assert!(!notices[0].payload.contains_key("delivery"));
+    assert!(f.db().list(Some("mail-lead"), None, 10).unwrap().is_empty());
+    assert_eq!(herdr.prompts(), 1);
+    herdr_queue::run_audit(&f.path(), None, None).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn cancelled_flight_emits_no_dead_notice() {
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    let id = f.push(&task("one"));
+    f.tick(&postman).await;
+    herdr.pane("blocked", 2);
+
+    // Cancel just after the heartbeat's fence check, before timeout settlement.
+    // This places the cancellation at the same SQLite write boundary each run.
+    let connection = rusqlite::Connection::open(f.path()).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TRIGGER cancel_after_heartbeat AFTER UPDATE OF lease_until ON queue_items
+             WHEN NEW.queue = 'mail-worker' AND NEW.status = 'running'
+             BEGIN
+                 UPDATE queue_items SET status = 'cancelled', lease_until = NULL
+                 WHERE id = NEW.id;
+                 INSERT INTO queue_events (item_id, seq, at, kind)
+                 SELECT NEW.id, MAX(seq) + 1, NEW.lease_until, 'cancelled'
+                 FROM queue_events WHERE item_id = NEW.id;
+             END;",
+        )
+        .unwrap();
+
+    elapsed(WAIT).await;
+    f.step(&postman, Step::Empty).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Cancelled);
+    assert!(
+        f.db()
+            .list(Some("mail-return"), None, 10)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -565,7 +624,41 @@ async fn non_task_finishes_when_the_turn_changes_and_is_idle_again() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn missing_or_ambiguous_panes_prevent_typing_and_missing_flight_expires() {
+async fn missing_sequence_neither_admits_nor_confirms_a_turn() {
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    let id = f.push(&task("one"));
+    let pane = lock(&herdr.panes).pop().unwrap();
+    *lock(&herdr.panes) = vec![MailPane { seq: None, ..pane }];
+    f.step(&postman, Step::Busy).await;
+    assert_eq!(herdr.prompts(), 0);
+    assert_eq!(f.item(&id).status, ItemStatus::Queued);
+
+    herdr.pane("idle", 1);
+    f.tick(&postman).await;
+    let pane = lock(&herdr.panes).pop().unwrap();
+    *lock(&herdr.panes) = vec![MailPane { seq: None, ..pane }];
+    f.step(&postman, Step::Waiting).await;
+    elapsed(CONFIRM).await;
+    f.step(&postman, Step::Waiting).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Running);
+    assert_eq!(herdr.enters(), 0);
+
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    let id = f.push(&Capsule {
+        status: "wip".into(),
+        ..task("notice")
+    });
+    f.tick(&postman).await;
+    let pane = lock(&herdr.panes).pop().unwrap();
+    *lock(&herdr.panes) = vec![MailPane { seq: None, ..pane }];
+    f.step(&postman, Step::Waiting).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Running);
+}
+
+#[tokio::test(start_paused = true)]
+async fn missing_or_ambiguous_panes_prevent_typing() {
     let f = Fixture::new(true).await;
     let (herdr, postman) = fake();
     let id = f.push(&task("one"));
@@ -581,14 +674,104 @@ async fn missing_or_ambiguous_panes_prevent_typing_and_missing_flight_expires() 
     f.step(&postman, Step::NoPane).await;
     assert_eq!(herdr.prompts(), 0);
     assert_eq!(f.item(&id).status, ItemStatus::Queued);
-    herdr.pane("idle", 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn closed_pane_then_replacement_gets_one_redelivery() {
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    let capsule = task("one");
+    let id = f.push(&capsule);
     f.tick(&postman).await;
+    let first = f.item(&id).delivery.unwrap();
+
+    herdr.pane("working", 2);
+    f.step(&postman, Step::Waiting).await;
+    // A relabelled pane is still alive, even though its mailbox label is gone.
+    lock(&herdr.panes)[0].label.clear();
+    f.step(&postman, Step::Waiting).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Running);
     lock(&herdr.panes).clear();
-    elapsed(WAIT).await;
+    assert!(matches!(
+        f.tick(&postman).await.as_slice(),
+        [(_, Step::Released(_))]
+    ));
+    let (released, events) = f.db().item(&id).unwrap().unwrap();
+    assert_eq!(released.status, ItemStatus::Queued);
+    assert_eq!(released.attempts, 1);
+    assert_eq!(events[events.len() - 2].kind, "failed");
+    assert_eq!(events.last().unwrap().kind, "requeued");
+    assert!(
+        f.db()
+            .list(Some("mail-return"), None, 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    herdr.pane("idle", 1);
+    lock(&herdr.panes)[0].pane_id = "w1:p8".into();
     f.tick(&postman).await;
-    assert_eq!(f.item(&id).status, ItemStatus::Dead);
-    assert_eq!(herdr.prompts(), 1);
+    let second = f.item(&id);
+    assert_eq!(second.status, ItemStatus::Running);
+    assert_eq!(second.attempts, 2);
+    let delivery = second.delivery.unwrap();
+    assert_ne!(delivery, first);
+    assert!(lock(&herdr.calls).iter().any(|call| matches!(
+        call, Call::Prompt(pane, text) if pane == "w1:p8" && text.contains(&delivery)
+    )));
+
+    f.step(&postman, Step::Waiting).await;
+    let answer = f.push(&reply(&capsule, &delivery));
+    f.step(&postman, Step::Replied(answer)).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Done);
+    assert_eq!(herdr.prompts(), 2);
     assert_eq!(herdr.enters(), 0);
+    herdr_queue::run_audit(&f.path(), None, None).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn closed_pane_preserves_a_committed_reply_and_respects_attempt_budget() {
+    for answered in [false, true] {
+        let f = Fixture::new(true).await;
+        let (herdr, postman) = fake();
+        let capsule = task("one");
+        let payload = serde_json::to_value(&capsule).unwrap();
+        let pushed = f
+            .db()
+            .push(
+                Push {
+                    queue: MAILBOX.into(),
+                    payload: payload.as_object().unwrap().clone(),
+                    dedupe_key: None,
+                    coalesce_key: None,
+                    requester: None,
+                    max_attempts: 1,
+                    max_depth: None,
+                },
+                f.now(),
+            )
+            .unwrap();
+        let Pushed::New(item) = pushed else {
+            unreachable!("empty mailbox")
+        };
+        let id = item.id;
+        f.tick(&postman).await;
+        lock(&herdr.panes).clear();
+        if answered {
+            let answer = f.push(&reply(&capsule, &f.item(&id).delivery.unwrap()));
+            f.step(&postman, Step::Replied(answer)).await;
+            assert_eq!(f.item(&id).status, ItemStatus::Done);
+        } else {
+            assert!(matches!(
+                f.tick(&postman).await.as_slice(),
+                [(_, Step::Dead(_))]
+            ));
+            assert_eq!(f.item(&id).status, ItemStatus::Dead);
+        }
+        assert_eq!(f.item(&id).attempts, 1);
+        assert_eq!(herdr.prompts(), 1);
+        herdr_queue::run_audit(&f.path(), None, None).unwrap();
+    }
 }
 
 #[tokio::test(start_paused = true)]

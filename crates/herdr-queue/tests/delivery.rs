@@ -311,3 +311,53 @@ fn cli_lists_consumers_and_delivery_history_as_json() {
     assert_eq!(invoke(&["list"])[0]["delivery"], "d");
     assert_eq!(invoke(&["events", "--id", &id])[2]["data"]["delivery"], "d");
 }
+
+#[test]
+fn dead_notice_requires_the_current_claim_and_is_written_once() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("queue.db");
+    let mut queue = Queue::open(&path).unwrap();
+    let id = push(&mut queue, "mail-a", json!({}), 1);
+    let (_, old) = queue.claim("mail-a", 10, 2).unwrap().unwrap();
+    queue.release(&old, 3).unwrap();
+    let (_, current) = queue.claim("mail-a", 10, 4).unwrap().unwrap();
+    let notice = || Push {
+        queue: "mail-return".into(),
+        payload: Default::default(),
+        dedupe_key: None,
+        coalesce_key: None,
+        requester: None,
+        max_attempts: 1,
+        max_depth: None,
+    };
+
+    assert_eq!(
+        queue
+            .finish_dead_with_notice(&old, "unanswered".into(), notice(), 5)
+            .unwrap(),
+        Fenced::Stale
+    );
+    assert_eq!(queue.get(&id).unwrap().status, ItemStatus::Running);
+    assert!(
+        queue
+            .list(Some("mail-return"), None, 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    assert!(matches!(
+        queue
+            .finish_dead_with_notice(&current, "unanswered".into(), notice(), 6)
+            .unwrap(),
+        Fenced::Applied(_)
+    ));
+    assert_eq!(
+        queue
+            .finish_dead_with_notice(&current, "unanswered".into(), notice(), 7)
+            .unwrap(),
+        Fenced::Stale
+    );
+    assert_eq!(queue.get(&id).unwrap().status, ItemStatus::Dead);
+    assert_eq!(queue.list(Some("mail-return"), None, 10).unwrap().len(), 1);
+    assert!(run_audit(&path, None, None).is_ok());
+}
