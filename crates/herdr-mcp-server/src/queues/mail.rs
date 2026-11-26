@@ -425,7 +425,7 @@ impl QueueService {
                 && !flight.pane.is_empty()
                 && !panes.iter().any(|pane| pane.pane_id == flight.pane);
             return self
-                .follow(server, postman, label, flight, pane, pane_closed)
+                .follow(server, postman, label, flight, panes, pane_closed)
                 .await;
         }
         if !is_open {
@@ -648,7 +648,7 @@ impl QueueService {
         postman: &Postman,
         label: &str,
         mut flight: InFlight,
-        pane: Option<&MailPane>,
+        panes: &[MailPane],
         pane_closed: bool,
     ) -> Result<Step> {
         let reply_wait = ms(server, MAIL_REPLY_WAIT_MS);
@@ -668,7 +668,8 @@ impl QueueService {
             lock(&postman.flights).remove(label);
             step
         };
-        let same_pane = pane.filter(|p| p.pane_id == flight.pane);
+        // An open flight follows its pane ID: the label may change after delivery.
+        let same_pane = panes.iter().find(|p| p.pane_id == flight.pane);
         // Two known counters are needed to classify a change; missing is neither a
         // change nor equality.
         let known = same_pane.and_then(|p| p.seq).zip(flight.seq);

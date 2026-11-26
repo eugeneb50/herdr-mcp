@@ -903,6 +903,26 @@ async fn non_task_finishes_when_the_turn_changes_and_is_idle_again() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn relabelled_pane_keeps_status_evidence_for_flight() {
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    let id = f.push(&Capsule {
+        status: "wip".into(),
+        ..task("notice-relabelled")
+    });
+    f.tick(&postman).await;
+    // Same pane, advanced turn, but the mailbox label is gone.
+    {
+        let mut panes = lock(&herdr.panes);
+        panes[0].label = "renamed".into();
+        panes[0].status = "idle".into();
+        panes[0].seq = Some(3);
+    }
+    f.step(&postman, Step::TurnEnded).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Done);
+}
+
+#[tokio::test(start_paused = true)]
 async fn turn_end_without_reply_gets_one_reminder() {
     let f = Fixture::new(true).await;
     f.setting(MAIL_REMIND_AFTER_MS, Setting::Number(2_000));
