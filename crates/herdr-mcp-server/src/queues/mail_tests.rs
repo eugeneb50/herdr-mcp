@@ -209,6 +209,173 @@ async fn elapsed(ms: u64) {
 }
 
 #[tokio::test(start_paused = true)]
+async fn postman_soak_seeded() {
+    const LABELS: [&str; 3] = ["soak-a", "soak-b", "soak-c"];
+    const TASKS: usize = 60;
+    const CHURN_TICKS: usize = 60;
+    const TICK_MS: u64 = 5_000;
+    // Each mailbox can drain all its tasks serially, even if every task times out.
+    const TICKS: usize = CHURN_TICKS + (TASKS / LABELS.len()) * (WAIT / TICK_MS + 3) as usize;
+
+    let f = Fixture::new(true).await;
+    f.labels(&LABELS);
+    let queues = LABELS.map(|label| format!("mail-{label}"));
+    let herdr = Arc::new(FakeMailHerdr::default());
+    let mut postman = Postman::new(herdr.clone());
+    let mut db = f.db();
+    let mut seed = 0x2468_ace1_u32;
+    let mut roll = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        seed
+    };
+    for n in 0..TASKS {
+        let capsule = Capsule {
+            to: LABELS[n % LABELS.len()].into(),
+            ..task(&format!("soak-{n}"))
+        };
+        push(&mut db, &capsule, None, f.now());
+    }
+
+    let mut restarted = false;
+    let mut reopened = false;
+    for tick in 0..TICKS {
+        let churning = tick < CHURN_TICKS;
+        let mut has_flight = false;
+        let old_panes = std::mem::take(&mut *lock(&herdr.panes));
+        let mut panes = Vec::new();
+
+        for (lane, (label, queue)) in LABELS.iter().zip(&queues).enumerate() {
+            let running = db.list(Some(queue), Some(ItemStatus::Running), 2).unwrap();
+            assert!(running.len() <= 1, "tick {tick}: {label} has two flights");
+            has_flight |= !running.is_empty();
+
+            let old = old_panes.iter().find(|p| p.label == *label);
+            let draw = roll();
+            // Force one closure after the initial claim. Later closures are seeded.
+            if tick == 1 && lane == 0
+                || (tick > 1 && churning && old.is_some() && draw.is_multiple_of(17))
+            {
+                continue;
+            }
+            reopened |= tick > 0 && old.is_none();
+            let status = if tick == 0 || !churning {
+                "idle"
+            } else {
+                match (draw >> 8) % 3 {
+                    0 => "idle",
+                    1 => "working",
+                    _ => "blocked",
+                }
+            };
+            let pane_id = old.map_or_else(|| format!("w1:p{tick}-{lane}"), |p| p.pane_id.clone());
+            let seq = old
+                .and_then(|p| p.seq.map(|seq| seq + i64::from(p.status != status)))
+                .unwrap_or(1);
+            panes.push(MailPane {
+                pane_id,
+                label: (*label).into(),
+                status: status.into(),
+                seq: Some(seq),
+            });
+
+            if let [item] = running.as_slice()
+                && let Some(delivery) = item.delivery.as_deref()
+            {
+                let capsule = parse_capsule(item).unwrap();
+                let n: usize = capsule.id.strip_prefix("soak-").unwrap().parse().unwrap();
+                if n.is_multiple_of(2) && (!churning || (draw >> 16).is_multiple_of(4)) {
+                    push(&mut db, &reply(&capsule, delivery), None, f.now());
+                }
+            }
+        }
+
+        *lock(&herdr.panes) = panes.clone();
+        if tick >= CHURN_TICKS / 2 && has_flight && !restarted {
+            drop(postman);
+            elapsed(LEASE).await;
+            postman = Postman::new(herdr.clone());
+            restarted = true;
+        }
+        f.tick(&postman).await;
+        for call in std::mem::take(&mut *lock(&herdr.calls)) {
+            if let Call::Prompt(pane_id, _) | Call::Enter(pane_id) = call {
+                assert!(
+                    panes.iter().any(
+                        |pane| pane.pane_id == pane_id && READY.contains(&pane.status.as_str())
+                    ),
+                    "tick {tick}: input sent to absent or unavailable pane {pane_id}"
+                );
+            }
+        }
+
+        let mut pending = false;
+        for queue in &queues {
+            let running = db.list(Some(queue), Some(ItemStatus::Running), 2).unwrap();
+            assert!(running.len() <= 1, "tick {tick}: {queue} has two flights");
+            pending |= !running.is_empty()
+                || !db
+                    .list(Some(queue), Some(ItemStatus::Queued), 1)
+                    .unwrap()
+                    .is_empty();
+        }
+        if !pending {
+            break;
+        }
+        elapsed(TICK_MS).await;
+    }
+
+    assert!(restarted, "seed must restart Postman with a live flight");
+    assert!(reopened, "seed must reopen a pane");
+    // A human consumes replies and failure notices outside the managed labels.
+    while let Some((_, lease)) = db.claim("mail-return", LEASE, f.now()).unwrap() {
+        assert!(matches!(
+            db.finish(&lease, Outcome::Done(Value::Null), f.now())
+                .unwrap(),
+            Fenced::Applied(_)
+        ));
+    }
+
+    let mut original_count = 0;
+    let mut answered = 0;
+    let mut timed_out = 0;
+    let mut requeued = 0;
+    for item in db.list(None, None, u32::MAX).unwrap() {
+        let (_, events) = db.item(&item.id).unwrap().unwrap();
+        let terminal = match item.status {
+            ItemStatus::Done => "done",
+            ItemStatus::Dead => "dead",
+            status => unreachable!("item {} did not drain: {status:?}", item.id),
+        };
+        assert_eq!(events.last().unwrap().kind, terminal, "item {}", item.id);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.kind.as_str(), "done" | "dead" | "cancelled"))
+                .count(),
+            1,
+            "item {} must settle once",
+            item.id
+        );
+        if queues.contains(&item.queue) {
+            original_count += 1;
+            answered += usize::from(item.status == ItemStatus::Done);
+            timed_out += usize::from(
+                item.result
+                    .as_ref()
+                    .and_then(Value::as_str)
+                    .is_some_and(|reason| reason.starts_with("no reply")),
+            );
+            requeued += events.iter().filter(|e| e.kind == "requeued").count();
+        }
+    }
+    assert_eq!(original_count, TASKS);
+    assert!(answered > 0 && timed_out > 0 && requeued > 0);
+    herdr_queue::run_audit(&f.path(), None, None).unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn default_disabled_never_calls_herdr() {
     let f = Fixture::new(false).await;
     let (herdr, postman) = fake();
