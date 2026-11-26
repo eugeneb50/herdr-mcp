@@ -98,6 +98,36 @@ impl Store {
         }
         Ok(None)
     }
+    /// The report path recorded by the postman for delivery `delivery` of the
+    /// task capsule `id`, if any.
+    pub fn delivery_report(
+        &mut self,
+        id: &str,
+        delivery: &str,
+    ) -> Result<Option<std::path::PathBuf>> {
+        for to in self.mailboxes()? {
+            for item in self.list(Some(&format!("mail-{to}")), None, u32::MAX)? {
+                if item.dedupe_key.as_deref() != Some(id) {
+                    continue;
+                }
+                let Some((_, events)) = self.q.item(&item.id)? else {
+                    continue;
+                };
+                let found = events
+                    .iter()
+                    .rev()
+                    .filter(|e| e.kind == "delivered")
+                    .filter_map(|e| e.data.as_ref())
+                    .find(|d| d["delivery"] == delivery)
+                    .and_then(|d| d["report"].as_str())
+                    .map(std::path::PathBuf::from);
+                if found.is_some() {
+                    return Ok(found);
+                }
+            }
+        }
+        Ok(None)
+    }
     pub fn find_capsule(&mut self, id: &str) -> Result<Option<Capsule>> {
         let mut found = Vec::new();
         for to in self.mailboxes()? {

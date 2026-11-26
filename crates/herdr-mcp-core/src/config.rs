@@ -485,6 +485,9 @@ pub fn set_setting_in_file(
                 let list: toml_edit::Array = keys.iter().map(String::as_str).collect();
                 tbl.insert(name, toml_edit::value(list));
             }
+            Some(Value::String(s)) => {
+                tbl.insert(name, toml_edit::value(s.as_str()));
+            }
             None => {
                 tbl.remove(name);
                 if tbl.is_empty() {

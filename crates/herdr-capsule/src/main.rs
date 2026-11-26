@@ -250,7 +250,13 @@ fn reply_spec(
             task.status
         )));
     }
-    let report = herdr_capsule::report_path(cfg, &task.task, &task.id);
+    // The path the postman told the agent wins over this CLI's own work dir.
+    let report = delivery
+        .as_deref()
+        .map(|d| store.delivery_report(&task.id, d))
+        .transpose()?
+        .flatten()
+        .unwrap_or_else(|| herdr_capsule::report_path(cfg, &task.task, &task.id));
     if report.is_file() {
         artifact.insert(0, format!("file={}::report", report.display()));
     } else if status == "done" && artifact.is_empty() {

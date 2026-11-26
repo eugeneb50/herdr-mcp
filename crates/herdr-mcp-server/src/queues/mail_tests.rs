@@ -937,3 +937,27 @@ async fn old_mail_survives_a_brief_pane_absence() {
             .is_empty()
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn delivery_text_names_the_configured_work_dir() {
+    let f = Fixture::new(true).await;
+    let work = "/srv/herdr-mcp-mail-work";
+    f.setting(MAIL_WORK_DIR, Setting::String(work.into()));
+    let (herdr, postman) = fake();
+    let capsule = task("one");
+    f.push(&capsule);
+    f.tick(&postman).await;
+
+    let calls = lock(&herdr.calls);
+    let text = calls
+        .iter()
+        .find_map(|call| match call {
+            Call::Prompt(_, text) => Some(text),
+            _ => None,
+        })
+        .expect("one prompt to the fake pane");
+    assert!(
+        text.contains(&format!("{work}/test-task/{}-report.md", capsule.id)),
+        "{text}"
+    );
+}

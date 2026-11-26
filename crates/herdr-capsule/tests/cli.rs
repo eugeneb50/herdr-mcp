@@ -882,3 +882,36 @@ fn send_without_re_for_a_delivered_task_names_the_reply_command() {
     let out = f.run(&other, &[("HERDR_PANE_ID", "w1:p2")]);
     assert!(out.status.success(), "{}", stderr(&out));
 }
+
+#[test]
+fn reply_finds_the_report_where_the_postman_said_it_is() {
+    // herdr-mcp's mail.work-dir may differ from this CLI's CAPSULE_WORK: the
+    // delivered event's `report` is the path the agent was told.
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    let told = f.work.join("elsewhere").join("r.md");
+    {
+        let mut q = herdr_queue::Queue::open(&f.queue_db).expect("open queue");
+        let (_, lease) = q
+            .claim("mail-builder", 600_000, 1)
+            .expect("claim")
+            .expect("a queued task");
+        let data = json!({"pane": "w1:p2", "submitted": true, "report": told});
+        q.set_delivery(&lease, "d-5", data, 2)
+            .expect("set delivery");
+    }
+    fs::create_dir_all(told.parent().unwrap()).unwrap();
+    fs::write(&told, "ok\n").unwrap();
+    let token = format!("{cid}@d-5");
+    let out = f.run(&["reply", &token, "done", "ok"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let reply = f
+        .items("lead", None)
+        .into_iter()
+        .find(|i| i["payload"]["re"] == cid.as_str())
+        .expect("reply");
+    assert_eq!(
+        reply["payload"]["artifacts"][0]["ref"],
+        told.display().to_string()
+    );
+}

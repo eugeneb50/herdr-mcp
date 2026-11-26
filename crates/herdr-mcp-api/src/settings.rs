@@ -9,6 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -27,16 +28,20 @@ pub enum Kind {
     /// Pane labels, e.g. `["flow-sh", "pg-review"]`; each names a mailbox
     /// queue `mail-<label>`, so it follows the queue name grammar.
     Labels,
+    /// An absolute filesystem path (`~` expanded from `HOME`).
+    Path,
 }
 
 /// A setting's value: a number for [`Kind::Millis`] / [`Kind::Count`], a
-/// flag for [`Kind::Bool`], a list for [`Kind::Keys`] / [`Kind::Labels`].
+/// flag for [`Kind::Bool`], a list for [`Kind::Keys`] / [`Kind::Labels`],
+/// or a string for [`Kind::Path`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Value {
     Number(u64),
     Bool(bool),
     List(Vec<String>),
+    String(String),
 }
 
 impl Value {
@@ -63,6 +68,7 @@ impl Value {
                     .map(str::to_string)
                     .collect(),
             )),
+            Kind::Path => Ok(Self::String(text.trim().to_string())),
         }
     }
 }
@@ -73,6 +79,7 @@ impl fmt::Display for Value {
             Self::Number(n) => write!(f, "{n}"),
             Self::Bool(b) => f.write_str(if *b { "on" } else { "off" }),
             Self::List(k) => f.write_str(&k.join(", ")),
+            Self::String(s) => f.write_str(s),
         }
     }
 }
@@ -83,6 +90,7 @@ pub enum DefaultValue {
     Number(u64),
     Bool(bool),
     List(&'static [&'static str]),
+    Str(&'static str),
 }
 
 impl DefaultValue {
@@ -91,6 +99,7 @@ impl DefaultValue {
             Self::Number(n) => Value::Number(n),
             Self::Bool(b) => Value::Bool(b),
             Self::List(k) => Value::List(k.iter().map(|s| (*s).to_string()).collect()),
+            Self::Str(s) => Value::String((*s).to_string()),
         }
     }
 }
@@ -191,6 +200,14 @@ const fn labels(key: &'static str, label: &'static str, help: &'static str) -> S
     }
 }
 
+const fn path(key: &'static str, label: &'static str, help: &'static str, d: &'static str) -> Spec {
+    Spec {
+        kind: Kind::Path,
+        default: DefaultValue::Str(d),
+        ..flag(key, label, help, false)
+    }
+}
+
 const fn restart(mut s: Spec) -> Spec {
     s.restart = true;
     s
@@ -225,6 +242,7 @@ pub const QUEUE_SUPERVISOR_MAX_RESTARTS: &str = "queues.supervisor-max-restarts"
 pub const UI_QUEUES_POLL_MS: &str = "ui.queues-poll-ms";
 pub const QUEUE_SHUTDOWN_WAIT_MS: &str = "queues.shutdown-wait-ms";
 pub const MAIL_ENABLED: &str = "mail.enabled";
+pub const MAIL_WORK_DIR: &str = "mail.work-dir";
 pub const MAIL_LABELS: &str = "mail.labels";
 pub const MAIL_REPLY_WAIT_MS: &str = "mail.reply-wait-ms";
 pub const MAIL_SUBMIT_CONFIRM_MS: &str = "mail.submit-confirm-ms";
@@ -463,6 +481,12 @@ pub const SPECS: &[Spec] = &[
         "herdr-mcp delivers capsules (queue mail-<label>) to idle agents in mail.labels.",
         false,
     ),
+    path(
+        MAIL_WORK_DIR,
+        "mail work dir",
+        "Absolute directory for task reports (~ expands from HOME); temp dirs are refused. Applies to the next delivery.",
+        "~/obsidian/herdrmcp/work",
+    ),
     labels(
         MAIL_LABELS,
         "mail labels",
@@ -578,6 +602,56 @@ fn check_labels(list: &[String]) -> Result<Vec<String>, String> {
         out.push(label.clone());
     }
     Ok(out)
+}
+
+/// `~/x` → `$HOME/x`; other paths unchanged. `None` when a `~` path has no
+/// `HOME` to expand it against, or the prefix is not `~/`.
+fn expand_home(raw: &str) -> Option<PathBuf> {
+    if !raw.starts_with('~') {
+        return Some(PathBuf::from(raw));
+    }
+    let rest = if raw == "~" {
+        Path::new("")
+    } else {
+        Path::new(raw).strip_prefix("~/").ok()?
+    };
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest))
+}
+
+/// Resolve `.` / `..` lexically: the reported path need not exist yet.
+fn normalized(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// A path setting is normalized to an absolute path outside every temp dir
+/// (which is wiped on reboot); `~` is expanded from `HOME`.
+fn check_path(raw: &str) -> Result<String, String> {
+    let Some(path) = expand_home(raw) else {
+        return Err(format!("{raw:?}: set HOME to expand ~"));
+    };
+    let path = normalized(&path);
+    if !path.is_absolute() {
+        return Err(format!("{raw:?}: use an absolute path"));
+    }
+    let temp = normalized(&std::env::temp_dir());
+    for root in [temp.as_path(), Path::new("/tmp")] {
+        if root.components().count() > 1 && path.starts_with(root) {
+            return Err(format!(
+                "{raw:?}: temp dirs are refused; use a durable work dir"
+            ));
+        }
+    }
+    Ok(path.to_string_lossy().into_owned())
 }
 
 /// The spec for `key`.
@@ -817,6 +891,15 @@ impl Settings {
         }
     }
 
+    /// A [`Kind::Path`] setting in effect, with `~` expanded from `HOME`.
+    /// Empty for an unknown or wrong-kind key; stored paths are validated.
+    pub fn path(&self, key: &str) -> PathBuf {
+        match self.value(key) {
+            Some(Value::String(s)) => expand_home(&s).unwrap_or_else(|| PathBuf::from(s)),
+            _ => PathBuf::new(),
+        }
+    }
+
     /// A millisecond setting as a [`std::time::Duration`].
     pub fn duration(&self, key: &str) -> std::time::Duration {
         std::time::Duration::from_millis(self.number(key))
@@ -851,9 +934,11 @@ impl Settings {
             }
             (Kind::Keys, Value::List(list)) => self.check_keys(spec, &list).map(Value::List),
             (Kind::Labels, Value::List(list)) => check_labels(&list).map(Value::List),
+            (Kind::Path, Value::String(s)) => check_path(&s).map(Value::String),
             (Kind::Bool, Value::Bool(b)) => Ok(Value::Bool(b)),
             (Kind::Keys, _) => Err("expected a list of keys".into()),
             (Kind::Labels, _) => Err("expected a list of labels".into()),
+            (Kind::Path, _) => Err("expected a path".into()),
             (Kind::Bool, _) => Err("expected on or off".into()),
             (_, _) => Err("expected a number".into()),
         }
@@ -865,7 +950,7 @@ impl Settings {
         }
         let own_default: Vec<String> = match spec.default.value() {
             Value::List(k) => k,
-            Value::Number(_) | Value::Bool(_) => Vec::new(),
+            Value::Number(_) | Value::Bool(_) | Value::String(_) => Vec::new(),
         };
         let mut out: Vec<String> = Vec::new();
         for text in list {

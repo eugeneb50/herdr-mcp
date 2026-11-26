@@ -731,7 +731,7 @@ async fn security_policy_holds_for_the_bridge_runs_and_mcp_clients() {
 
 #[tokio::test]
 async fn settings_crud_over_http_with_known_good_fallback() {
-    use herdr_mcp_api::settings::{PANE_EXEC_MS, Value};
+    use herdr_mcp_api::settings::{MAIL_WORK_DIR, PANE_EXEC_MS, Value};
     use herdr_mcp_api::{ApiClient, ApiError};
 
     let tmp = tempfile::tempdir().unwrap();
@@ -782,6 +782,12 @@ async fn settings_crud_over_http_with_known_good_fallback() {
         ("keys.tab-prev", Value::List(vec!["alt+]".into()])),
         ("keys.quit", Value::List(vec!["q".into()])),
         ("timeouts.nope", Value::Number(5_000)),
+        // A work dir under the temp dir is refused through the same 400 path
+        // as any other bad value, so nothing is written.
+        (
+            MAIL_WORK_DIR,
+            Value::String(tmp.path().display().to_string()),
+        ),
     ];
     for (key, value) in bad {
         match api.set_setting(key, &value).await {

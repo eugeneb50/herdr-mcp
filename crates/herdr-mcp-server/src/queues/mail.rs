@@ -153,10 +153,12 @@ impl Postman {
     }
 }
 
-fn capsule_config() -> CapsuleConfig {
+fn capsule_config(server: &HerdrMcpServer) -> CapsuleConfig {
     // The default names the running binary; the agent's reply runs `capsule`.
+    // The work dir is read live: the next delivery text uses the setting.
     CapsuleConfig {
         exe: "capsule".into(),
+        work: server.settings().path(MAIL_WORK_DIR),
         ..CapsuleConfig::default()
     }
 }
@@ -489,21 +491,26 @@ impl QueueService {
             }
         };
         let delivery = uuid::Uuid::new_v4().simple().to_string()[..12].to_owned();
-        let baseline =
-            json!({"pane": pane.pane_id, "state_change_seq": pane.seq, "submitted": false});
+        let cfg = capsule_config(server);
+        // The report path the agent is told; `capsule reply` reads it back from
+        // this event, so the agent's CLI need not share herdr-mcp's work dir.
+        let report = herdr_capsule::report_path(&cfg, &capsule.task, &capsule.id);
+        let baseline = json!({"pane": pane.pane_id, "state_change_seq": pane.seq,
+            "submitted": false, "report": report});
         if !self
             .record_delivery(server, &lease, &delivery, baseline)
             .await?
         {
             return Ok(Step::Empty);
         }
-        let text = delivery_text(&capsule, &capsule_config(), Some(&delivery));
+        let text = delivery_text(&capsule, &cfg, Some(&delivery));
         if let Err(error) = postman.herdr.prompt(&pane.pane_id, &text).await {
             let (l, now) = (lease.clone(), self.now());
             self.db(server, move |db| Ok(db.release(&l, now)?)).await?;
             return Ok(Step::Released(format!("{error:#}")));
         }
-        let typed = json!({"pane": pane.pane_id, "state_change_seq": pane.seq, "submitted": true});
+        let typed = json!({"pane": pane.pane_id, "state_change_seq": pane.seq,
+            "submitted": true, "report": report});
         if !self
             .record_delivery(server, &lease, &delivery, typed)
             .await?
