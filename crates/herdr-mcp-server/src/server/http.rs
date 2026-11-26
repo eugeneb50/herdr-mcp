@@ -1162,15 +1162,12 @@ async fn queue_item_handler(
     Path(id): Path<String>,
 ) -> QueueHttp<herdr_mcp_api::recipe::QueueItemResponse<herdr_queue::Item, herdr_queue::QueueEvent>>
 {
-    let (item, events) = server
+    server
         .queues
         .item(&server, &id)
         .await
-        .map_err(queue_http_error)?;
-    Ok(Json(herdr_mcp_api::recipe::QueueItemResponse {
-        item,
-        events,
-    }))
+        .map(Json)
+        .map_err(queue_http_error)
 }
 
 async fn queue_cancel_handler(

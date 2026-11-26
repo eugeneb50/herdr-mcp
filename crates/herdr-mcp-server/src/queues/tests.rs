@@ -165,7 +165,8 @@ async fn terminal(server: &HerdrMcpServer, id: &str, status: ItemStatus) -> Item
 
 async fn replay(server: &HerdrMcpServer, id: &str) {
     use ItemStatus::*;
-    let (item, events) = server.queues.item(server, id).await.unwrap();
+    let herdr_mcp_api::recipe::QueueItemResponse { item, events } =
+        server.queues.item(server, id).await.unwrap();
     let mut status = Queued;
     let mut attempts = 0;
     let mut claims = 0;
@@ -245,7 +246,13 @@ async fn fifo_and_parallel_slots() {
         if concurrency == 1 {
             assert_eq!(first, a.id);
             assert_eq!(
-                server.queues.item(&server, &b.id).await.unwrap().0.status,
+                server
+                    .queues
+                    .item(&server, &b.id)
+                    .await
+                    .unwrap()
+                    .item
+                    .status,
                 ItemStatus::Queued
             );
             executor.gate.add_permits(1);
@@ -257,7 +264,7 @@ async fn fifo_and_parallel_slots() {
             assert_ne!(first, second);
             for id in [&a.id, &b.id] {
                 assert_eq!(
-                    server.queues.item(&server, id).await.unwrap().0.status,
+                    server.queues.item(&server, id).await.unwrap().item.status,
                     ItemStatus::Running
                 );
             }
@@ -349,7 +356,8 @@ async fn stale_attachment_and_mid_run_cancel() {
         .unwrap();
     executor.attach.add_permits(1);
     assert_eq!(next(&mut starts).await, b.id);
-    let (_, events) = server.queues.item(&server, &a.id).await.unwrap();
+    let herdr_mcp_api::recipe::QueueItemResponse { item: _, events } =
+        server.queues.item(&server, &a.id).await.unwrap();
     assert_eq!(
         events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
         ["enqueued", "claimed", "cancelled"]
@@ -360,7 +368,7 @@ async fn stale_attachment_and_mid_run_cancel() {
             .item(&server, &b.id)
             .await
             .unwrap()
-            .0
+            .item
             .run_id
             .is_some()
         {
@@ -389,7 +397,7 @@ async fn shutdown_releases_cooperative_and_uncooperative_leases() {
             .item(&server, id)
             .await
             .unwrap()
-            .0
+            .item
             .run_id
             .is_none()
         {
@@ -400,7 +408,7 @@ async fn shutdown_releases_cooperative_and_uncooperative_leases() {
     server.queues.shutdown(&server).await;
     assert!(now.elapsed() >= Duration::from_millis(250));
     for id in [&held.id, &ignored.id] {
-        let item = server.queues.item(&server, id).await.unwrap().0;
+        let item = server.queues.item(&server, id).await.unwrap().item;
         assert_eq!((item.status, item.attempts), (ItemStatus::Queued, 0));
         replay(&server, id).await;
     }
@@ -523,7 +531,7 @@ async fn shutdown_preserves_completed_outcomes() {
             .item(&server, id)
             .await
             .unwrap()
-            .0
+            .item
             .run_id
             .is_none()
         {
@@ -541,7 +549,8 @@ async fn shutdown_preserves_completed_outcomes() {
             json!("run failed while draining"),
         ),
     ] {
-        let (item, _) = server.queues.item(&server, &id).await.unwrap();
+        let herdr_mcp_api::recipe::QueueItemResponse { item, events: _ } =
+            server.queues.item(&server, &id).await.unwrap();
         assert_eq!(
             (item.status, item.attempts, item.result),
             (status, 1, Some(result))
@@ -595,7 +604,7 @@ async fn cancelled_executor_that_ignores_the_token_frees_its_slot() {
         .item(&server, &ignored.id)
         .await
         .unwrap()
-        .0
+        .item
         .run_id
         .is_none()
     {
@@ -621,7 +630,10 @@ async fn startup_renews_the_lease_until_the_run_attaches() {
     let (executor, mut starts) = fake(&server);
     assert_eq!(next(&mut starts).await, item.id);
     tokio::time::sleep(Duration::from_millis(1600)).await;
-    let (starting, history) = server.queues.item(&server, &item.id).await.unwrap();
+    let herdr_mcp_api::recipe::QueueItemResponse {
+        item: starting,
+        events: history,
+    } = server.queues.item(&server, &item.id).await.unwrap();
     assert_eq!(
         (starting.status, starting.attempts, starting.claims),
         (ItemStatus::Running, 1, 1)
@@ -732,7 +744,7 @@ async fn retry_from_another_connection_waits_until_old_claim_drains() {
         .item(&server, &item.id)
         .await
         .unwrap()
-        .0
+        .item
         .run_id
         .is_none()
     {
@@ -753,7 +765,7 @@ async fn retry_from_another_connection_waits_until_old_claim_drains() {
             .item(&server, &item.id)
             .await
             .unwrap()
-            .0
+            .item
             .claims,
         2
     );
@@ -842,7 +854,7 @@ async fn shutdown_fallback_leaves_a_resolved_outcome_to_commit() {
             .item(&server, &item.id)
             .await
             .unwrap()
-            .0
+            .item
             .result,
         Some(json!(42))
     );

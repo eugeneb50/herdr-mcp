@@ -54,7 +54,7 @@ pub struct Security {
     /// `/api/*` needs this token (`Authorization: Bearer` or `?token=`).
     pub token: Option<String>,
     audit: Option<PathBuf>,
-    audit_lock: std::sync::Mutex<()>,
+    audit_lock: Arc<std::sync::Mutex<()>>,
 }
 
 /// The audit log rolls over to `audit.jsonl.1` past this size.
@@ -82,7 +82,7 @@ impl Security {
             audit: sec.audit_log.then(|| config.data_dir.join("audit.jsonl")),
             config: sec,
             token,
-            audit_lock: std::sync::Mutex::new(()),
+            audit_lock: Arc::new(std::sync::Mutex::new(())),
         }
     }
 
@@ -91,7 +91,7 @@ impl Security {
     }
 
     /// Append one line for a finished tool call, secrets redacted.
-    pub fn audit(
+    pub async fn audit(
         &self,
         origin: Origin,
         tool: &str,
@@ -111,17 +111,26 @@ impl Security {
             "ok": ok,
             "error": error,
         });
-        let _guard = crate::lock(&self.audit_lock);
-        if std::fs::metadata(path).is_ok_and(|m| m.len() > AUDIT_MAX_BYTES) {
-            let _ = std::fs::rename(path, path.with_extension("jsonl.1"));
-        }
-        let written = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .and_then(|mut f| writeln!(f, "{line}"));
-        if let Err(e) = written {
-            tracing::warn!("audit log {}: {e}", path.display());
+        let lock = Arc::clone(&self.audit_lock);
+        let write_path = path.clone();
+        let written = tokio::task::spawn_blocking(move || {
+            let _guard = crate::lock(&lock);
+            if std::fs::metadata(&write_path).is_ok_and(|m| m.len() > AUDIT_MAX_BYTES)
+                && let Err(e) = std::fs::rename(&write_path, write_path.with_extension("jsonl.1"))
+            {
+                tracing::warn!("audit log rotation {}: {e}", write_path.display());
+            }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&write_path)
+                .and_then(|mut f| writeln!(f, "{line}"))
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("audit log {}: {e}", path.display()),
+            Err(e) => tracing::warn!("audit log {}: task failed: {e}", path.display()),
         }
     }
 }
@@ -275,8 +284,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn audit_appends_redacted_lines() {
+    #[tokio::test]
+    async fn audit_appends_redacted_lines() {
         let dir = tempfile::tempdir().unwrap();
         let config = herdr_mcp_core::Config {
             data_dir: dir.path().to_path_buf(),
@@ -288,8 +297,10 @@ mod tests {
         };
         let sec = Security::new(&config);
         let args = json!({ "model": "m", "api_key": "sk-1" });
-        sec.audit(Origin::Run, "llm_call", args.as_object(), Ok(false));
-        sec.audit(Origin::Mcp, "run_command", None, Err("disabled"));
+        sec.audit(Origin::Run, "llm_call", args.as_object(), Ok(false))
+            .await;
+        sec.audit(Origin::Mcp, "run_command", None, Err("disabled"))
+            .await;
         let log = std::fs::read_to_string(dir.path().join("audit.jsonl")).unwrap();
         let lines: Vec<Value> = log
             .lines()
@@ -300,5 +311,36 @@ mod tests {
         assert_eq!(lines[0]["ok"], true);
         assert_eq!(lines[1]["error"], "disabled");
         assert!(!log.contains("sk-1"));
+    }
+
+    #[tokio::test]
+    async fn audit_rotates_an_oversized_log_then_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = herdr_mcp_core::Config {
+            data_dir: dir.path().to_path_buf(),
+            security: SecurityConfig {
+                audit_log: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let sec = Security::new(&config);
+        let path = dir.path().join("audit.jsonl");
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(AUDIT_MAX_BYTES + 1)
+            .unwrap();
+
+        sec.audit(Origin::Api, "queue_item", None, Ok(false)).await;
+
+        let rotated = path.with_extension("jsonl.1");
+        assert_eq!(
+            std::fs::metadata(&rotated).unwrap().len(),
+            AUDIT_MAX_BYTES + 1
+        );
+        let line: Value =
+            serde_json::from_str(std::fs::read_to_string(&path).unwrap().trim()).unwrap();
+        assert_eq!(line["origin"], "api");
+        assert_eq!(line["tool"], "queue_item");
     }
 }

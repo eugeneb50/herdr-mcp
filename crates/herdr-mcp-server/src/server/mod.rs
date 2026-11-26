@@ -264,12 +264,7 @@ impl HerdrMcpServer {
         &self,
         Parameters(p): Parameters<QueueIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        queue_result(
-            self.queues
-                .item(self, &p.id)
-                .await
-                .map(|(item, events)| herdr_mcp_api::recipe::QueueItemResponse { item, events }),
-        )
+        queue_result(self.queues.item(self, &p.id).await)
     }
 
     #[tool(meta = category("Queues"), description = "Cancel a queued or running item.")]
@@ -2027,15 +2022,17 @@ impl ServerHandler for HerdrMcpServer {
             }
             Err(e) => Err(e),
         };
-        self.security.audit(
-            origin,
-            &name,
-            args.as_ref(),
-            match &result {
-                Ok(r) => Ok(r.is_error == Some(true)),
-                Err(e) => Err(&e.message),
-            },
-        );
+        self.security
+            .audit(
+                origin,
+                &name,
+                args.as_ref(),
+                match &result {
+                    Ok(r) => Ok(r.is_error == Some(true)),
+                    Err(e) => Err(&e.message),
+                },
+            )
+            .await;
         result
     }
 
