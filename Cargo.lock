@@ -1964,6 +1964,7 @@ dependencies = [
  "chrono",
  "cron",
  "futures-util",
+ "herdr-capsule",
  "herdr-mcp-api",
  "herdr-mcp-core",
  "herdr-queue",
