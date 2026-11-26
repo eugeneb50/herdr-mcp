@@ -198,6 +198,7 @@ every `/api/*` shape is defined once.
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Full reference: data flow, tools, HTTP API, recipe engine, triggers, agent registry, persistence, scheduler, web UI, plugin, build/run, design decisions, gotchas |
 | [docs/AGENT-GUIDE.md](docs/AGENT-GUIDE.md) | For agents using herdr-mcp: targeting panes, waiting, building and launching recipes, a worked opencode example |
+| [docs/MAIL.md](docs/MAIL.md) | Capsule mail: task delivery to herdr panes, the reply workflow, settings, Mail tab and troubleshooting |
 | [docs/SWARMS.md](docs/SWARMS.md) | Swarm / flow engine design (proposal) |
 | [AGENTS.md](AGENTS.md) | Instructions for AI coding assistants (conventions, risk tiers, workflow, anti-patterns) |
 | [CHANGES.md](CHANGES.md) | Notable changes |
