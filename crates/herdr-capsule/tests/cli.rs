@@ -611,3 +611,108 @@ fn reply_finds_the_report_where_the_postman_said_it_is() {
         told.display().to_string()
     );
 }
+
+#[test]
+fn hung_check_times_out_and_kills_its_children() {
+    let f = Fixture::new();
+    let pids = f.work.join("sleep-pids");
+    let (cid, _) = f.task_with_check(
+        r#"trap '' TERM
+sh -c 'printf "%s\n" "$$" >> "$1"; exec sleep 300' sh "$CHECK_PID_FILE" &
+sh -c 'printf "%s\n" "$$" >> "$1"; exec sleep 300' sh "$CHECK_PID_FILE"
+"#,
+    );
+    let reply = f.run_timeout(
+        &["reply", &cid, "fail", "check hung"],
+        &[
+            ("CAPSULE_CHECK_TIMEOUT_S", "1"),
+            ("CHECK_PID_FILE", pids.to_str().unwrap()),
+        ],
+        10,
+    );
+    let pids: Vec<_> = fs::read_to_string(pids)
+        .unwrap()
+        .lines()
+        .map(|pid| pid.parse::<i32>().unwrap())
+        .collect();
+    assert_eq!(pids.len(), 2);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let still_running = loop {
+        let live: Vec<_> = pids
+            .iter()
+            .copied()
+            .filter(|pid| {
+                let ps = std::process::Command::new("ps")
+                    .args(["-o", "state=", "-p", &pid.to_string()])
+                    .output()
+                    .unwrap();
+                // The reparented process may briefly remain as a zombie.
+                let state = stdout(&ps);
+                let state = state.trim();
+                !state.is_empty() && !state.starts_with('Z')
+            })
+            .collect();
+        if live.is_empty() || std::time::Instant::now() >= deadline {
+            break live;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    // Keep a failing regression test from leaking long-lived fixture sleeps.
+    for pid in &still_running {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(*pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    assert!(
+        still_running.is_empty(),
+        "surviving sleeps: {still_running:?}"
+    );
+
+    let reply = reply.expect("capsule reply must finish within the test deadline");
+    assert!(reply.status.success(), "{}", stderr(&reply));
+    let replies = f.items("lead", None);
+    assert_eq!(replies[0]["payload"]["check"]["exit"], 124);
+}
+
+#[test]
+fn timed_out_check_refuses_done_but_allows_fail() {
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("printf 'warning: check started\\n'; exec sleep 300\n");
+    let report = f.work.join("t1").join(format!("{cid}-report.md"));
+    fs::create_dir_all(report.parent().unwrap()).unwrap();
+    fs::write(&report, "Report exists before replying.\n").unwrap();
+    let env = [("CAPSULE_CHECK_TIMEOUT_S", "1")];
+
+    let done = f
+        .run_timeout(&["reply", &cid, "done", "finished"], &env, 10)
+        .expect("done reply must finish within the test deadline");
+    assert!(!done.status.success());
+    let error = stderr(&done);
+    assert!(error.contains("warning: check started"), "{error}");
+    assert!(error.contains("check timed out after 1 s"), "{error}");
+    assert!(error.contains("check failed (exit 124)"), "{error}");
+    assert!(f.items("lead", None).is_empty());
+
+    let failure = f
+        .run_timeout(&["reply", &cid, "fail", "check hung"], &env, 10)
+        .expect("fail reply must finish within the test deadline");
+    assert!(failure.status.success(), "{}", stderr(&failure));
+    let replies = f.items("lead", None);
+    assert_eq!(replies.len(), 1);
+    let payload = &replies[0]["payload"];
+    assert_eq!(payload["status"], "fail");
+    assert_eq!(payload["check"]["exit"], 124);
+    assert_eq!(
+        payload["check"]["why"].as_array().unwrap().last().unwrap(),
+        "check timed out after 1 s"
+    );
+    let artifacts = payload["artifacts"].as_array().unwrap();
+    let log = artifacts
+        .iter()
+        .find(|artifact| artifact["kind"] == "log")
+        .unwrap();
+    let text = fs::read_to_string(log["ref"].as_str().unwrap()).unwrap();
+    assert!(text.ends_with("check timed out after 1 s"), "{text}");
+}

@@ -1,8 +1,9 @@
 use crate::{Error, Result, home_dir};
-use std::{env, path::PathBuf, str::FromStr};
+use std::{env, num::NonZeroU64, path::PathBuf, str::FromStr, time::Duration};
 #[derive(Debug, Clone)]
 pub struct CapsuleConfig {
     pub summary_max: usize,
+    pub check_timeout: Duration,
     pub artifact_max_bytes: u64,
     pub work: PathBuf,
     pub max_attempts: u32,
@@ -23,6 +24,7 @@ impl Default for CapsuleConfig {
             .unwrap_or_else(|| home_dir().join("code/herdr-mcp-refs/mailbox"));
         Self {
             summary_max: 120,
+            check_timeout: Duration::from_secs(600),
             artifact_max_bytes: 10_485_760,
             work: env::var_os("CAPSULE_WORK")
                 .map(PathBuf::from)
@@ -62,6 +64,9 @@ impl CapsuleConfig {
         if let Some(v) = parsed("CAPSULE_ARTIFACT_MAX_BYTES")? {
             c.artifact_max_bytes = v;
         }
+        if let Some(seconds) = parsed::<NonZeroU64>("CAPSULE_CHECK_TIMEOUT_S")? {
+            c.check_timeout = Duration::from_secs(seconds.get());
+        }
         Ok(c)
     }
 }
@@ -72,6 +77,7 @@ mod tests {
     fn defaults_match_the_contract() {
         let c = CapsuleConfig::default();
         assert_eq!(c.summary_max, 120);
+        assert_eq!(c.check_timeout, Duration::from_secs(600));
         assert_eq!(c.artifact_max_bytes, 10_485_760);
         assert_eq!(c.max_attempts, 2);
     }

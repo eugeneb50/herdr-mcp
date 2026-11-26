@@ -15,7 +15,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 #[cfg(test)]
 use tokio::time::Instant;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -39,6 +39,7 @@ struct Runtime {
     root: CancellationToken,
     tracker: TaskTracker,
     wakes: Mutex<HashMap<String, mpsc::Sender<()>>>,
+    mail_wake: Notify,
     active: Mutex<Active>,
     #[cfg(test)]
     clock: std::sync::OnceLock<(Instant, i64)>,
@@ -144,6 +145,9 @@ impl QueueService {
     }
 
     fn wake(&self, queue: &str) {
+        if queue.starts_with("mail-") {
+            self.0.mail_wake.notify_one();
+        }
         if let Some(tx) = lock(&self.0.wakes).get(queue) {
             // The periodic DB check also picks up pushes from other processes.
             let _ = tx.try_send(());

@@ -375,6 +375,84 @@ async fn postman_soak_seeded() {
     herdr_queue::run_audit(&f.path(), None, None).unwrap();
 }
 
+async fn wait_for_mail_loop(mut condition: impl FnMut() -> bool) {
+    // Keep paused Tokio time from auto-advancing while SQLite's blocking work runs.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !condition() {
+        assert!(std::time::Instant::now() < deadline, "Postman did not wake");
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_status_event_wakes_mail_before_tick_and_coalesces_bursts() {
+    let f = Fixture::new(true).await;
+    f.setting(QUEUE_TICK_MS, Setting::Number(60_000));
+    let herdr = Arc::new(FakeMailHerdr::default());
+    herdr.pane("working", 1);
+    f.server
+        .registry
+        .upsert(PANE, "w1", "tab", "agent", LABEL)
+        .await;
+    let id = f.push(&task("event-wake"));
+    let (events, rx) = broadcast::channel(64);
+    let started = Instant::now();
+    f.server
+        .queues
+        .start_mail(&f.server, herdr.clone(), Some(rx));
+    let passes = || {
+        lock(&herdr.calls)
+            .iter()
+            .filter(|call| matches!(call, Call::Panes))
+            .count()
+    };
+    wait_for_mail_loop(|| passes() == 1).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Queued);
+
+    herdr.pane("idle", 2);
+    let event = HerdrEvent::parse(
+        r#"{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p7","agent_status":"idle"}}"#,
+    )
+    .unwrap();
+    for _ in 0..50 {
+        events.send(event.clone()).unwrap();
+    }
+    wait_for_mail_loop(|| events.is_empty() && herdr.prompts() == 1).await;
+
+    assert_eq!(
+        passes(),
+        2,
+        "one initial pass and one pass for the full burst"
+    );
+    assert_eq!(f.item(&id).status, ItemStatus::Running);
+    assert!(started.elapsed() < Duration::from_secs(60));
+    f.server.queues.shutdown(&f.server).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn local_mail_wake_works_without_an_event_subscriber() {
+    let f = Fixture::new(true).await;
+    f.setting(QUEUE_TICK_MS, Setting::Number(60_000));
+    let herdr = Arc::new(FakeMailHerdr::default());
+    herdr.pane("working", 1);
+    let started = Instant::now();
+    f.server.queues.start_mail(&f.server, herdr.clone(), None);
+    wait_for_mail_loop(|| {
+        lock(&herdr.calls)
+            .iter()
+            .any(|call| matches!(call, Call::Panes))
+    })
+    .await;
+
+    herdr.pane("idle", 2);
+    let id = f.push(&task("local-wake"));
+    f.server.queues.wake(MAILBOX);
+    wait_for_mail_loop(|| herdr.prompts() == 1).await;
+    assert_eq!(f.item(&id).status, ItemStatus::Running);
+    assert!(started.elapsed() < Duration::from_secs(60));
+    f.server.queues.shutdown(&f.server).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn default_disabled_never_calls_herdr() {
     let f = Fixture::new(false).await;

@@ -399,7 +399,7 @@ fn send_impl(
     };
     let mut check_record = None;
     if let Some(cmd) = check_cmd {
-        let (exit, output) = run_check(&cmd)?;
+        let (exit, output) = run_check(&cmd, cfg.check_timeout)?;
         let why = decisive(&output.lines().map(str::to_string).collect::<Vec<_>>());
         if exit != 0 && spec.status == "done" {
             for w in &why {

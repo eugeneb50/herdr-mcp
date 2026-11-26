@@ -1896,6 +1896,7 @@ dependencies = [
  "chrono",
  "clap",
  "herdr-queue",
+ "nix",
  "serde",
  "serde_json",
  "sha2",

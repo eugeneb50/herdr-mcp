@@ -17,8 +17,10 @@ use futures_util::future::BoxFuture;
 use herdr_capsule::{
     Capsule, CapsuleConfig, delivery_text, format::reply_command, no_control_chars,
 };
+use herdr_mcp_api::HerdrEvent;
 use herdr_queue::{Consumer, Fenced, Lease, Outcome};
 use serde_json::json;
+use tokio::sync::broadcast;
 
 /// Statuses in which an agent may be handed a capsule.
 const READY: [&str; 2] = ["idle", "done"];
@@ -209,9 +211,57 @@ fn ms(server: &HerdrMcpServer, key: &str) -> i64 {
     i64::try_from(number(server, key)).unwrap_or(i64::MAX)
 }
 
+async fn mail_event(server: &HerdrMcpServer, events: Option<&mut broadcast::Receiver<HerdrEvent>>) {
+    use broadcast::error::{RecvError, TryRecvError};
+    let Some(events) = events else {
+        return std::future::pending().await;
+    };
+    loop {
+        match events.recv().await {
+            Ok(event) => {
+                if event.event != "pane.agent_status_changed" {
+                    continue;
+                }
+                let Some(id) = event.data.get("pane_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(label) = server.registry.pane_label(id).await else {
+                    continue;
+                };
+                let settings = crate::read(&server.settings);
+                if label == "lead"
+                    || !settings.flag(MAIL_ENABLED)
+                    || !settings.labels(MAIL_LABELS).contains(&label)
+                {
+                    continue;
+                }
+            }
+            Err(RecvError::Lagged(_)) => {} // Reconcile once from a fresh snapshot.
+            Err(RecvError::Closed) => return std::future::pending().await,
+        }
+        // A pass rereads every managed pane. Queued events all share that pass.
+        // Bound the drain to the backlog observed here so a live producer
+        // cannot keep the next pass from starting.
+        for _ in 0..events.len() {
+            if matches!(
+                events.try_recv(),
+                Err(TryRecvError::Empty | TryRecvError::Closed)
+            ) {
+                break;
+            }
+        }
+        return;
+    }
+}
+
 impl QueueService {
     /// Runs the postman until shutdown; does nothing while `mail.enabled` is off.
-    pub(crate) fn start_mail(&self, server: &HerdrMcpServer, herdr: Arc<dyn MailHerdr>) {
+    pub(crate) fn start_mail(
+        &self,
+        server: &HerdrMcpServer,
+        herdr: Arc<dyn MailHerdr>,
+        mut events: Option<broadcast::Receiver<HerdrEvent>>,
+    ) {
         let service = self.clone();
         let server = server.clone();
         let postman = Arc::new(Postman::new(herdr));
@@ -223,6 +273,8 @@ impl QueueService {
                 tokio::select! {
                     () = service.0.root.cancelled() => break,
                     () = tokio::time::sleep(duration(&server, QUEUE_TICK_MS)) => {}
+                    () = service.0.mail_wake.notified() => {}
+                    () = mail_event(&server, events.as_mut()) => {}
                 }
             }
         });
@@ -413,6 +465,7 @@ impl QueueService {
         let capsule = parse_capsule(&item).map_err(anyhow::Error::msg)?;
         let reason = format!("undeliverable: no pane with label {label}");
         let notice = Self::notice_push(&capsule, format!("undeliverable-{}", item.id), &reason)?;
+        let notice_queue = notice.queue.clone();
         let db_reason = reason.clone();
         let now = self.now();
         let finished = self
@@ -423,7 +476,10 @@ impl QueueService {
             })
             .await?;
         Ok(match finished {
-            Fenced::Applied(()) => Step::Dead(reason),
+            Fenced::Applied(()) => {
+                self.wake(&notice_queue);
+                Step::Dead(reason)
+            }
             Fenced::Stale => Step::Empty,
         })
     }
@@ -666,14 +722,20 @@ impl QueueService {
             );
             let applied = if flight.capsule.status == "task" {
                 let notice = Self::timeout_notice(&flight, &reason)?;
+                let notice_queue = notice.queue.clone();
                 let (lease, reason, now) = (flight.lease.clone(), reason.clone(), self.now());
-                self.db(server, move |db| {
-                    Ok(matches!(
-                        db.finish_dead_with_notice(&lease, reason, notice, now)?,
-                        Fenced::Applied(_)
-                    ))
-                })
-                .await?
+                let applied = self
+                    .db(server, move |db| {
+                        Ok(matches!(
+                            db.finish_dead_with_notice(&lease, reason, notice, now)?,
+                            Fenced::Applied(_)
+                        ))
+                    })
+                    .await?;
+                if applied {
+                    self.wake(&notice_queue);
+                }
+                applied
             } else {
                 self.finish_mail(server, &flight.lease, Outcome::Dead(reason.clone()))
                     .await?
