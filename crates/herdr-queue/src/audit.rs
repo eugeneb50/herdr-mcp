@@ -363,7 +363,10 @@ pub fn run_audit(
 ) -> Result<(), AuditError> {
     let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(AuditError::Sqlite)?;
-    let has_delivery = conn
+    // One read transaction pins the snapshot across both statements: a writer
+    // committing between the row and event reads must not yield a torn audit.
+    let tx = conn.unchecked_transaction().map_err(AuditError::Sqlite)?;
+    let has_delivery = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('queue_items') WHERE name = 'delivery')",
             [],
@@ -377,7 +380,7 @@ pub fn run_audit(
     };
     let mut rows: Vec<Row> = Vec::new();
     {
-        let mut stmt = conn
+        let mut stmt = tx
             .prepare(&format!(
                 "SELECT id, queue, status, attempts, max_attempts, dedupe_key, coalesce_key,
                  run_id, lease_until, {delivery} FROM queue_items"
@@ -405,7 +408,7 @@ pub fn run_audit(
     }
     let mut events: HashMap<String, Vec<Event>> = HashMap::new();
     {
-        let mut stmt = conn
+        let mut stmt = tx
             .prepare("SELECT item_id, seq, kind, data FROM queue_events ORDER BY item_id, seq")
             .map_err(AuditError::Sqlite)?;
         let mapped = stmt
