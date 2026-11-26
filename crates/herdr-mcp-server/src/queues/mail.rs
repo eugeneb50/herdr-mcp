@@ -329,6 +329,9 @@ impl QueueService {
             Ok(panes) => Some(panes),
             Err(error) => {
                 tracing::warn!("mail: reading herdr panes: {error:#}");
+                // An unreadable snapshot observes nothing: stop measuring
+                // absence from an earlier readable tick.
+                lock(&postman.missing_since).clear();
                 None // still follow flights: replies and deadlines need no pane
             }
         };

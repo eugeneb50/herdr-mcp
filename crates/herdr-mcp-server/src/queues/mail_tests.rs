@@ -23,6 +23,7 @@ enum Call {
 struct FakeMailHerdr {
     panes: Mutex<Vec<MailPane>>,
     calls: Mutex<Vec<Call>>,
+    fail_panes: Mutex<bool>,
     fail_prompt: bool,
     fail_enter: bool,
 }
@@ -31,6 +32,7 @@ impl MailHerdr for FakeMailHerdr {
     fn panes(&self) -> BoxFuture<'_, Result<Vec<MailPane>>> {
         Box::pin(async {
             lock(&self.calls).push(Call::Panes);
+            anyhow::ensure!(!*lock(&self.fail_panes), "scripted pane read failure");
             Ok(lock(&self.panes).clone())
         })
     }
@@ -53,6 +55,10 @@ impl MailHerdr for FakeMailHerdr {
 }
 
 impl FakeMailHerdr {
+    fn unreadable(&self, failed: bool) {
+        *lock(&self.fail_panes) = failed;
+    }
+
     fn pane(&self, status: &str, seq: i64) {
         *lock(&self.panes) = vec![MailPane {
             pane_id: PANE.into(),
@@ -1280,6 +1286,43 @@ async fn old_mail_survives_a_brief_pane_absence() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn unreadable_pane_snapshots_reset_the_missing_clock() {
+    let f = Fixture::new(true).await;
+    f.setting(MAIL_UNDELIVERABLE_AFTER_MS, Setting::Number(1_000));
+    let (herdr, postman) = fake();
+    herdr.pane("working", 1);
+    let id = f.push(&task("backlog"));
+    f.step(&postman, Step::Busy).await;
+
+    lock(&herdr.panes).clear();
+    f.step(&postman, Step::NoPane).await; // the absence starts here
+    herdr.unreadable(true);
+    elapsed(5_000).await;
+    f.step(&postman, Step::Empty).await; // unreadable: nothing observed
+    elapsed(1).await;
+    f.step(&postman, Step::Empty).await;
+    herdr.unreadable(false);
+    f.step(&postman, Step::NoPane).await; // a new, shorter absence
+    assert_eq!(f.item(&id).status, ItemStatus::Queued);
+    assert!(
+        f.db()
+            .list(Some("mail-return"), None, 10)
+            .unwrap()
+            .is_empty()
+    );
+
+    elapsed(1_001).await;
+    f.step(
+        &postman,
+        Step::Dead(format!("undeliverable: no pane with label {LABEL}")),
+    )
+    .await;
+    let notices = f.db().list(Some("mail-return"), None, 10).unwrap();
+    assert_eq!(notices.len(), 1);
+    herdr_queue::run_audit(&f.path(), None, None).unwrap();
 }
 
 #[tokio::test(start_paused = true)]
