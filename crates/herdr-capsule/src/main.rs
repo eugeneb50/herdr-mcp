@@ -2,20 +2,12 @@ use anyhow::{Context, Error as AppError, Result as AppResult};
 use clap::{Parser, Subcommand};
 use herdr_capsule::format as fmt;
 use herdr_capsule::{
-    Artifact, Capsule, CapsuleConfig, Check, CliHerdr, Herdr, Rollup, SKINS, STATUSES, Store,
-    artifact, card, check_files, decisive, fail, id::mint_id, line, no_control_chars,
-    normalize_summary, reply_check_of, run_check,
+    Artifact, Capsule, CapsuleConfig, Check, Rollup, SKINS, STATUSES, Store, artifact, card,
+    check_files, decisive, fail, id::mint_id, line, no_control_chars, normalize_summary,
+    reply_check_of, run_check,
 };
 use serde_json::{Value, json};
-use std::{
-    collections::HashSet,
-    fs,
-    io::Write,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    thread,
-    time::Duration,
-};
+use std::{collections::HashSet, fs, io::Write, path::Path, thread, time::Duration};
 #[derive(Parser)]
 #[command(name = "capsule", about = "short messages that point at work")]
 struct Cli {
@@ -100,12 +92,6 @@ enum Commands {
         max: Option<usize>,
         #[arg(long, value_parser = SKINS)]
         skin: Option<String>,
-    },
-    Deliver {
-        #[arg(long)]
-        once: bool,
-        #[arg(long, default_value_t = 2.0)]
-        interval: f64,
     },
     Rollup {
         #[arg(long, default_value = "lead")]
@@ -207,6 +193,41 @@ fn callsign(cfg: &CapsuleConfig) -> AppResult<String> {
     known.insert(pane.to_string(), Value::String(name.clone()));
     fs::write(&path, serde_json::to_string_pretty(&known)?)?;
     Ok(name)
+}
+/// The herdr CLI used for send's optional metadata announcement.
+struct CliHerdr(String);
+impl CliHerdr {
+    fn output(&self, args: &[&str]) -> AppResult<std::process::Output> {
+        Ok(std::process::Command::new(&self.0).args(args).output()?)
+    }
+    fn report_metadata(&self, workspace: &str, tokens: &[(&str, &str)]) -> AppResult<()> {
+        let mut args = vec![
+            "workspace",
+            "report-metadata",
+            workspace,
+            "--source",
+            "capsule",
+            "--ttl-ms",
+            "5000",
+        ];
+        let pairs: Vec<String> = tokens.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        for pair in &pairs {
+            args.push("--token");
+            args.push(pair);
+        }
+        let out = self.output(&args)?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let bytes = if out.stderr.is_empty() {
+                &out.stdout
+            } else {
+                &out.stderr
+            };
+            let msg = String::from_utf8_lossy(bytes).trim().to_string();
+            Err(err(format!("herdr workspace report-metadata: {msg}")))
+        }
+    }
 }
 fn announce(cfg: &CapsuleConfig, cap: &Capsule, herdr: &CliHerdr) -> AppResult<Option<String>> {
     let Some(workspace) = cfg.workspace.as_deref() else {
@@ -551,43 +572,6 @@ fn watch_cmd(
     }
     Ok(())
 }
-fn deliver_cmd(cfg: &CapsuleConfig, once: bool, interval: f64) -> AppResult<()> {
-    let Some(bin) = cfg.herdr.clone().or_else(which_herdr) else {
-        return Err(err("deliver needs herdr on PATH (or HERDR_BIN_PATH)"));
-    };
-    let herdr = CliHerdr(bin.display().to_string());
-    loop {
-        let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
-        match herdr_capsule::deliver_pass(cfg, &mut store, &herdr) {
-            Ok(()) => {}
-            Err(e) => {
-                println!("deliver: {e:#}");
-                std::io::stdout().flush()?;
-                if once {
-                    return Err(e.into());
-                }
-            }
-        }
-        if once {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_secs_f64(interval.max(0.0)));
-    }
-}
-fn which_herdr() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join("herdr");
-        if candidate.is_file()
-            && fs::metadata(&candidate)
-                .ok()
-                .is_some_and(|m| m.permissions().mode() & 0o111 != 0)
-        {
-            return Some(candidate);
-        }
-    }
-    None
-}
 fn rollup_cmd(
     store: &mut Store,
     cfg: &CapsuleConfig,
@@ -847,7 +831,6 @@ fn real_main() -> AppResult<()> {
             let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
             watch_cmd(&mut store, &to, max, &skin, &g)?;
         }
-        Commands::Deliver { once, interval } => deliver_cmd(&cfg, once, interval)?,
         Commands::Rollup { to, task, send } => {
             let mut store = Store::open(&cfg.queue_db).context("open queue store")?;
             rollup_cmd(&mut store, &cfg, &to, &task, send)?;

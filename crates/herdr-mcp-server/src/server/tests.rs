@@ -1,6 +1,7 @@
 use super::*;
 use herdr_mcp_api::ResolveRequest;
 use herdr_mcp_core::RecipeAccess;
+use serde_json::Value;
 
 /// Every core tool exists (a rename would silently unlist it), the
 /// defaults list exactly those, and a category or name lists more.
@@ -813,7 +814,7 @@ async fn http_contract_roundtrip_with_api_client() {
     let tmp = tempfile::tempdir().unwrap();
     let data_dir = tmp.path().join("data");
     let registry = AgentRegistry::new();
-    let server = HerdrMcpServer::new(Persistence::new(data_dir), registry);
+    let server = HerdrMcpServer::new(Persistence::new(data_dir.clone()), registry);
     let web_dir = tmp.path().join("web");
     std::fs::create_dir_all(&web_dir).unwrap();
     std::fs::write(web_dir.join("index.html"), "<html>ui</html>").unwrap();
@@ -1189,6 +1190,88 @@ esac
     api.delete_recipe(created.id).await.unwrap();
     assert!(api.list_recipes().await.unwrap().is_empty());
 
+    // Both the typed HTTP endpoints and the MCP router read the same queue store.
+    let mut db = herdr_queue::Queue::open(data_dir.join("queue.db")).unwrap();
+    let mail_id = seed_queue_item(
+        &mut db,
+        "mail-lead",
+        serde_json::json!({"id":"report"}),
+        1,
+        2,
+    );
+    let mail_query = herdr_mcp_api::mail::MailListQuery {
+        to: Some("lead".into()),
+        status: Some("queued".into()),
+        limit: Some(1),
+    };
+    let mail_items = api.mail_items(&mail_query).await.unwrap();
+    assert_eq!(mail_items.len(), 1);
+    assert_eq!(mail_items[0].item["id"], mail_id);
+    assert_eq!(mail_items[0].events[0]["kind"], "enqueued");
+    let mail_item = api.mail_item(&mail_id).await.unwrap();
+    assert_eq!(mail_item.item["payload"]["id"], "report");
+    assert_eq!(mail_item.events[0]["item_id"], mail_id);
+    for non_mail in [id, "missing"] {
+        assert!(matches!(
+            api.mail_item(non_mail).await,
+            Err(ApiError::Status { status: 404, .. })
+        ));
+    }
+    assert!(matches!(
+        api.mail_items(&herdr_mcp_api::mail::MailListQuery {
+            to: Some("invalid/to".into()),
+            ..Default::default()
+        })
+        .await,
+        Err(ApiError::Status { status: 400, .. })
+    ));
+    assert!(matches!(
+        api.mail_items(&herdr_mcp_api::mail::MailListQuery {
+            status: Some("fail".into()),
+            ..Default::default()
+        })
+        .await,
+        Err(ApiError::Status { status: 400, .. })
+    ));
+    let stats_query = herdr_mcp_api::mail::MailStatsQuery { since: Some(1) };
+    let stats = api.mail_stats(&stats_query).await.unwrap();
+    assert_eq!(stats.len(), 1);
+    assert_eq!(stats[0].to, "lead");
+    assert_eq!(stats[0].depth, 1);
+    assert_eq!(stats[0].last_activity_at, Some(1));
+    assert!(matches!(
+        api.mail_stats(&herdr_mcp_api::mail::MailStatsQuery { since: Some(-1) })
+            .await,
+        Err(ApiError::Status { status: 400, .. })
+    ));
+
+    let tools = api.list_tools().await.unwrap();
+    for (name, args, expected) in [
+        (
+            "mail_list",
+            serde_json::to_value(mail_query).unwrap(),
+            serde_json::to_value(mail_items).unwrap(),
+        ),
+        (
+            "mail_item",
+            serde_json::json!({"id": mail_id}),
+            serde_json::to_value(mail_item).unwrap(),
+        ),
+        (
+            "mail_stats",
+            serde_json::to_value(stats_query).unwrap(),
+            serde_json::to_value(stats).unwrap(),
+        ),
+    ] {
+        assert!(tools.iter().any(|tool| tool["name"] == name));
+        let result = api.call_tool(name, &args).await.unwrap();
+        assert_eq!(
+            herdr_mcp_api::tool_payload(&result),
+            Some(expected),
+            "{name}"
+        );
+    }
+
     // Unknown tool → typed 404, and the SPA fallback still serves the UI.
     assert!(matches!(
         api.call_tool("no_such_tool", &serde_json::json!({})).await,
@@ -1201,4 +1284,212 @@ esac
         .await
         .unwrap();
     assert_eq!(page, "<html>ui</html>");
+}
+
+fn seed_queue_item(
+    db: &mut herdr_queue::Queue,
+    queue: &str,
+    payload: Value,
+    now: i64,
+    max_attempts: u32,
+) -> String {
+    let pushed = db
+        .push(
+            herdr_queue::Push {
+                queue: queue.into(),
+                payload: payload.as_object().unwrap().clone(),
+                dedupe_key: None,
+                coalesce_key: None,
+                requester: None,
+                max_attempts,
+                max_depth: None,
+            },
+            now,
+        )
+        .unwrap();
+    match pushed {
+        herdr_queue::Pushed::New(item) => item.id,
+        _ => unreachable!("fixture pushes always create new items"),
+    }
+}
+
+#[tokio::test]
+async fn mail_list_filters_before_limit() {
+    use herdr_mcp_api::mail::MailListQuery;
+    use serde_json::json;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let server = HerdrMcpServer::new(Persistence::new(tmp.path().into()), AgentRegistry::new());
+    let mut db = herdr_queue::Queue::open(tmp.path().join("queue.db")).unwrap();
+    for n in 0..101 {
+        seed_queue_item(&mut db, "a-collection", json!({}), n, 2);
+    }
+    let first = seed_queue_item(&mut db, "mail-alpha", json!({}), 200, 2);
+    let target = seed_queue_item(&mut db, "mail-beta", json!({}), 201, 2);
+    seed_queue_item(&mut db, "mail-beta", json!({}), 202, 2);
+    seed_queue_item(&mut db, "mail-", json!({}), 203, 2);
+    db.cancel(&target, 204).unwrap();
+
+    let listed = server
+        .queues
+        .mail_list(
+            &server,
+            MailListQuery {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].item.id, first);
+
+    let listed = server
+        .queues
+        .mail_list(
+            &server,
+            MailListQuery {
+                to: Some("beta".into()),
+                status: Some("cancelled".into()),
+                limit: Some(1),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].item.id, target);
+    assert_eq!(
+        listed[0]
+            .events
+            .iter()
+            .map(|event| event.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["enqueued", "cancelled"]
+    );
+}
+
+#[tokio::test]
+async fn mail_stats_pairs_confirmed_delivery_and_reply_with_window_and_retention() {
+    use herdr_mcp_api::mail::MailStatsQuery;
+    use herdr_queue::Outcome;
+    use serde_json::json;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let server = HerdrMcpServer::new(Persistence::new(tmp.path().into()), AgentRegistry::new());
+    let mut db = herdr_queue::Queue::open(tmp.path().join("queue.db")).unwrap();
+    let queue = "mail-worker";
+
+    let retained = seed_queue_item(
+        &mut db,
+        queue,
+        json!({"status":"task","id":"retained"}),
+        10,
+        3,
+    );
+    let (_, lease) = db.claim(queue, 100_000, 20).unwrap().unwrap();
+    db.set_delivery(&lease, "pruned", json!({"submitted":true}), 40)
+        .unwrap();
+    let reply = seed_queue_item(
+        &mut db,
+        "mail-lead",
+        json!({"re":"retained","delivery":"pruned"}),
+        50,
+        2,
+    );
+    let (_, reply_lease) = db.claim("mail-lead", 100, 51).unwrap().unwrap();
+    db.finish(&reply_lease, Outcome::Done(Value::Null), 52)
+        .unwrap();
+    db.finish(
+        &lease,
+        Outcome::Done(json!({"reply":reply,"delivery":"pruned"})),
+        6_000,
+    )
+    .unwrap();
+    assert_eq!(db.prune(100).unwrap(), 1);
+    assert!(db.get(&retained).is_ok());
+
+    for (delivered, latency) in [(1_000, 100), (2_000, 200), (3_000, 500), (4_000, 800)] {
+        let capsule_id = format!("task-{delivered}");
+        let delivery = format!("d-{delivered}");
+        seed_queue_item(
+            &mut db,
+            queue,
+            json!({"status":"task","id":capsule_id}),
+            delivered - 200,
+            2,
+        );
+        if delivered == 1_000 {
+            let (_, previous) = db.claim(queue, 100_000, 850).unwrap().unwrap();
+            db.set_delivery(&previous, "previous", json!({"submitted":true}), 860)
+                .unwrap();
+            db.finish(&previous, Outcome::Failed("pane closed".into()), 870)
+                .unwrap();
+            seed_queue_item(
+                &mut db,
+                "mail-lead",
+                json!({"re":capsule_id,"delivery":"previous"}),
+                880,
+                2,
+            );
+        }
+        let (_, lease) = db.claim(queue, 100_000, delivered - 20).unwrap().unwrap();
+        db.set_delivery(
+            &lease,
+            &delivery,
+            json!({"submitted":false}),
+            delivered - 10,
+        )
+        .unwrap();
+        db.set_delivery(&lease, &delivery, json!({"submitted":true}), delivered)
+            .unwrap();
+        let reply = seed_queue_item(
+            &mut db,
+            "mail-lead",
+            json!({"re":capsule_id,"delivery":delivery}),
+            delivered + latency,
+            2,
+        );
+        db.finish(
+            &lease,
+            Outcome::Done(json!({"reply":reply,"delivery":delivery})),
+            6_001,
+        )
+        .unwrap();
+    }
+
+    seed_queue_item(&mut db, queue, json!({"status":"wip"}), 6_100, 2);
+    let (_, ordinary) = db.claim(queue, 10, 6_101).unwrap().unwrap();
+    db.finish(&ordinary, Outcome::Done(Value::Null), 6_102)
+        .unwrap();
+
+    let stalled = seed_queue_item(&mut db, queue, json!({}), 6_150, 1);
+    db.claim(queue, 10, 6_151).unwrap().unwrap();
+    assert_eq!(db.reap_queue(queue, 6_200).unwrap()[0].id, stalled);
+    db.retry(&stalled, 6_201).unwrap();
+    let (_, running) = db.claim(queue, 100_000, 6_300).unwrap().unwrap();
+    db.set_delivery(
+        &running,
+        "never-submitted",
+        json!({"submitted":false}),
+        6_350,
+    )
+    .unwrap();
+    seed_queue_item(&mut db, queue, json!({}), 6_400, 2);
+
+    for (since, delivered, failed) in [(None, 6, 1), (Some(6_000), 0, 0)] {
+        let stats = server
+            .queues
+            .mail_stats(&server, MailStatsQuery { since })
+            .await
+            .unwrap();
+        let worker = stats.iter().find(|row| row.to == "worker").unwrap();
+        assert_eq!((worker.depth, worker.in_flight), (1, 1));
+        assert_eq!(
+            (worker.delivered, worker.replied, worker.failed, worker.dead),
+            (delivered, 5, failed, 1)
+        );
+        assert_eq!(worker.median_reply_ms, Some(350.0));
+        assert_eq!(worker.p90_reply_ms, Some(800));
+        assert_eq!(worker.last_activity_at, Some(6_400));
+    }
 }

@@ -158,6 +158,9 @@ pub(super) fn http_router(
         .route("/api/runs/{id}/events", get(run_events_handler))
         .route("/api/runs/{id}/trail", get(run_trail_handler))
         .route("/api/runs/{id}/{action}", post(control_run_handler))
+        .route("/api/mail/items", get(mail_list_handler))
+        .route("/api/mail/items/{id}", get(mail_item_handler))
+        .route("/api/mail/stats", get(mail_stats_handler))
         .route("/api/queues", get(queue_depths_handler))
         .route(
             "/api/queues/{queue}/items",
@@ -1043,6 +1046,42 @@ fn queue_http_error(error: anyhow::Error) -> (StatusCode, String) {
         }
     };
     (status, error.to_string())
+}
+
+async fn mail_list_handler(
+    State(AppState { server }): State<AppState>,
+    Query(query): Query<herdr_mcp_api::mail::MailListQuery>,
+) -> QueueHttp<Vec<crate::queues::MailItemHistory>> {
+    server
+        .queues
+        .mail_list(&server, query)
+        .await
+        .map(Json)
+        .map_err(queue_http_error)
+}
+
+async fn mail_item_handler(
+    State(AppState { server }): State<AppState>,
+    Path(id): Path<String>,
+) -> QueueHttp<crate::queues::MailItemHistory> {
+    server
+        .queues
+        .mail_item(&server, &id)
+        .await
+        .map(Json)
+        .map_err(queue_http_error)
+}
+
+async fn mail_stats_handler(
+    State(AppState { server }): State<AppState>,
+    Query(query): Query<herdr_mcp_api::mail::MailStatsQuery>,
+) -> QueueHttp<Vec<herdr_mcp_api::mail::MailLabelStats>> {
+    server
+        .queues
+        .mail_stats(&server, query)
+        .await
+        .map(Json)
+        .map_err(queue_http_error)
 }
 
 async fn queue_depths_handler(

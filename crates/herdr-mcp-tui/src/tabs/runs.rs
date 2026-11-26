@@ -36,6 +36,8 @@ pub struct RunsState {
     /// that collection's.
     pub filter: Option<Option<Uuid>>,
     pub failed_only: bool,
+    /// The mail segment for the Runs title, recomputed on each refresh.
+    pub(crate) mail_strip: Option<String>,
     /// Lines the trail is scrolled down by.
     pub scroll: u16,
     /// The run-a-collection picker, open on this row of [`collections`].
@@ -144,6 +146,11 @@ pub async fn refresh(app: &mut App) {
         }
         state.index = state.index.min(state.shown().len().saturating_sub(1));
     }
+    app.runs.mail_strip = http
+        .queue_depths()
+        .await
+        .ok()
+        .and_then(|depths| summarize_mail_depths(&depths));
     load_events(app, &http).await;
 }
 
@@ -211,6 +218,34 @@ fn status_style(s: RunStatus) -> ratatui::style::Style {
     }
 }
 
+/// One segment for the Runs title, summing every `mail-*` queue.
+/// `mail-lead` counts like the others: it only queues, never delivers.
+fn summarize_mail_depths(depths: &[serde_json::Value]) -> Option<String> {
+    let mut queued = 0;
+    let mut in_flight = 0;
+    let mut dead = 0;
+    let mut found = false;
+    for depth in depths {
+        let Some(name) = depth.get("queue").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !name.starts_with("mail-") {
+            continue;
+        }
+        found = true;
+        let count = |key: &str| {
+            depth
+                .get(key)
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or_default()
+        };
+        queued += count("queued");
+        in_flight += count("running");
+        dead += count("dead");
+    }
+    found.then(|| format!("mail {queued} queued / {in_flight} in flight / {dead} dead"))
+}
+
 pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
     let cols = Layout::default()
         .direction(Direction::Horizontal)
@@ -218,12 +253,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &mut App) {
         .split(area);
     let state = &mut app.runs;
     let shown = state.shown();
+    let mail = state
+        .mail_strip
+        .as_deref()
+        .map(|strip| format!(" · {strip}"))
+        .unwrap_or_default();
     let title = format!(
-        " Runs · {} of {} · {}{} ",
+        " Runs · {} of {} · {}{}{} ",
         shown.len(),
         state.runs.len(),
         state.filter_name(),
-        if state.failed_only { " · failed" } else { "" }
+        if state.failed_only { " · failed" } else { "" },
+        mail
     );
     let items: Vec<ListItem> = shown
         .iter()
@@ -642,5 +683,31 @@ mod tests {
         assert!(s.pick(child.id));
         assert_eq!(s.picked().map(|r| r.id), Some(child.id));
         assert!(!s.pick(Uuid::new_v4()));
+    }
+
+    /// Every `mail-*` queue counts, including `mail-lead` and an empty one.
+    #[test]
+    fn mail_strip_sums_mail_queues_only() {
+        let depths = [
+            serde_json::json!({ "queue": "build", "queued": 9, "running": 8, "dead": 7 }),
+            serde_json::json!({ "queue": "mail-lead", "queued": 1, "running": 0, "dead": 0 }),
+            serde_json::json!({ "queue": "mail-ops", "queued": 2, "running": 1, "dead": 2 }),
+            serde_json::json!({ "queue": "mail-dev", "queued": 0, "running": 0, "dead": 0 }),
+        ];
+        assert_eq!(
+            summarize_mail_depths(&depths).as_deref(),
+            Some("mail 3 queued / 1 in flight / 2 dead")
+        );
+    }
+
+    /// No `mail-*` queue means no title segment; `mailbox` is not a match.
+    #[test]
+    fn mail_strip_omitted_when_no_mail_queues() {
+        assert_eq!(summarize_mail_depths(&[]), None);
+        let depths = [
+            serde_json::json!({ "queue": "build", "queued": 4, "running": 1, "dead": 0 }),
+            serde_json::json!({ "queue": "mailbox", "queued": 2, "running": 0, "dead": 0 }),
+        ];
+        assert_eq!(summarize_mail_depths(&depths), None);
     }
 }

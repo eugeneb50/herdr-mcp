@@ -4,6 +4,14 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Capsule CLI: no postman (breaking).** `capsule deliver` (with `--once` /
+  `--interval`) is gone; herdr-mcp's mail daemon is the only pane postman.
+  `watch`, `reply`, `send`, `card`, `line`, `json`, `list`, `wait`, `brief`,
+  `rollup` and `verify` stay. Scripts that typed prompts with `capsule deliver`
+  must use the daemon or `watch`. The delivery-only `CAPSULE_REPLY_WAIT_S` and
+  `CAPSULE_SUBMIT_CONFIRM_S` overrides and the `fences/mail-<to>.json` and
+  `delivered.jsonl` sidecars are no longer read or written by the CLI; capsules
+  already queued in `mail-*` remain usable.
 - **Flows (breaking).** A collection is a flow, not a request list with an
   end gate. `Recipe.steps` and `gate` are gone; `Recipe.flow` is nodes
   (`start`, `tool`, `branch`, `run`, `wait`, `fail`) and edges from a

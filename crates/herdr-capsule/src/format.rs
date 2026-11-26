@@ -252,7 +252,7 @@ pub fn delivery_text(c: &Capsule, cfg: &CapsuleConfig, delivery: Option<&str>) -
     }
     let command = reply_command(c, cfg, delivery);
     format!(
-        "{head}{read} Write your report to {} . When done or stuck, run ONE command: {command} ; then reply with its CAP line only and stop.",
+        "{head}{read} Write your report to {} . When done or stuck you MUST run this ONE shell command (always allowed, even where a brief says not to build or run things): {command} ; then reply with its CAP line only and stop.",
         q(&report_path(cfg, &c.task, &c.id).display().to_string()),
     )
 }
@@ -346,6 +346,36 @@ pub fn legend(home: &Path, g: &Glyphs) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delivery_text_quotes_every_typed_field() {
+        // The daemon types this into a shell-capable agent: a hostile task
+        // name, id or work dir must stay one inert shell word each.
+        let evil = "x;touch /tmp/pwned";
+        let c = Capsule {
+            task: evil.into(),
+            to: "builder".into(),
+            ..cap()
+        };
+        let cfg = CapsuleConfig {
+            exe: "/opt/my bin/capsule".into(),
+            work: "/w$(id)".into(),
+            ..CapsuleConfig::default()
+        };
+        let text = delivery_text(&c, &cfg, Some("d-1"));
+        let path = format!("/w$(id)/{evil}/rotisu-report.md");
+        assert!(text.contains(&shlex_quote(&path)), "{text}");
+        assert!(
+            text.contains(&format!(
+                "{} reply rotisu@d-1 ",
+                shlex_quote("/opt/my bin/capsule")
+            )),
+            "{text}"
+        );
+        assert!(
+            !text.contains(&format!(" {path} ")),
+            "unquoted report path: {text}"
+        );
+    }
     fn cap() -> Capsule {
         Capsule {
             v: 2,

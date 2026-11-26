@@ -204,6 +204,30 @@ fn queue_result<T: serde::Serialize>(
 
 #[tool_router]
 impl HerdrMcpServer {
+    #[tool(meta = category("Queues"), description = "List mailbox items and their event histories, optionally filtered by recipient and queue status.")]
+    async fn mail_list(
+        &self,
+        Parameters(query): Parameters<herdr_mcp_api::mail::MailListQuery>,
+    ) -> Result<CallToolResult, McpError> {
+        queue_result(self.queues.mail_list(self, query).await)
+    }
+
+    #[tool(meta = category("Queues"), description = "Read a mailbox item and its event history by exact queue item ID.")]
+    async fn mail_item(
+        &self,
+        Parameters(query): Parameters<herdr_mcp_api::mail::MailItemQuery>,
+    ) -> Result<CallToolResult, McpError> {
+        queue_result(self.queues.mail_item(self, &query.id).await)
+    }
+
+    #[tool(meta = category("Queues"), description = "Read per-mailbox depths, delivery outcomes and reply latency.")]
+    async fn mail_stats(
+        &self,
+        Parameters(query): Parameters<herdr_mcp_api::mail::MailStatsQuery>,
+    ) -> Result<CallToolResult, McpError> {
+        queue_result(self.queues.mail_stats(self, query).await)
+    }
+
     #[tool(meta = category("Queues"), description = "Push an item to a collection's queue. Set wait to return the terminal item.")]
     async fn queue_push(
         &self,

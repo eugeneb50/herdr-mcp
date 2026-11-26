@@ -186,12 +186,6 @@ impl Store {
             Fenced::Applied(_)
         ))
     }
-    pub fn release(&mut self, lease: &Lease) -> Result<bool> {
-        Ok(matches!(
-            self.q.release(lease, now_ms())?,
-            Fenced::Applied(())
-        ))
-    }
 }
 pub fn push_unique<M: FnMut(&mut Store) -> Result<String>>(
     store: &mut Store,

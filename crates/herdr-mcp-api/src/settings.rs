@@ -593,14 +593,17 @@ pub const RESERVED: &[&str] = &["ctrl+c", "ctrl+d", "ctrl+r", "ctrl+t", "ctrl+v"
 
 /// Labels become queue names `mail-<label>` (herdr-queue: `[a-z0-9][a-z0-9_-]*`,
 /// at most 64 bytes), so each must fit that grammar after the prefix.
+pub fn valid_mail_label(label: &str) -> bool {
+    let first = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    label.len() <= 64 - "mail-".len()
+        && label.bytes().next().is_some_and(first)
+        && label.bytes().all(|b| first(b) || b == b'-' || b == b'_')
+}
+
 fn check_labels(list: &[String]) -> Result<Vec<String>, String> {
     let mut out: Vec<String> = Vec::new();
     for label in list {
-        let first = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
-        let ok = label.len() <= 64 - "mail-".len()
-            && label.bytes().next().is_some_and(first)
-            && label.bytes().all(|b| first(b) || b == b'-' || b == b'_');
-        if !ok {
+        if !valid_mail_label(label) {
             return Err(format!(
                 "label {label:?}: use lowercase letters, digits, - and _ (a mailbox queue name)"
             ));

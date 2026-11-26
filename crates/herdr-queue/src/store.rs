@@ -529,6 +529,49 @@ impl Queue {
         )
     }
 
+    /// Reads a bounded, filtered page and its event histories in one snapshot.
+    pub fn list_prefixed_with_events(
+        &mut self,
+        prefix: &str,
+        queue: Option<&str>,
+        status: Option<ItemStatus>,
+        limit: u32,
+    ) -> Result<Vec<(Item, Vec<QueueEvent>)>> {
+        if let Some(queue) = queue {
+            validate_name(queue)?;
+        }
+        let tx = self.conn.transaction()?;
+        let items = query_items(
+            &tx,
+            "SELECT * FROM queue_items WHERE substr(queue, 1, length(?1)) = ?1
+               AND length(queue) > length(?1) AND (?2 IS NULL OR queue = ?2)
+               AND (?3 IS NULL OR status = ?3) ORDER BY queue, seq LIMIT ?4",
+            params![prefix, queue, status.map(ItemStatus::as_str), limit],
+        )?;
+        let mut statement = tx.prepare(ITEM_EVENTS)?;
+        items
+            .into_iter()
+            .map(|item| {
+                let events = statement
+                    .query_map([&item.id], read_event)?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok((item, events))
+            })
+            .collect()
+    }
+
+    /// Projects a mailbox statistics snapshot into the caller's response type.
+    pub fn mail_stats<T>(
+        &self,
+        since: Option<i64>,
+        map: impl FnMut(&Row<'_>) -> rusqlite::Result<T>,
+    ) -> Result<Vec<T>> {
+        let mut statement = self.conn.prepare(include_str!("mail-stats.sql"))?;
+        Ok(statement
+            .query_map(rusqlite::named_params! {":since": since}, map)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Running items that a consumer has recorded a delivery for.
     pub fn list_running_delivered(&mut self) -> Result<Vec<Item>> {
         query_items(
@@ -544,25 +587,37 @@ impl Queue {
     }
 
     pub fn item(&mut self, id: &str) -> Result<Option<(Item, Vec<QueueEvent>)>> {
+        self.item_matching(id, None)
+    }
+
+    /// Reads an exact ID only if its queue has this prefix and a nonempty suffix.
+    pub fn prefixed_item(
+        &mut self,
+        id: &str,
+        prefix: &str,
+    ) -> Result<Option<(Item, Vec<QueueEvent>)>> {
+        self.item_matching(id, Some(prefix))
+    }
+
+    fn item_matching(
+        &mut self,
+        id: &str,
+        prefix: Option<&str>,
+    ) -> Result<Option<(Item, Vec<QueueEvent>)>> {
         let tx = self.conn.transaction()?;
         let item = tx
-            .query_row("SELECT * FROM queue_items WHERE id = ?", [id], read_item)
+            .query_row(
+                "SELECT * FROM queue_items WHERE id = ?1 AND (?2 IS NULL OR
+                   (substr(queue, 1, length(?2)) = ?2 AND length(queue) > length(?2)))",
+                params![id, prefix],
+                read_item,
+            )
             .optional()?;
         let Some(item) = item else { return Ok(None) };
         let events = {
-            let mut stmt = tx.prepare(
-                "SELECT item_id, seq, at, kind, data FROM queue_events WHERE item_id = ? ORDER BY seq",
-            )?;
-            stmt.query_map([id], |row| {
-                Ok(QueueEvent {
-                    item_id: row.get(0)?,
-                    seq: row.get(1)?,
-                    at: row.get(2)?,
-                    kind: row.get(3)?,
-                    data: decode_optional(row, "data")?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?
+            let mut stmt = tx.prepare(ITEM_EVENTS)?;
+            stmt.query_map([id], read_event)?
+                .collect::<rusqlite::Result<_>>()?
         };
         tx.commit()?;
         Ok(Some((item, events)))
@@ -854,6 +909,19 @@ fn query_items(conn: &Connection, sql: &str, params: impl Params) -> Result<Vec<
     Ok(stmt
         .query_map(params, read_item)?
         .collect::<rusqlite::Result<_>>()?)
+}
+
+const ITEM_EVENTS: &str =
+    "SELECT item_id, seq, at, kind, data FROM queue_events WHERE item_id = ? ORDER BY seq";
+
+fn read_event(row: &Row<'_>) -> rusqlite::Result<QueueEvent> {
+    Ok(QueueEvent {
+        item_id: row.get(0)?,
+        seq: row.get(1)?,
+        at: row.get(2)?,
+        kind: row.get(3)?,
+        data: decode_optional(row, "data")?,
+    })
 }
 
 fn read_item(row: &Row<'_>) -> rusqlite::Result<Item> {

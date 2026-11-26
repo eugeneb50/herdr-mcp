@@ -5,10 +5,10 @@
 // submodule as one, though it is part of the same integration-test target.
 #![allow(clippy::unwrap_used)]
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     collections::HashMap,
-    fs::{self, File},
+    fs,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
@@ -33,18 +33,8 @@ pub fn queue_bin() -> PathBuf {
 }
 
 const FAKE_HERDR: &str = r#"#!/bin/sh
-# Fake herdr: `pane list` prints $FAKE_PANES; `agent prompt` logs its args
-# to $FAKE_LOG and fails with agent_blocked for a pane listed in $FAKE_BLOCKED.
+# Fake herdr: the metadata announcement `send` makes after enqueue.
 case "$1 $2" in
-"pane list") cat "$FAKE_PANES" ;;
-"agent list") cat "$FAKE_AGENTS" ;;
-"agent prompt")
-    if [ -n "${FAKE_BLOCKED:-}" ] && [ "$3" = "$FAKE_BLOCKED" ]; then
-        echo '{"error":{"code":"agent_blocked"}}' >&2; exit 1
-    fi
-    printf '%s\t%s\n' "$3" "$4" >> "$FAKE_LOG"
-    if [ -n "${FAKE_ON_PROMPT:-}" ]; then sh "$FAKE_ON_PROMPT"; fi ;;
-"pane send-keys") printf '%s\t%s\n' "$3" "$4" >> "$FAKE_KEYS" ;;
 "workspace report-metadata") : ;;
 *) echo "fake herdr: no $*" >&2; exit 1 ;;
 esac
@@ -56,66 +46,6 @@ pub fn stdout(out: &Output) -> String {
 
 pub fn stderr(out: &Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
-}
-
-/// Minimal POSIX word splitting, enough for the `shlex.quote` output the
-/// capsule embeds in its reply command.
-pub fn shlex_split(s: &str) -> Vec<String> {
-    let mut words = Vec::new();
-    let mut cur = String::new();
-    let mut open = false;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' => {
-                open = true;
-                while let Some(&d) = chars.peek() {
-                    chars.next();
-                    if d == '\'' {
-                        break;
-                    }
-                    cur.push(d);
-                }
-            }
-            '"' => {
-                open = true;
-                while let Some(&d) = chars.peek() {
-                    chars.next();
-                    if d == '"' {
-                        break;
-                    }
-                    if d == '\\' {
-                        if let Some(&e) = chars.peek() {
-                            chars.next();
-                            cur.push(e);
-                        }
-                    } else {
-                        cur.push(d);
-                    }
-                }
-            }
-            '\\' => {
-                open = true;
-                if let Some(e) = chars.next() {
-                    cur.push(e);
-                }
-            }
-            c if c.is_whitespace() => {
-                if open {
-                    words.push(std::mem::take(&mut cur));
-                    open = false;
-                }
-            }
-            c => {
-                open = true;
-                cur.push(c);
-            }
-        }
-    }
-    if open || !cur.is_empty() {
-        words.push(cur);
-    }
-    words
 }
 
 /// Resolve a program on PATH, the way Python's `shutil.which` does.
@@ -131,10 +61,6 @@ pub fn which(name: &str) -> String {
 pub struct Fixture {
     pub tmp: tempfile::TempDir,
     pub home: PathBuf,
-    pub panes: PathBuf,
-    pub agents: PathBuf,
-    pub log: PathBuf,
-    pub keys: PathBuf,
     pub work: PathBuf,
     pub brief: PathBuf,
     pub queue_db: PathBuf,
@@ -156,11 +82,6 @@ impl Fixture {
         let herdr = root.join("herdr");
         fs::write(&herdr, FAKE_HERDR).unwrap();
         fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
-        let panes = root.join("panes.json");
-        let agents = root.join("agents.json");
-        let log = root.join("prompts.log");
-        File::create(&log).unwrap();
-        let keys = root.join("keys.log");
         let work = root.join("work");
         fs::create_dir_all(&work).unwrap();
         let brief = work.join("brief.md");
@@ -170,11 +91,6 @@ impl Fixture {
         let mut env: HashMap<String, String> = std::env::vars().collect();
         env.insert("CAPSULE_HOME".into(), home.display().to_string());
         env.insert("HERDR_BIN_PATH".into(), herdr.display().to_string());
-        env.insert("FAKE_PANES".into(), panes.display().to_string());
-        env.insert("FAKE_AGENTS".into(), agents.display().to_string());
-        env.insert("FAKE_LOG".into(), log.display().to_string());
-        env.insert("FAKE_KEYS".into(), keys.display().to_string());
-        env.insert("CAPSULE_SUBMIT_CONFIRM_S".into(), "0.3".into());
         env.insert("CAPSULE_FROM".into(), "tohitu".into());
         env.insert("CAPSULE_WORK".into(), work.display().to_string());
         // Never the real queue: every test gets its own DB.
@@ -183,43 +99,15 @@ impl Fixture {
         env.remove("HERDR_PANE_ID");
 
         let bin = std::env::var("CAPSULE_BIN").unwrap_or_else(|_| DEFAULT_BIN.to_string());
-        let f = Fixture {
+        Fixture {
             tmp,
             home,
-            panes,
-            agents,
-            log,
-            keys,
             work,
             brief,
             queue_db,
             env,
             bin,
-        };
-        f.set_panes(true);
-        f
-    }
-
-    pub fn set_panes(&self, idle: bool) {
-        self.set_panes_opts(idle, "builder", 7, "w1:p2");
-    }
-
-    pub fn set_panes_opts(&self, idle: bool, label: &str, turns: u64, pane: &str) {
-        let status = if idle { "idle" } else { "working" };
-        fs::write(
-            &self.panes,
-            json!({"result": {"panes": [
-                {"pane_id": pane, "label": label, "agent_status": status}]}})
-            .to_string(),
-        )
-        .unwrap();
-        fs::write(
-            &self.agents,
-            json!({"result": {"agents": [
-                {"pane_id": pane, "agent_status": status, "state_change_seq": turns}]}})
-            .to_string(),
-        )
-        .unwrap();
+        }
     }
 
     fn command(&self, args: &[&str], overrides: &[(&str, &str)]) -> Command {
@@ -386,38 +274,5 @@ impl Fixture {
 
     pub fn unread(&self, to: &str) -> usize {
         self.items(to, Some("queued")).len()
-    }
-
-    pub fn prompts(&self) -> Vec<(String, String)> {
-        fs::read_to_string(&self.log)
-            .unwrap_or_default()
-            .lines()
-            .map(|line| {
-                let mut parts = line.splitn(2, '\t');
-                let pane = parts.next().unwrap_or("").to_string();
-                let text = parts.next().unwrap_or("").to_string();
-                (pane, text)
-            })
-            .collect()
-    }
-
-    pub fn keys(&self) -> Vec<String> {
-        fs::read_to_string(&self.keys)
-            .map(|s| s.lines().map(str::to_string).collect())
-            .unwrap_or_default()
-    }
-
-    pub fn maildir(&self, to: &str, sub: &str, cid: &str, summary: &str) {
-        let dir = self.home.join(to).join(sub);
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join(format!("1795000000-{cid}.json")),
-            json!({
-                "id": cid, "task": "t", "status": "wip", "from": "tohitu",
-                "summary": summary, "artifacts": [], "to": to
-            })
-            .to_string(),
-        )
-        .unwrap();
     }
 }

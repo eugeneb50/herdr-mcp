@@ -156,11 +156,25 @@ impl Postman {
     }
 }
 
+/// `capsule` as an absolute path from PATH: weak models trust a full path
+/// ("not installed" otherwise, live 2026-11-25); bare name if not found.
+fn capsule_exe() -> &'static str {
+    static EXE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    EXE.get_or_init(|| {
+        std::env::var_os("PATH")
+            .iter()
+            .flat_map(std::env::split_paths)
+            .map(|dir| dir.join("capsule"))
+            .find(|p| p.is_file())
+            .map_or_else(|| "capsule".to_owned(), |p| p.display().to_string())
+    })
+}
+
 fn capsule_config(server: &HerdrMcpServer) -> CapsuleConfig {
     // The default names the running binary; the agent's reply runs `capsule`.
     // The work dir is read live: the next delivery text uses the setting.
     CapsuleConfig {
-        exe: "capsule".into(),
+        exe: capsule_exe().into(),
         work: server.settings().path(MAIL_WORK_DIR),
         ..CapsuleConfig::default()
     }
