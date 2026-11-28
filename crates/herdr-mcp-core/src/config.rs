@@ -85,6 +85,13 @@ impl Default for SecurityConfig {
     }
 }
 
+/// The `[settings.*]` of a config file's text, as [`Config::settings`] reads
+/// them; the text must parse as a whole config file.
+pub fn settings_from_toml(text: &str) -> Result<(herdr_mcp_api::Settings, Vec<String>)> {
+    let config: Config = toml::from_str(text).context("config file is not valid")?;
+    Ok(config.settings())
+}
+
 impl Config {
     /// The valid `[settings.*]` overrides, plus a warning for each one
     /// dropped (back on its default).

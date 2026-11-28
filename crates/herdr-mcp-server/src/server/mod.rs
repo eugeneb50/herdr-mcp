@@ -51,6 +51,9 @@ pub struct HerdrMcpServer {
     /// concurrent saves neither share a temp file nor apply a stale
     /// snapshot over each other.
     config_edit: std::sync::Arc<tokio::sync::Mutex<()>>,
+    /// The config file text the live settings were last reloaded from
+    /// (`None`: no file), so an unchanged file is not reparsed.
+    settings_seen: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// The herdr event subscriber client (for status reporting), once
     /// attached. Shared by every clone, including the scheduler's.
     pub herdr_client: std::sync::Arc<std::sync::OnceLock<std::sync::Arc<HerdrClient>>>,
@@ -419,6 +422,41 @@ impl HerdrMcpServer {
         Ok(Ok(()))
     }
 
+    /// Reread `[settings]` from the config file when its text changed since
+    /// the last look: another process (the bridge's PUT) saved it, and this
+    /// one must run with it. `Ok(true)`: applied. A file that does not parse
+    /// is reported once and the live settings stay; no file means defaults.
+    pub async fn reload_settings(&self) -> anyhow::Result<bool> {
+        let _edit = self.config_edit.lock().await;
+        let path = self.config_path.clone();
+        let text = tokio::task::spawn_blocking(move || match std::fs::read_to_string(&path) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        })
+        .await??;
+        {
+            let mut seen = crate::lock(&self.settings_seen);
+            if *seen == text {
+                return Ok(false);
+            }
+            seen.clone_from(&text);
+        }
+        let (settings, warnings) = match &text {
+            Some(text) => {
+                use anyhow::Context as _;
+                herdr_mcp_core::settings_from_toml(text)
+                    .with_context(|| self.config_path.display().to_string())?
+            }
+            None => Default::default(),
+        };
+        for w in &warnings {
+            tracing::warn!("{w}");
+        }
+        *crate::write(&self.settings) = settings;
+        Ok(true)
+    }
+
     /// Every setting back to its default, in the config file and live.
     pub async fn reset_settings(&self) -> anyhow::Result<()> {
         let _edit = self.config_edit.lock().await;
@@ -452,6 +490,7 @@ impl HerdrMcpServer {
             settings_warnings: std::sync::Arc::new(warnings),
             config_path: herdr_mcp_core::config_file_or_default(),
             config_edit: std::sync::Arc::default(),
+            settings_seen: std::sync::Arc::default(),
             herdr_client: std::sync::Arc::default(),
             runs: crate::runs::Runs::default(),
             queues: crate::queues::QueueService::default(),

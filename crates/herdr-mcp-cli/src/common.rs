@@ -58,6 +58,7 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
     let server = HerdrMcpServer::with_config((*persistence).clone(), registry, config)
         .with_herdr_client(herdr_client.clone());
     spawn_daemon(server.clone(), herdr_client.clone(), data_dir.clone());
+    spawn_settings_reload(server.clone());
 
     if let Some(port) = config.http.port {
         let server = server.clone();
@@ -83,6 +84,25 @@ pub async fn serve_core(config: &Config) -> Result<HerdrMcpServer> {
     }
 
     Ok(server)
+}
+
+/// Every process rereads `[settings]` when the config file changes: a save in
+/// the bridge must reach the process that holds the daemon lock (mail,
+/// queues, schedules), which may be another one. Lives as long as the process.
+fn spawn_settings_reload(server: HerdrMcpServer) {
+    tokio::spawn(async move {
+        loop {
+            let every = server
+                .settings()
+                .duration(herdr_mcp_api::settings::SETTINGS_RELOAD_MS);
+            tokio::time::sleep(every).await;
+            match server.reload_settings().await {
+                Ok(true) => tracing::info!("settings reloaded from the config file"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("settings not reloaded, keeping the live ones: {e:#}"),
+            }
+        }
+    });
 }
 
 /// Lock file in the data dir. Its holder is the data dir's daemon: the one
