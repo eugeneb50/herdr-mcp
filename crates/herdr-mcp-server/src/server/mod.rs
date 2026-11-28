@@ -481,6 +481,9 @@ impl HerdrMcpServer {
         }
         // Persisted schedules start with `serve` (see `serve_core`).
         let scheduler = Scheduler::new(persistence.clone());
+        let config_path = herdr_mcp_core::config_file_or_default();
+        // The text `config` was loaded from, so the first reload is a no-op.
+        let seen = std::fs::read_to_string(&config_path).ok();
         let server = Self {
             persistence,
             scheduler,
@@ -488,9 +491,9 @@ impl HerdrMcpServer {
             clipboard: std::sync::Arc::new(std::sync::RwLock::new(config.clipboard.clone())),
             settings: std::sync::Arc::new(std::sync::RwLock::new(settings)),
             settings_warnings: std::sync::Arc::new(warnings),
-            config_path: herdr_mcp_core::config_file_or_default(),
+            config_path,
             config_edit: std::sync::Arc::default(),
-            settings_seen: std::sync::Arc::default(),
+            settings_seen: std::sync::Arc::new(std::sync::Mutex::new(seen)),
             herdr_client: std::sync::Arc::default(),
             runs: crate::runs::Runs::default(),
             queues: crate::queues::QueueService::default(),
