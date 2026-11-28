@@ -249,6 +249,7 @@ pub const MAIL_REMIND_AFTER_MS: &str = "mail.remind-after-ms";
 pub const MAIL_SUBMIT_CONFIRM_MS: &str = "mail.submit-confirm-ms";
 pub const MAIL_UNDELIVERABLE_AFTER_MS: &str = "mail.undeliverable-after-ms";
 pub const MAIL_CONSUMER_LEASE_MS: &str = "mail.consumer-lease-ms";
+pub const MAIL_SIDEBAR_KEEP_MS: &str = "mail.sidebar-keep-ms";
 
 /// Every setting, in display order.
 pub const SPECS: &[Spec] = &[
@@ -507,6 +508,14 @@ pub const SPECS: &[Spec] = &[
         "How long after a task turn ends to wait before reminding the agent to reply.",
         60_000,
         0,
+        86_400_000,
+    ),
+    ms(
+        MAIL_SIDEBAR_KEEP_MS,
+        "sidebar result",
+        "How long herdr's agent sidebar keeps showing a delivery's outcome ($mail_task, $mail_state) after it ends.",
+        600_000,
+        1_000,
         86_400_000,
     ),
     ms(

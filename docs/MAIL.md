@@ -209,6 +209,20 @@ Both views poll at `ui.queues-poll-ms` (default 2000 ms), while the tab stays
 visible.
 
 
+## herdr's Agent Sidebar
+
+The postman reports two display-only tokens on each delivered agent's pane
+(`pane.report_metadata`, source `herdr-mcp-mail`): `mail_task` (the task name)
+and `mail_state` (`working` while the delivery waits for its reply, then
+`replied`, `done` or `dead`). `working` lasts as long as `mail.reply-wait-ms`;
+an outcome stays for `mail.sidebar-keep-ms`. Show them by adding the tokens to a
+row in `~/.config/herdr/config.toml`:
+
+```toml
+[ui.sidebar.agents]
+rows = [["state_icon", "agent", "state_text"], ["$mail_task", "$mail_state"]]
+```
+
 ## Mail Settings Reference
 
 All settings are managed with `GET`, `PUT` and `DELETE` on
@@ -225,6 +239,7 @@ default).
 | `mail.submit-confirm-ms` | `5000` (5 s) | Delay before one extra Enter if the agent has not started. |
 | `mail.undeliverable-after-ms` | `600000` (10 min) | How long mail may wait for a missing recipient. |
 | `mail.consumer-lease-ms` | `15000` (15 s) | How long a herdr-mcp owns a mailbox before another takes over. |
+| `mail.sidebar-keep-ms` | `600000` (10 min) | How long herdr's sidebar keeps a finished delivery's `$mail_state`. |
 | `ui.queues-poll-ms` | `2000` (2 s) | Refresh interval for the visible queue and Mail tabs. |
 
 The built-in reply-wait default is 30 minutes; a larger value seen on a given
