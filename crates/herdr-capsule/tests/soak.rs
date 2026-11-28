@@ -7,12 +7,7 @@ const THREADS: usize = 8;
 const PER_THREAD: usize = 25;
 
 fn bin() -> String {
-    std::env::var("CAPSULE_BIN").unwrap_or_else(|_| {
-        format!(
-            "{}/target/debug/capsule",
-            env!("CARGO_MANIFEST_DIR").replace("/crates/herdr-capsule", "")
-        )
-    })
+    std::env::var("CAPSULE_BIN").unwrap_or_else(|_| env!("CARGO_BIN_EXE_capsule").to_string())
 }
 
 fn send(
