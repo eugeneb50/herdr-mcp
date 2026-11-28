@@ -832,6 +832,41 @@ async fn restart_resends_only_a_delivery_without_submission_record() {
     }
 }
 
+/// A release keeps the delivery column, so a reclaim that crashed before its
+/// own delivery must not be adopted on the previous claim's confirmation.
+#[tokio::test(start_paused = true)]
+async fn restart_ignores_a_confirmed_delivery_from_an_earlier_claim() {
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    let id = f.push(&task("one"));
+    let mut db = f.db();
+    let consumer = db
+        .claim_consumer(MAILBOX, "crashed", LEASE, f.now())
+        .unwrap()
+        .unwrap();
+    let Fenced::Applied(Some((_, first))) = db.claim_owned(&consumer, LEASE, f.now()).unwrap()
+    else {
+        panic!("expected owned claim")
+    };
+    db.set_delivery(
+        &first,
+        "old",
+        json!({"pane":PANE,"state_change_seq":1,"submitted":true}),
+        f.now(),
+    )
+    .unwrap();
+    db.release(&first, f.now()).unwrap();
+    let Fenced::Applied(Some(_)) = db.claim_owned(&consumer, LEASE, f.now()).unwrap() else {
+        panic!("expected the second claim")
+    };
+    f.step(&postman, Step::NotOwner).await;
+    elapsed(LEASE).await;
+    f.tick(&postman).await;
+
+    assert_eq!(herdr.prompts(), 1, "the second claim was never typed");
+    assert_ne!(f.item(&id).delivery.as_deref(), Some("old"));
+}
+
 #[tokio::test(start_paused = true)]
 async fn two_postmen_on_one_database_produce_one_prompt() {
     let f = Fixture::new(true).await;

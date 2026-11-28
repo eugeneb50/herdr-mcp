@@ -679,6 +679,50 @@ async fn security_policy_holds_for_the_bridge_runs_and_mcp_clients() {
         .with_token(Some("nope".into()));
     assert_eq!(status(wrong.list_tools().await), 401);
 
+    // Query authentication must not be passed into the strict mail DTOs.
+    let http = reqwest::Client::new();
+    for (path, key, value) in [("items", "limit", "1"), ("stats", "since", "0")] {
+        let url = format!("{base}/api/mail/{path}");
+        assert_eq!(http.get(&url).send().await.unwrap().status(), 401);
+        assert_eq!(
+            http.get(&url)
+                .query(&[("token", "wrong")])
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        assert_eq!(
+            http.get(&url)
+                .bearer_auth(&token)
+                .query(&[(key, value)])
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            http.get(&url)
+                .query(&[("token", token.as_str()), (key, value)])
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            http.get(&url)
+                .query(&[("token", token.as_str()), ("unexpected", "value")])
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            400
+        );
+    }
+
     let api = ApiClient::new(&base).unwrap().with_token(Some(token));
     let tools = api.list_tools().await.unwrap();
     assert!(tools.iter().any(|t| t["name"] == "var_set"));
@@ -1199,6 +1243,15 @@ esac
         1,
         2,
     );
+    let malformed_mail_id = seed_queue_item(&mut db, "mail-_invalid", serde_json::json!({}), 1, 2);
+    let unfiltered = api.mail_items(&Default::default()).await.unwrap();
+    assert_eq!(unfiltered.len(), 1);
+    assert_eq!(unfiltered[0].item["id"], mail_id);
+    assert!(matches!(
+        api.mail_item(&malformed_mail_id).await,
+        Err(ApiError::Status { status: 404, .. })
+    ));
+
     let mail_query = herdr_mcp_api::mail::MailListQuery {
         to: Some("lead".into()),
         status: Some("queued".into()),

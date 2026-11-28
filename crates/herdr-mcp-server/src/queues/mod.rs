@@ -269,7 +269,7 @@ impl QueueService {
         let limit = query.limit.unwrap_or(100).min(1000);
         self.db(server, move |db| {
             Ok(db
-                .list_prefixed_with_events("mail-", queue.as_deref(), status, limit)?
+                .mail_items_with_events(queue.as_deref(), status, limit)?
                 .into_iter()
                 .map(|(item, events)| MailItemResponse { item, events })
                 .collect())
@@ -284,9 +284,7 @@ impl QueueService {
     ) -> Result<MailItemHistory> {
         let id = id.to_owned();
         self.db(server, move |db| {
-            let (item, events) = db
-                .prefixed_item(&id, "mail-")?
-                .ok_or(QueueError::NotFound(id))?;
+            let (item, events) = db.mail_item(&id)?.ok_or(QueueError::NotFound(id))?;
             Ok(MailItemResponse { item, events })
         })
         .await

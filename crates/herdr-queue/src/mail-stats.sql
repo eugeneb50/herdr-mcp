@@ -1,6 +1,6 @@
 WITH mail AS (
     SELECT id, substr(queue, 6) AS label, status, payload, result, max_attempts
-    FROM queue_items WHERE queue GLOB 'mail-?*'
+    FROM queue_items WHERE queue GLOB :mailbox_glob
 ), gauges AS (
     SELECT label, sum(status = 'queued') AS depth, sum(status = 'running') AS in_flight
     FROM mail GROUP BY label
