@@ -4,6 +4,10 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Mail state in herdr's agent sidebar.** The postman reports `mail_task` and
+  `mail_state` (`working`, `replied`, `done`, `dead`) as pane metadata tokens;
+  add `$mail_task` / `$mail_state` to a `[ui.sidebar.agents]` row to see what
+  each agent is doing. New setting `mail.sidebar-keep-ms` (default 10 min).
 - **Capsule ids are reserved by the queue; one reply per delivery
   (breaking).** New capsule ids are four syllables (`tirumoka`, ~1M ids) drawn
   from the OS random source; `herdr-queue`'s new `Queue::push_unique` refuses a

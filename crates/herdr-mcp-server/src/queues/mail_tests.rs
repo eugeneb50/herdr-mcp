@@ -20,6 +20,9 @@ enum Call {
     Enter(String),
 }
 
+/// One `report_tokens` call: pane, tokens, ttl_ms.
+type TokenReport = (String, Vec<(String, String)>, u64);
+
 #[derive(Default)]
 struct FakeMailHerdr {
     panes: Mutex<Vec<MailPane>>,
@@ -27,6 +30,8 @@ struct FakeMailHerdr {
     fail_panes: Mutex<bool>,
     fail_prompt: bool,
     fail_enter: bool,
+    /// `report_tokens` calls: (pane, tokens, ttl_ms). Kept apart from `calls`.
+    tokens: Mutex<Vec<TokenReport>>,
 }
 
 impl MailHerdr for FakeMailHerdr {
@@ -50,6 +55,22 @@ impl MailHerdr for FakeMailHerdr {
         Box::pin(async move {
             lock(&self.calls).push(Call::Enter(pane.into()));
             anyhow::ensure!(!self.fail_enter, "scripted Enter failure");
+            Ok(())
+        })
+    }
+
+    fn report_tokens<'a>(
+        &'a self,
+        pane: &'a str,
+        tokens: &'a [(&'a str, String)],
+        ttl_ms: u64,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let tokens = tokens
+                .iter()
+                .map(|(k, v)| ((*k).to_owned(), v.clone()))
+                .collect();
+            lock(&self.tokens).push((pane.into(), tokens, ttl_ms));
             Ok(())
         })
     }
@@ -1517,4 +1538,60 @@ async fn delivery_text_names_the_configured_work_dir() {
         text.contains(&format!("{work}/test-task/{}-report.md", capsule.id)),
         "{text}"
     );
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_sidebar_shows_the_task_while_delivered_and_the_outcome_after() {
+    let f = Fixture::new(true).await;
+    let (herdr, postman) = fake();
+    let first = task("one");
+    let one = f.push(&first);
+    f.tick(&postman).await;
+    let delivery = f.item(&one).delivery.unwrap();
+    let wait = number(&f.server, MAIL_REPLY_WAIT_MS);
+    let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+    assert_eq!(
+        lock(&herdr.tokens).clone(),
+        [(
+            PANE.to_owned(),
+            vec![
+                pair("mail_task", "test-task"),
+                pair("mail_state", "working")
+            ],
+            wait
+        )]
+    );
+    herdr.pane("idle", 2);
+    let answer = f.push(&reply(&first, &delivery));
+    f.step(&postman, Step::Replied(answer)).await;
+    let keep = number(&f.server, MAIL_SIDEBAR_KEEP_MS);
+    assert_eq!(
+        lock(&herdr.tokens).last().cloned(),
+        Some((
+            PANE.to_owned(),
+            vec![
+                pair("mail_task", "test-task"),
+                pair("mail_state", "replied")
+            ],
+            keep
+        ))
+    );
+}
+
+#[test]
+fn sidebar_states_cover_every_delivery_outcome() {
+    use super::mail::sidebar_state;
+    assert_eq!(sidebar_state(&Step::Delivered("d".into())), Some("working"));
+    assert_eq!(sidebar_state(&Step::Replied("r".into())), Some("replied"));
+    assert_eq!(sidebar_state(&Step::TurnEnded), Some("done"));
+    assert_eq!(sidebar_state(&Step::Dead("x".into())), Some("dead"));
+    for quiet in [
+        Step::Busy,
+        Step::Waiting,
+        Step::Empty,
+        Step::NoPane,
+        Step::Nudged,
+    ] {
+        assert_eq!(sidebar_state(&quiet), None, "{quiet:?}");
+    }
 }

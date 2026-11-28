@@ -41,11 +41,32 @@ pub(crate) trait MailHerdr: Send + Sync {
     fn panes(&self) -> BoxFuture<'_, Result<Vec<MailPane>>>;
     fn prompt<'a>(&'a self, pane: &'a str, text: &'a str) -> BoxFuture<'a, Result<()>>;
     fn enter<'a>(&'a self, pane: &'a str) -> BoxFuture<'a, Result<()>>;
+    /// Display-only tokens for herdr's agent sidebar (`$name` in its rows).
+    fn report_tokens<'a>(
+        &'a self,
+        pane: &'a str,
+        tokens: &'a [(&'a str, String)],
+        ttl_ms: u64,
+    ) -> BoxFuture<'a, Result<()>>;
+}
+
+/// The `mail_state` sidebar token a step sets; `None` leaves it as it was.
+pub(crate) fn sidebar_state(step: &Step) -> Option<&'static str> {
+    match step {
+        Step::Delivered(_) => Some("working"),
+        Step::Replied(_) => Some("replied"),
+        Step::TurnEnded => Some("done"),
+        Step::Dead(_) => Some("dead"),
+        _ => None,
+    }
 }
 
 /// herdr through its CLI: `agent list` has status and turn counter, `pane
 /// list` has labels.
 pub(crate) struct CliMailHerdr;
+
+/// The metadata source herdr-mcp's sidebar tokens are reported under.
+const SIDEBAR_SOURCE: &str = "herdr-mcp-mail";
 
 fn result(text: &str) -> Result<Value> {
     let parsed: Value = serde_json::from_str(text).context("herdr output is not JSON")?;
@@ -108,6 +129,27 @@ impl MailHerdr for CliMailHerdr {
                 .await
                 .map(drop)
                 .map_err(|e| anyhow::anyhow!("herdr agent prompt {pane}: {}", e.message))
+        })
+    }
+
+    fn report_tokens<'a>(
+        &'a self,
+        pane: &'a str,
+        tokens: &'a [(&'a str, String)],
+        ttl_ms: u64,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let pairs: Vec<String> = tokens.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            let ttl = ttl_ms.to_string();
+            let mut args = vec!["pane", "report-metadata", pane, "--source", SIDEBAR_SOURCE];
+            for pair in &pairs {
+                args.extend(["--token", pair.as_str()]);
+            }
+            args.extend(["--ttl-ms", ttl.as_str()]);
+            crate::server::herdr_cli(&args)
+                .await
+                .map(drop)
+                .map_err(|e| anyhow::anyhow!("herdr pane report-metadata {pane}: {}", e.message))
         })
     }
 
@@ -279,6 +321,13 @@ async fn mail_event(server: &HerdrMcpServer, events: Option<&mut broadcast::Rece
     }
 }
 
+/// The pane and task of `label`'s delivery in flight, if any.
+fn in_flight(postman: &Postman, label: &str) -> Option<(String, String)> {
+    lock(&postman.flights)
+        .get(label)
+        .map(|f| (f.pane.clone(), f.capsule.task.clone()))
+}
+
 impl QueueService {
     /// Runs the postman until shutdown; does nothing while `mail.enabled` is off.
     pub(crate) fn start_mail(
@@ -354,12 +403,15 @@ impl QueueService {
             let is_open = open.contains(&label);
             let readable = panes.is_some();
             let panes = panes.as_deref().unwrap_or_default();
+            let before = in_flight(postman, &label);
             match self
                 .mail_step(server, postman, &label, panes, is_open, readable)
                 .await
             {
                 Ok(step) => {
                     tracing::debug!("mail {label}: {step:?}");
+                    self.show_in_sidebar(server, postman, &label, &step, before)
+                        .await;
                     steps.push((label, step));
                 }
                 Err(error) => tracing::warn!("mail {label}: {error:#}"),
@@ -367,6 +419,36 @@ impl QueueService {
         }
         self.release_closed_mailboxes(server, postman, open).await?;
         Ok(steps)
+    }
+
+    /// Tell herdr's sidebar what `label`'s agent is doing after `step`.
+    /// `before` is the delivery in flight before the step (gone once it ends).
+    async fn show_in_sidebar(
+        &self,
+        server: &HerdrMcpServer,
+        postman: &Postman,
+        label: &str,
+        step: &Step,
+        before: Option<(String, String)>,
+    ) {
+        let Some(state) = sidebar_state(step) else {
+            return;
+        };
+        let (pane, task, ttl) = match step {
+            Step::Delivered(_) => match in_flight(postman, label) {
+                Some((pane, task)) => (pane, task, number(server, MAIL_REPLY_WAIT_MS)),
+                None => return,
+            },
+            _ => match before {
+                Some((pane, task)) => (pane, task, number(server, MAIL_SIDEBAR_KEEP_MS)),
+                None => return,
+            },
+        };
+        let tokens = [("mail_task", task), ("mail_state", state.to_owned())];
+        // Display only: a failed report must never hold up or fail delivery.
+        if let Err(error) = postman.herdr.report_tokens(&pane, &tokens, ttl).await {
+            tracing::warn!("mail {label}: sidebar tokens: {error:#}");
+        }
     }
 
     async fn release_closed_mailboxes(
