@@ -72,7 +72,7 @@ fn migrates_v1_without_losing_items_or_events() {
     assert_eq!(
         db.pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
 }
 

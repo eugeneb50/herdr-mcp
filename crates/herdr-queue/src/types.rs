@@ -105,15 +105,32 @@ pub enum Outcome {
 
 #[derive(Debug)]
 pub enum QueueError {
-    Full { depth: i64 },
-    UnsupportedSchema { version: i64 },
+    Full {
+        depth: i64,
+    },
+    UnsupportedSchema {
+        version: i64,
+    },
     InvalidQueueName(String),
     InvalidMaxAttempts,
     InvalidLease,
     InvalidDeliveryData,
     NotFound(String),
-    InvalidStatus { id: String, status: ItemStatus },
-    DedupeConflict { id: String },
+    InvalidStatus {
+        id: String,
+        status: ItemStatus,
+    },
+    DedupeConflict {
+        id: String,
+    },
+    /// `push_unique`: another item already has this key.
+    KeyTaken {
+        key: String,
+    },
+    /// `push_unique`: the delivery this reply answers already has `reply`.
+    AlreadyAnswered {
+        reply: String,
+    },
     Io(io::Error),
     Sqlite(rusqlite::Error),
 }
@@ -135,6 +152,10 @@ impl fmt::Display for QueueError {
             Self::InvalidStatus { id, status } => write!(f, "item {id} is {}", status.as_str()),
             Self::DedupeConflict { id } => {
                 write!(f, "unfinished item {id} already owns the dedupe key")
+            }
+            Self::KeyTaken { key } => write!(f, "key {key} is already taken"),
+            Self::AlreadyAnswered { reply } => {
+                write!(f, "this delivery already has its reply ({reply})")
             }
             Self::Io(error) => write!(f, "{error}"),
             Self::Sqlite(error) => write!(f, "{error}"),

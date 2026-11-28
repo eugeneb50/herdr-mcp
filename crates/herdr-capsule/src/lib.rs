@@ -12,7 +12,7 @@ pub use capsule::{
 pub use check::{check_files, decisive, reply_check_of, run_check};
 pub use config::CapsuleConfig;
 pub use format::{card, delivery_text, head, line, pack_summary, report_path, shlex_quote};
-pub use id::{confusable, mint, mint_id, syllables};
+pub use id::{capsule_id, confusable, mint, syllables};
 use std::path::PathBuf;
 pub use store::Store;
 #[derive(Debug, thiserror::Error)]

@@ -155,11 +155,12 @@ fn digest(c: &Capsule) -> Vec<String> {
             path.display()
         )];
     };
-    let entries: Vec<Value> = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let entries: Vec<Value> = lines
+        .iter()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
+    let unreadable = lines.len() - entries.len();
     if entries.is_empty() {
         return vec![format!("  rollup: index empty: {}", path.display())];
     }
@@ -185,6 +186,11 @@ fn digest(c: &Capsule) -> Vec<String> {
         first.chars().skip(5).take(5).collect::<String>(),
         last.chars().skip(5).take(5).collect::<String>()
     )];
+    if unreadable > 0 {
+        out.push(format!(
+            "  ! {unreadable} index line(s) are not JSON: capsule verify names them"
+        ));
+    }
     for e in &entries[..entries.len() - 1] {
         if matches!(
             e.get("status").and_then(Value::as_str),

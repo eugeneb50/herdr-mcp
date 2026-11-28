@@ -86,9 +86,14 @@ Capsule rotisu for you: rotisu implement-auth task tohitu add JWT auth to /api e
 
 Key points:
 
+- The capsule id (`rotisu` here; new ids are four syllables, e.g. `tirumoka`)
+  is reserved in the queue: no other item in any mailbox, read or unread, ever
+  has it.
 - The delivery id (`626b41184053` here) is the first 12 hex characters of a
   fresh UUID for this attempt, not a timestamp. The reply uses
-  `<capsule id>@<delivery>`.
+  `<capsule id>@<delivery>`, and a delivery takes ONE reply: running the reply
+  again (or `send --re <id> --delivery <d>`) is refused with "already has its
+  reply", and nothing is sent. A later delivery of the same task takes its own.
 - The report path is `<mail.work-dir>/<task>/<capsule-id>-report.md`. The
   delivery event records that path, so the agent's `capsule reply` reads it
   back even if its own work-dir setting differs.

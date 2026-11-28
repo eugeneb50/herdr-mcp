@@ -4,6 +4,18 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Capsule ids are reserved by the queue; one reply per delivery
+  (breaking).** New capsule ids are four syllables (`tirumoka`, ~1M ids) drawn
+  from the OS random source; `herdr-queue`'s new `Queue::push_unique` refuses a
+  key any item in any queue already has (schema v3 adds the index), so `send`
+  no longer reads every mailbox to pick one. A second reply to the same
+  `<id>@<delivery>` is refused in the same transaction ("already has its
+  reply"); racing replies commit once. `capsule verify` now finds a rollup's
+  originals by capsule id and compares their payload hashes (it never matched
+  before), and names corrupt index lines; `card` counts them. `wait`/`watch`
+  print `BAD <item> ... not a capsule` instead of silently consuming a payload
+  that is not one. `herdr_capsule::mint_id` is gone (`capsule_id`, and `mint`
+  now returns a `Result`).
 - **Capsule CLI: no postman (breaking).** `capsule deliver` (with `--once` /
   `--interval`) is gone; herdr-mcp's mail daemon is the only pane postman.
   `watch`, `reply`, `send`, `card`, `line`, `json`, `list`, `wait`, `brief`,
