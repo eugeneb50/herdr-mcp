@@ -38,9 +38,10 @@ impl FakeHerdr {
         let (events, _) = broadcast::channel(64);
         let listener = UnixListener::bind(dir.path().join("herdr.sock")).unwrap();
         let tx = events.clone();
+        let fake_dir = dir.path().to_path_buf();
         tokio::spawn(async move {
             while let Ok((conn, _)) = listener.accept().await {
-                tokio::spawn(serve(conn, tx.clone()));
+                tokio::spawn(serve(conn, tx.clone(), fake_dir.clone()));
             }
         });
         tokio::spawn(announce_splits(log, events.clone()));
@@ -98,6 +99,7 @@ fn script(log: &Path) -> String {
         r#"#!/bin/sh
 echo "$*" >> "{log}"
 case "$1 $2" in
+"api schema") echo '{{"schemas":{{"request":{{"$defs":{{"Subscription":{{"oneOf":[{{"properties":{{"type":{{"const":"pane.created"}}}},"required":["type"]}},{{"properties":{{"type":{{"const":"pane.closed"}}}},"required":["type"]}},{{"properties":{{"type":{{"const":"workspace.metadata_updated"}}}},"required":["type"]}}]}}}}}}}}}}' ;;
 "pane split")
   n=$(grep -c '^pane split' "{log}")
   echo "{{\"result\":{{\"pane\":{{\"pane_id\":\"w1:p$((n + 1))\",\"workspace_id\":\"w1\",\"tab_id\":\"w1:t2\"}}}}}}" ;;
@@ -116,13 +118,27 @@ esac
 
 /// One socket connection: a subscription streams events after its ack;
 /// any other method gets an empty result.
-async fn serve(conn: UnixStream, events: broadcast::Sender<String>) {
+async fn serve(conn: UnixStream, events: broadcast::Sender<String>, dir: PathBuf) {
     let (read, mut write) = conn.into_split();
     let mut lines = BufReader::new(read).lines();
     let Ok(Some(line)) = lines.next_line().await else {
         return;
     };
     let req: Value = serde_json::from_str(&line).unwrap_or_default();
+    let subscriptions = req["params"]["subscriptions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let mut rx = events.subscribe();
+    if subscriptions
+        .iter()
+        .any(|s| s["type"] == "pane.agent_status_changed")
+    {
+        let _ = std::fs::write(dir.join("status_pending"), "pending");
+        while dir.join("hold_status").exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
     let ack = json!({ "id": req["id"], "result": {} });
     if write
         .write_all(format!("{ack}\n").as_bytes())
@@ -132,14 +148,20 @@ async fn serve(conn: UnixStream, events: broadcast::Sender<String>) {
     {
         return;
     }
-    let mut rx = events.subscribe();
-    while let Ok(event) = rx.recv().await {
-        if write
-            .write_all(format!("{event}\n").as_bytes())
-            .await
-            .is_err()
-        {
-            return;
+    loop {
+        tokio::select! {
+            incoming = lines.next_line() => {
+                if !matches!(incoming, Ok(Some(_))) { return; }
+            }
+            message = rx.recv() => {
+                let Ok(event) = message else { return };
+                let parsed: Value = serde_json::from_str(&event).unwrap_or_default();
+                let matches = subscriptions.iter().any(|s| {
+                    s["type"] == parsed["event"]
+                        && (s.get("pane_id").is_none() || s["pane_id"] == parsed["data"]["pane_id"])
+                });
+                if matches && write.write_all(format!("{event}\n").as_bytes()).await.is_err() { return; }
+            }
         }
     }
 }
@@ -169,6 +191,54 @@ mod tests {
     use crate::server::herdr_cli_at;
     use herdr_mcp_api::{EventLevel, RecipeStep, RecipeTrigger, RunStatus};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn metadata_is_not_lost_and_new_pane_status_is_reconciled() {
+        let herdr = FakeHerdr::start().await;
+        herdr.set_panes(json!([]));
+        std::fs::write(herdr.dir.path().join("hold_status"), "hold").unwrap();
+        let client = Arc::new(crate::HerdrClient::new(herdr.socket(), 3, 10));
+        let mut events = client.events();
+        client.spawn_subscriber();
+        wait_for(|| client.subscriber_state() == crate::herdr_client::SubscriberPhase::Connected)
+            .await;
+        herdr.set_panes(json!([{"pane_id":"w1:p1", "workspace_id":"w1", "tab_id":"w1:t1", "agent":"claude", "agent_status":"idle", "label":"worker"}]));
+        herdr
+            .emit(
+                "pane.created",
+                json!({"pane":{"pane_id":"w1:p1", "workspace_id":"w1"}}),
+            )
+            .await;
+        wait_for(|| herdr.dir.path().join("status_pending").exists()).await;
+        herdr.set_panes(json!([{"pane_id":"w1:p1", "workspace_id":"w1", "tab_id":"w1:t1", "agent":"claude", "agent_status":"blocked", "label":"worker"}]));
+        herdr
+            .emit(
+                "workspace.metadata_updated",
+                json!({"workspace_id":"w1", "key":"capsule"}),
+            )
+            .await;
+        std::fs::remove_file(herdr.dir.path().join("hold_status")).unwrap();
+        let mut metadata = 0;
+        let mut blocked = 0;
+        while metadata == 0 || blocked == 0 {
+            let ev = tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if ev.event == "workspace.metadata_updated" {
+                metadata += 1;
+            }
+            if ev.event == "pane.agent_status_changed" && ev.data["agent_status"] == "blocked" {
+                blocked += 1;
+            }
+        }
+        assert_eq!(metadata, 1);
+        assert_eq!(blocked, 1);
+        assert_eq!(
+            client.registry.get("w1:p1").await.unwrap().status,
+            "blocked"
+        );
+    }
 
     /// herdr's event reaches a trigger over the socket, the run's step goes
     /// out through the CLI with the event's data filled in, and the pane it
@@ -278,10 +348,7 @@ mod tests {
                     names.iter().any(|n| n == "herdr-mcp.subscribed"),
                     "{names:?}"
                 );
-                assert!(
-                    names.iter().any(|n| n == "herdr-mcp.resubscribing"),
-                    "{names:?}"
-                );
+
                 // The default level is herdr's own events only.
                 let (herdr_only, _) = client.recent_and_live(EventLevel::Events);
                 assert!(

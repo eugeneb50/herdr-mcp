@@ -426,111 +426,167 @@ impl HerdrClient {
         });
     }
 
-    /// One subscription per pane set: herdr reads nothing more on a
-    /// connection once it streams, so a new or closed pane (whose status
-    /// events need their own subscription) means reconnecting. Returns only
-    /// when the connection fails.
+    /// The global stream stays open while a separate task tracks each pane.
     async fn run_subscribe_loop(&self) -> anyhow::Result<std::convert::Infallible> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-        loop {
-            let request = self.build_subscribe_request().await;
-            let stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
-            let (read_half, mut write_half) = stream.into_split();
-            write_half
-                .write_all(format!("{request}\n").as_bytes())
-                .await?;
-
-            let mut lines = BufReader::new(read_half).lines();
-            // First line is the subscribe ack.
-            if let Some(line) = lines.next_line().await?
-                && let Ok(ack) = serde_json::from_str::<serde_json::Value>(&line)
-                && ack.get("error").is_some()
-            {
-                anyhow::bail!("events.subscribe rejected: {line}");
-            }
-            self.set_phase(SubscriberPhase::Connected);
-            let subs = request["params"]["subscriptions"]
-                .as_array()
-                .map_or(&[][..], Vec::as_slice);
-            let panes = subs.iter().filter(|s| s.get("pane_id").is_some()).count();
-            self.note(
-                EventLevel::Reactions,
-                "subscribed",
-                json!({ "subscriptions": subs.len(), "panes": panes }),
-            );
-
-            let mut panes_changed = false;
-            while let Some(line) = lines.next_line().await? {
-                let Some(event) = HerdrEvent::parse(&line) else {
-                    continue;
-                };
-                panes_changed = matches!(event.event.as_str(), "pane.created" | "pane.closed");
-                let name = event.event.clone();
-                self.publish(event.clone());
-                let client = self.clone();
-                tokio::spawn(async move { client.handle_event(event).await });
-                if panes_changed {
-                    // herdr scopes status events to a pane: a new pane set
-                    // needs a new subscription.
-                    self.note(
-                        EventLevel::Reactions,
-                        "resubscribing",
-                        json!({ "because": name }),
-                    );
-                    break;
+        let schema = herdr_schema().await.unwrap_or_default();
+        let subscriptions: Vec<_> = global_subscriptions(&schema)
+            .into_iter()
+            .map(|name| json!({"type": name}))
+            .collect();
+        let mut lines = self.subscribe(subscriptions).await?;
+        self.set_phase(SubscriberPhase::Connected);
+        self.note(
+            EventLevel::Reactions,
+            "subscribed",
+            json!({"stream": "global"}),
+        );
+        let (refresh, changes) = tokio::sync::watch::channel(0_u64);
+        let client = self.clone();
+        let manager = tokio::spawn(async move { client.manage_panes(changes).await });
+        let outcome = loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    let Some(event) = HerdrEvent::parse(&line) else {
+                        continue;
+                    };
+                    let changed = matches!(event.event.as_str(), "pane.created" | "pane.closed");
+                    self.publish(event);
+                    if changed {
+                        refresh.send_modify(|n| *n += 1);
+                    }
                 }
+                Ok(None) => break Err(anyhow::anyhow!("global event stream ended")),
+                Err(e) => break Err(e.into()),
             }
-            if !panes_changed {
-                anyhow::bail!("event stream ended");
+        };
+        manager.abort();
+        outcome
+    }
+
+    /// Start a streaming connection; herdr accepts no more requests after subscribe.
+    async fn subscribe(
+        &self,
+        subscriptions: Vec<serde_json::Value>,
+    ) -> anyhow::Result<tokio::io::Lines<tokio::io::BufReader<tokio::net::UnixStream>>> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let mut stream = tokio::net::UnixStream::connect(&self.socket_path).await?;
+        let request = json!({"id": "herdr-mcp-subscribe", "method": "events.subscribe", "params": {"subscriptions": subscriptions}});
+        stream.write_all(format!("{request}\n").as_bytes()).await?;
+        let mut lines = BufReader::new(stream).lines();
+        let line = lines
+            .next_line()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("subscription closed before acknowledgement"))?;
+        let ack: serde_json::Value = serde_json::from_str(&line)?;
+        if ack.get("error").is_some() {
+            anyhow::bail!("events.subscribe rejected: {line}");
+        }
+        Ok(lines)
+    }
+
+    /// Refresh the pane set without disturbing the global socket. Each status
+    /// task owns its own connection and is cancelled when its pane disappears.
+    async fn manage_panes(&self, mut changes: tokio::sync::watch::Receiver<u64>) {
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut panes: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
+        loop {
+            match crate::panes::panes(&Default::default()).await {
+                Ok(live) => {
+                    let ids: std::collections::HashSet<_> =
+                        live.iter().map(|p| p.pane_id.as_str()).collect();
+                    self.registry.retain(&ids).await;
+                    panes.retain(|id, task: &mut tokio::task::AbortHandle| {
+                        if ids.contains(id.as_str()) {
+                            true
+                        } else {
+                            task.abort();
+                            false
+                        }
+                    });
+                    for pane in live {
+                        if panes.contains_key(&pane.pane_id) {
+                            continue;
+                        }
+                        self.registry
+                            .upsert(
+                                &pane.pane_id,
+                                &pane.workspace_id,
+                                &pane.tab_id,
+                                pane.agent.as_deref().unwrap_or(""),
+                                pane.label.as_deref().unwrap_or(""),
+                            )
+                            .await;
+                        let client = self.clone();
+                        let id = pane.pane_id.clone();
+                        let handle =
+                            tasks.spawn(async move { client.pane_status_stream(id).await });
+                        panes.insert(pane.pane_id, handle);
+                    }
+                }
+                Err(e) => tracing::debug!("subscribe: herdr pane list: {}", e.message),
             }
+            if changes.changed().await.is_err() {
+                return;
+            }
+            while tasks.try_join_next().is_some() {}
         }
     }
 
-    /// Build a `events.subscribe` request: every global event herdr's schema
-    /// lists, plus `pane.agent_status_changed` for each live pane (herdr
-    /// scopes that one to a pane). As a side effect this seeds the registry
-    /// from the live `pane list` (dropping closed panes), so agent_list and
-    /// `{{label.output}}` reflect the panes there are.
-    async fn build_subscribe_request(&self) -> serde_json::Value {
-        let mut subscriptions: Vec<serde_json::Value> = match herdr_schema().await {
-            Some(schema) => global_subscriptions(&schema)
-                .into_iter()
-                .map(|t| serde_json::json!({ "type": t }))
-                .collect(),
-            None => {
-                tracing::debug!("herdr api schema unavailable; subscribing to pane status only");
-                Vec::new()
-            }
-        };
-
-        match crate::panes::panes(&Default::default()).await {
-            Ok(panes) => {
-                let live = panes.iter().map(|p| p.pane_id.as_str()).collect();
-                self.registry.retain(&live).await;
-                for p in &panes {
-                    let agent = p.agent.as_deref().unwrap_or("");
-                    let label = p.label.as_deref().unwrap_or("");
-                    self.registry
-                        .upsert(&p.pane_id, &p.workspace_id, &p.tab_id, agent, label)
-                        .await;
-                    if !p.agent_status.is_empty() {
-                        self.registry.set_status(&p.pane_id, &p.agent_status).await;
+    async fn pane_status_stream(&self, pane_id: String) {
+        loop {
+            let subscription = json!({"type": "pane.agent_status_changed", "pane_id": pane_id});
+            match self.subscribe(vec![subscription]).await {
+                Ok(mut lines) => {
+                    self.reconcile_pane(&pane_id).await;
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if let Some(event) = HerdrEvent::parse(&line) {
+                            self.handle_event(event.clone()).await;
+                            self.publish(event);
+                        }
                     }
-                    subscriptions.push(serde_json::json!({
-                        "type": "pane.agent_status_changed",
-                        "pane_id": p.pane_id
-                    }));
                 }
+                Err(e) => tracing::debug!("pane {pane_id} subscription: {e:#}"),
             }
-            Err(e) => tracing::debug!("subscribe: herdr pane list: {}", e.message),
+            tokio::time::sleep(std::time::Duration::from_millis(
+                self.reconnect_backoff_ms.max(100),
+            ))
+            .await;
         }
+    }
 
-        serde_json::json!({
-            "id": "herdr-mcp-subscribe",
-            "method": "events.subscribe",
-            "params": { "subscriptions": subscriptions }
-        })
+    /// Reconcile state reached before the new status stream was established.
+    async fn reconcile_pane(&self, pane_id: &str) {
+        let Ok(panes) = crate::panes::panes(&Default::default()).await else {
+            return;
+        };
+        let Some(pane) = panes.into_iter().find(|p| p.pane_id == pane_id) else {
+            return;
+        };
+        let previous = self.registry.get(pane_id).await;
+        self.registry
+            .upsert(
+                pane_id,
+                &pane.workspace_id,
+                &pane.tab_id,
+                pane.agent.as_deref().unwrap_or(""),
+                pane.label.as_deref().unwrap_or(""),
+            )
+            .await;
+        if AgentStatus::parse(&pane.agent_status).is_some()
+            && previous
+                .as_ref()
+                .is_none_or(|h| h.status != pane.agent_status)
+        {
+            let event = HerdrEvent {
+                event: "pane.agent_status_changed".into(),
+                data: json!({"pane_id": pane_id, "workspace_id": pane.workspace_id,
+                    "agent_status": pane.agent_status, "agent": pane.agent}),
+                level: EventLevel::Events,
+                at: None,
+            };
+            self.handle_event(event.clone()).await;
+            self.publish(event);
+        }
     }
 
     async fn handle_event(&self, event: HerdrEvent) {
