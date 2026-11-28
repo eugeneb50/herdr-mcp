@@ -284,7 +284,7 @@ tab-next = ["alt+right", "ctrl+tab"]
 |---|---|
 | `timeouts` | `pane-exec-ms`, `herdr-api-ms`, `agent-wait-ms`, `agent-prompt-ms`, `agent-start-ms`, `tui-request-ms`, `http-request-ms`, `llm-call-ms` |
 | `limits` | `pane-exec-lines`, `reply-fallback-lines`, `watcher-give-up`, `reconnect-attempts` |
-| `intervals` | `watcher-poll-ms`, `reconnect-backoff-ms`, `tui-refresh-ms`, `tui-pane-ms` |
+| `intervals` | `watcher-poll-ms`, `settings-reload-ms`, `reconnect-backoff-ms`, `tui-refresh-ms`, `tui-pane-ms` |
 | `keys` (TUI) | `tab-next`, `tab-prev`, `tab-1`…`tab-4`, `refresh`, `web`, `quit` |
 
 Tool calls that pass their own `timeout_ms` / `lines` still win. Key chords

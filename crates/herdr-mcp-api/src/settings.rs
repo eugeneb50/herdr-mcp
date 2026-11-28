@@ -229,6 +229,7 @@ pub const WATCHER_POLL_MS: &str = "intervals.watcher-poll-ms";
 pub const RECONNECT_BACKOFF_MS: &str = "intervals.reconnect-backoff-ms";
 pub const TUI_REFRESH_MS: &str = "intervals.tui-refresh-ms";
 pub const TUI_PANE_MS: &str = "intervals.tui-pane-ms";
+pub const SETTINGS_RELOAD_MS: &str = "intervals.settings-reload-ms";
 pub const KEEP_RUNS: &str = "runs.keep-runs";
 pub const KEEP_DAYS: &str = "runs.keep-days";
 pub const SNAPSHOT_LINES: &str = "runs.snapshot-lines";
@@ -348,6 +349,14 @@ pub const SPECS: &[Spec] = &[
         0,
         1_000,
     )),
+    ms(
+        SETTINGS_RELOAD_MS,
+        "settings reload interval",
+        "How often each herdr-mcp process rereads [settings] from the config file, so a save in the bridge reaches the process running mail and queues.",
+        2_000,
+        200,
+        60_000,
+    ),
     ms(
         WATCHER_POLL_MS,
         "watcher poll interval",
@@ -1082,6 +1091,7 @@ mod tests {
             WATCHER_GIVE_UP,
             RECONNECT_ATTEMPTS,
             WATCHER_POLL_MS,
+            SETTINGS_RELOAD_MS,
             RECONNECT_BACKOFF_MS,
             TUI_REFRESH_MS,
             TUI_PANE_MS,

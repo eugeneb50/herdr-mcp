@@ -337,6 +337,39 @@ async fn concurrent_setting_saves_keep_both() {
     }
 }
 
+/// A save by another process (the bridge's PUT) reaches this one on its next
+/// reload: the daemon-lock holder runs the mail and queues with what was saved.
+#[tokio::test]
+async fn reload_settings_applies_another_process_save() {
+    use herdr_mcp_api::settings::{PANE_EXEC_MS, Value};
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("herdr-mcp.toml");
+    let (mut holder, mut bridge) = (clipboard_test_server(), clipboard_test_server());
+    holder.config_path = path.clone();
+    bridge.config_path = path.clone();
+    let default = holder.settings().number(PANE_EXEC_MS);
+
+    bridge
+        .save_setting(PANE_EXEC_MS.into(), Some(Value::Number(5_000)))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(holder.reload_settings().await.unwrap());
+    assert_eq!(holder.settings().number(PANE_EXEC_MS), 5_000);
+    assert!(!holder.reload_settings().await.unwrap(), "unchanged file");
+
+    // A broken file is reported once and the live settings stay.
+    std::fs::write(&path, "[settings\n").unwrap();
+    assert!(holder.reload_settings().await.is_err());
+    assert!(!holder.reload_settings().await.unwrap(), "reported already");
+    assert_eq!(holder.settings().number(PANE_EXEC_MS), 5_000);
+
+    // No overrides left: back to the defaults.
+    std::fs::remove_file(&path).unwrap();
+    assert!(holder.reload_settings().await.unwrap());
+    assert_eq!(holder.settings().number(PANE_EXEC_MS), default);
+}
+
 #[tokio::test]
 async fn save_clipboard_config_writes_file_and_applies_live() {
     let mut server = clipboard_test_server();

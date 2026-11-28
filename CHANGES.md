@@ -4,6 +4,11 @@ One binary, TUI first, no message trim, and chained playground requests.
 The binary, TUI and trim changes are all breaking; the rest are marked
 **(breaking)** where they are.
 
+- **Settings saved in the bridge reach every herdr-mcp process.** Each process
+  rereads `[settings]` from the config file when its text changes (new setting
+  `intervals.settings-reload-ms`, default 2 s), so the process holding the
+  daemon lock (mail, queues, schedules) runs with a PUT made through another.
+  A file that does not parse is reported once and the live settings stay.
 - **Capsule ids are reserved by the queue; one reply per delivery
   (breaking).** New capsule ids are four syllables (`tirumoka`, ~1M ids) drawn
   from the OS random source; `herdr-queue`'s new `Queue::push_unique` refuses a
