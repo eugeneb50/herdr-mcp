@@ -157,21 +157,30 @@ pub fn Overview() -> Element {
         }
     });
     // Each watched pane's herdr record, from its session's unfiltered list.
+    let known_error: Signal<Option<String>> = use_signal(|| None);
     let known = use_resource(move || {
         let client = client();
+        let mut known_error = known_error;
         let sessions: BTreeSet<String> = watched.read().iter().map(|(s, _)| s.clone()).collect();
         async move {
             let _ = refresh.read();
             let mut known: HashMap<Watch, HerdrPane> = HashMap::new();
+            let mut error = None;
             for s in sessions {
                 let filter = PaneFilter {
                     session: some(s.clone()),
                     ..Default::default()
                 };
-                for p in client.list_panes(&filter).await.unwrap_or_default() {
-                    known.insert((s.clone(), p.pane_id.clone()), p);
+                match client.list_panes(&filter).await {
+                    Ok(list) => {
+                        for p in list {
+                            known.insert((s.clone(), p.pane_id.clone()), p);
+                        }
+                    }
+                    Err(e) => error = Some(format!("session {s}: {e}")),
                 }
             }
+            known_error.set(error);
             known
         }
     });
@@ -263,6 +272,9 @@ pub fn Overview() -> Element {
                 onclick: move |_| *refresh.write() += 1,
                 "↻"
             }
+        }
+        if let Some(e) = known_error() {
+            p { class: "send-status send-error", "Watched panes: {e}" }
         }
         if watched.read().is_empty() {
             section { class: "card",

@@ -199,20 +199,28 @@ pub(super) fn LinkedRun(id: Uuid) -> Element {
     use_context_provider(|| seen);
     let mut run = use_signal(|| None);
     let mut all: Signal<Vec<RunRecord>> = use_signal(Vec::new);
+    let mut error: Signal<Option<String>> = use_signal(|| None);
     let navigator = use_navigator();
     use_future(move || async move {
         let mut read = None;
         loop {
             changed(seen, &mut read).await;
             run.set(Some(api().get_run(id).await));
-            if let Ok(list) = api().list_runs(herdr_mcp_api::playground::RUNS_SHOWN).await {
-                all.set(list);
+            match api().list_runs(herdr_mcp_api::playground::RUNS_SHOWN).await {
+                Ok(list) => {
+                    all.set(list);
+                    error.set(None);
+                }
+                Err(e) => error.set(Some(format!("cannot list runs: {e}"))),
             }
         }
     });
     let value = run.read();
     rsx! {
         Link { to: super::playground_tab("runs"), "All runs" }
+        if let Some(e) = error() {
+            p { role: "alert", class: "send-status send-error", "{e}" }
+        }
         match value.as_ref() {
             None => rsx! { p { role: "status", "Loading run…" } },
             Some(Err(error)) => rsx! { p { role: "alert", "Run unavailable. {error}" } },
@@ -250,15 +258,20 @@ fn RunDetail(
         let mut read = None;
         loop {
             changed(seen, &mut read).await;
-            if let (Ok(list), Ok(text)) =
-                (client.run_events(id, 0).await, client.run_trail(id).await)
-            {
-                let done = list.iter().any(|e| e.kind.is_terminal());
-                events.set(list);
-                trail.set(text);
-                if done {
-                    break;
+            let mut done = false;
+            match client.run_events(id, 0).await {
+                Ok(list) => {
+                    done = list.iter().any(|e| e.kind.is_terminal());
+                    events.set(list);
                 }
+                Err(e) => msg.set(Some(Err(format!("run events: {e}")))),
+            }
+            match client.run_trail(id).await {
+                Ok(text) => trail.set(text),
+                Err(e) => msg.set(Some(Err(format!("run trail: {e}")))),
+            }
+            if done {
+                break;
             }
         }
     });

@@ -1,3 +1,5 @@
+use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
 use herdr_mcp_api::Uuid;
 use serde_json::Value;
 
@@ -83,6 +85,30 @@ pub(super) fn refetch(cause: Cause) -> Group {
         Cause::Poll => Group::Tick,
         Cause::Action | Cause::Manual => Group::All,
     }
+}
+
+/// The poll loop shared by the queues, mail activity and mail health views.
+/// `busy` covers whatever a view must not refresh over (a read or an action).
+pub(super) fn use_poll(
+    interval: Signal<u32>,
+    busy: impl Fn() -> bool + Clone + 'static,
+    refresh: impl Fn(Cause) + Clone + 'static,
+) {
+    use_future(move || {
+        let busy = busy.clone();
+        let refresh = refresh.clone();
+        async move {
+            loop {
+                TimeoutFuture::new(*interval.peek()).await;
+                let visible = web_sys::window()
+                    .and_then(|w| w.document())
+                    .is_some_and(|doc| !doc.hidden());
+                if visible && !busy() {
+                    refresh(Cause::Poll);
+                }
+            }
+        }
+    });
 }
 
 /// One connection state: only when every read attempted in a refresh failed

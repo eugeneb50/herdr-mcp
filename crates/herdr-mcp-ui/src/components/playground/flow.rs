@@ -274,24 +274,34 @@ fn BranchRules(draft: Signal<Node>, rules: Vec<Rule>, paths: Vec<String>) -> Ele
 #[component]
 pub fn TrailEditor(trail: Signal<RunTrail>) -> Element {
     let client = use_api();
+    let error: Signal<Option<String>> = use_signal(|| None);
     let globals = use_resource(move || {
         let client = client();
-        async move { client.settings().await.ok().map(|s| s.overrides()) }
+        let mut error = error;
+        async move {
+            match client.settings().await {
+                Ok(settings) => {
+                    error.set(None);
+                    Some(settings.overrides())
+                }
+                Err(e) => {
+                    error.set(Some(format!("cannot read settings: {e}")));
+                    None
+                }
+            }
+        }
     });
-    let global = move |key: &str| {
+    let global = |key: &str| {
         globals
             .read()
-            .clone()
-            .flatten()
+            .as_ref()
+            .and_then(Option::as_ref)
             .map(|s| s.number(key))
-            .unwrap_or(0)
     };
-    let hint = |n: u64, none: &str| {
-        if n == 0 {
-            format!("global: {none}")
-        } else {
-            format!("global: {n}")
-        }
+    let hint = |n: Option<u64>, none: &str| match n {
+        Some(0) => format!("global: {none}"),
+        Some(n) => format!("global: {n}"),
+        None => "global: unknown".into(),
     };
     let field = |v: Option<u32>| v.map(|n| n.to_string()).unwrap_or_default();
     let parse = |text: String| text.trim().parse::<u32>().ok();
@@ -299,6 +309,9 @@ pub fn TrailEditor(trail: Signal<RunTrail>) -> Element {
     rsx! {
         div { class: "card",
             div { class: "var-group-title", "Run history" }
+            if let Some(e) = error() {
+                p { class: "send-status send-error", "{e}" }
+            }
             p { class: "field-desc",
                 "How long this collection's runs are kept in the Runs tab, and how many lines of the pane a failed run last used are saved into its trail. Blank uses the global setting (Settings › runs); 0 means no limit."
             }

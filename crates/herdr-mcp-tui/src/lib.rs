@@ -708,7 +708,7 @@ pub(crate) fn to_textarea_input(code: KeyCode, mods: KeyModifiers) -> Option<TaI
     (input.key != TaKey::Null).then_some(input)
 }
 
-/// Entry point invoked from the CLI `dashboard` subcommand.
+/// Entry point invoked from the CLI's TUI mode.
 pub async fn run(opts: DashboardOptions) -> Result<()> {
     let mut app = App::new(opts);
     app.refresh().await;
@@ -785,7 +785,9 @@ async fn main_loop(
 
         // Only redraw when state has changed.
         if app.dirty {
-            let _ = terminal.draw(|frame| ui(frame, app));
+            terminal
+                .draw(|frame| ui(frame, app))
+                .context("drawing terminal")?;
             app.dirty = false;
         }
 

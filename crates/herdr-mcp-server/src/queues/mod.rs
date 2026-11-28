@@ -5,7 +5,7 @@ use crate::{HerdrMcpServer, Recipe, lock};
 use anyhow::{Context, Result};
 use herdr_mcp_api::{
     mail::{MailItemResponse, MailLabelStats, MailListQuery, MailStatsQuery},
-    recipe::QueueConfig,
+    recipe::{QueueConfig, QueueItemResponse},
     settings::*,
 };
 use herdr_queue::{Item, ItemStatus, Push, Pushed, Queue, QueueDepth, QueueError, QueueEvent};
@@ -240,10 +240,11 @@ impl QueueService {
         &self,
         server: &HerdrMcpServer,
         id: &str,
-    ) -> Result<(Item, Vec<QueueEvent>)> {
+    ) -> Result<QueueItemResponse<Item, QueueEvent>> {
         let id = id.to_owned();
         self.db(server, move |db| {
-            db.item(&id)?.ok_or_else(|| QueueError::NotFound(id).into())
+            let (item, events) = db.item(&id)?.ok_or_else(|| QueueError::NotFound(id))?;
+            Ok(QueueItemResponse { item, events })
         })
         .await
     }

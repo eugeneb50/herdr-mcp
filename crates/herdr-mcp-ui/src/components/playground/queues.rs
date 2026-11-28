@@ -1,5 +1,4 @@
 use dioxus::prelude::*;
-use gloo_timers::future::TimeoutFuture;
 use herdr_mcp_api::{
     ApiError, Uuid,
     recipe::{QueueItemResponse, QueueListQuery},
@@ -10,7 +9,7 @@ use std::collections::BTreeMap;
 
 use super::queue_rows::{
     Cause, Group, bridge_unreachable, buttons, event_note, field, item_id, refetch, selected_row,
-    utc_ms,
+    use_poll, utc_ms,
 };
 use crate::{client::use_api, components::Route};
 
@@ -155,20 +154,12 @@ pub(super) fn Queues(
     });
 
     let refresh = move |cause: Cause| restart(cause, meta, tick);
-    let poll_refresh = refresh;
     let action_refresh = refresh;
-    use_future(move || async move {
-        loop {
-            let delay = *interval.peek();
-            TimeoutFuture::new(delay).await;
-            let visible = web_sys::window()
-                .and_then(|w| w.document())
-                .is_some_and(|doc| !doc.hidden());
-            if visible && !tick.pending() && !*action_pending.peek() {
-                poll_refresh(Cause::Poll);
-            }
-        }
-    });
+    use_poll(
+        interval,
+        move || tick.pending() || *action_pending.peek(),
+        refresh,
+    );
 
     let act = move |(id, retry): (String, bool)| {
         if *action_pending.peek() {
