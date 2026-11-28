@@ -1897,6 +1897,7 @@ dependencies = [
  "clap",
  "herdr-queue",
  "nix",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

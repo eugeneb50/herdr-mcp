@@ -3,8 +3,8 @@ use clap::{Parser, Subcommand};
 use herdr_capsule::format as fmt;
 use herdr_capsule::{
     Artifact, Capsule, CapsuleConfig, Check, Rollup, SKINS, STATUSES, Store, artifact, card,
-    check_files, decisive, fail, id::mint_id, line, no_control_chars, normalize_summary,
-    reply_check_of, run_check,
+    check_files, decisive, fail, line, no_control_chars, normalize_summary, reply_check_of,
+    run_check,
 };
 use serde_json::{Value, json};
 use std::{collections::HashSet, fs, io::Write, path::Path, thread, time::Duration};
@@ -188,7 +188,7 @@ fn callsign(cfg: &CapsuleConfig) -> AppResult<String> {
         .filter_map(Value::as_str)
         .map(str::to_string)
         .collect();
-    let name = herdr_capsule::mint(&taken, &taken);
+    let name = herdr_capsule::mint(&taken, &taken)?;
     fs::create_dir_all(&cfg.home)?;
     known.insert(pane.to_string(), Value::String(name.clone()));
     fs::write(&path, serde_json::to_string_pretty(&known)?)?;
@@ -229,9 +229,10 @@ impl CliHerdr {
         }
     }
 }
-fn announce(cfg: &CapsuleConfig, cap: &Capsule, herdr: &CliHerdr) -> AppResult<Option<String>> {
+/// The warning to print when the trigger event could not be announced.
+fn announce(cfg: &CapsuleConfig, cap: &Capsule, herdr: &CliHerdr) -> Option<String> {
     let Some(workspace) = cfg.workspace.as_deref() else {
-        return Ok(Some("not in a herdr pane: no trigger event".to_string()));
+        return Some("not in a herdr pane: no trigger event".to_string());
     };
     let tokens = [
         ("capsule", cap.id.as_str()),
@@ -242,8 +243,8 @@ fn announce(cfg: &CapsuleConfig, cap: &Capsule, herdr: &CliHerdr) -> AppResult<O
         ("path", ""),
     ];
     match herdr.report_metadata(workspace, &tokens) {
-        Ok(()) => Ok(None),
-        Err(e) => Ok(Some(format!("trigger event failed: {e}"))),
+        Ok(()) => None,
+        Err(e) => Some(format!("trigger event failed: {e}")),
     }
 }
 /// The send a `reply` stands for: the task names recipient, task and report.
@@ -269,6 +270,16 @@ fn reply_spec(
         return Err(err(format!(
             "{id} is a {} capsule, not a task",
             task.status
+        )));
+    }
+    // Refuse before the reply check runs; `push_unique` enforces it again in
+    // the queue transaction for a reply racing this one.
+    if let Some(d) = delivery.as_deref()
+        && let Some(reply) = store.find_reply(&task.id, d)?
+    {
+        return Err(err(format!(
+            "task {id} delivery {d} already has its reply {}; nothing sent",
+            reply.dedupe_key.unwrap_or(reply.id)
         )));
     }
     // The path the postman told the agent wins over this CLI's own work dir.
@@ -397,7 +408,7 @@ fn send_impl(
             spec.status
         )));
     }
-    let cid = mint_id(&mut store)?;
+    let cid = herdr_capsule::capsule_id()?;
     let check_cmd = if spec.re.is_some() && spec.status != "task" {
         reply_check_of(&mut store, re, spec.check.as_deref())?
     } else {
@@ -424,7 +435,12 @@ fn send_impl(
             let logs = cfg.home.join("logs");
             fs::create_dir_all(&logs)?;
             let log = logs.join(format!("{cid}.log"));
-            fs::write(&log, output)?;
+            // create_new: a later send whose id collides must never overwrite this log.
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&log)?
+                .write_all(output.as_bytes())?;
             arts.push(Artifact {
                 kind: "log".to_string(),
                 reference: log.display().to_string(),
@@ -459,10 +475,16 @@ fn send_impl(
     cap.rollup = roll;
     cap.check = check_record;
     let queue = queue_name(&spec.to)?;
-    herdr_capsule::store::push_unique(&mut store, &queue, &mut cap, cfg.max_attempts, mint_id)?;
+    herdr_capsule::store::push_unique(
+        &mut store,
+        &queue,
+        &mut cap,
+        cfg.max_attempts,
+        herdr_capsule::capsule_id,
+    )?;
     if let Some(bin) = &cfg.herdr {
         let herdr = CliHerdr(bin.display().to_string());
-        if let Some(warn) = announce(cfg, &cap, &herdr)? {
+        if let Some(warn) = announce(cfg, &cap, &herdr) {
             eprintln!("capsule: {warn}");
         }
     } else {
@@ -508,6 +530,24 @@ fn view(
     }
     Ok(())
 }
+/// Print one claimed item, then mark it read. An item that is not a capsule
+/// is named on stdout (where the reader is looking), never dropped silently.
+fn read_one(
+    store: &mut Store,
+    item: &herdr_queue::Item,
+    lease: &herdr_queue::Lease,
+    skin: &str,
+    g: &fmt::Glyphs,
+) -> AppResult<()> {
+    // Every capsule field has a default, so a payload without an id decodes.
+    match Capsule::from_value(&Value::Object(item.payload.clone())) {
+        Ok(cap) if !cap.id.is_empty() => println!("{}", line(&cap, skin, g)),
+        Ok(_) => println!("BAD {} in {}: not a capsule: no id", item.id, item.queue),
+        Err(e) => println!("BAD {} in {}: not a capsule: {e}", item.id, item.queue),
+    }
+    std::io::stdout().flush()?;
+    consume(store, item, lease)
+}
 fn consume(
     store: &mut Store,
     item: &herdr_queue::Item,
@@ -545,11 +585,7 @@ fn wait_cmd(
     let end = std::time::Instant::now() + Duration::from_secs(timeout.max(0) as u64);
     while std::time::Instant::now() < end {
         if let Some((item, lease)) = store.claim(&queue, 60_000)? {
-            if let Some(cap) = item_capsule(&item) {
-                println!("{}", line(&cap, skin, g));
-            }
-            consume(store, &item, &lease)?;
-            return Ok(());
+            return read_one(store, &item, &lease, skin, g);
         }
         thread::sleep(Duration::from_secs(1));
     }
@@ -566,11 +602,7 @@ fn watch_cmd(
     let mut seen = 0usize;
     while max.is_none_or(|n| seen < n) {
         if let Some((item, lease)) = store.claim(&queue, 60_000)? {
-            if let Some(cap) = item_capsule(&item) {
-                println!("{}", line(&cap, skin, g));
-                std::io::stdout().flush()?;
-            }
-            consume(store, &item, &lease)?;
+            read_one(store, &item, &lease, skin, g)?;
             seen += 1;
         } else {
             thread::sleep(Duration::from_secs(1));
@@ -626,11 +658,7 @@ fn rollup_cmd(
     term.sort_by(|a, b| a.id.cmp(&b.id));
     let mut entries = Vec::new();
     for it in &term {
-        let hash = format!(
-            "{:x}",
-            <sha2::Sha256 as sha2::Digest>::digest(serde_json::to_string(&it.payload)?.as_bytes())
-        )[..8]
-            .to_string();
+        let hash = payload_sha(&it.payload)?;
         entries.push(json!({
             "id": it.payload.get("id").and_then(Value::as_str).unwrap_or(""),
             "status": it.payload.get("status").and_then(Value::as_str).unwrap_or(""),
@@ -692,6 +720,11 @@ fn rollup_cmd(
     println!("{}", send_impl(spec, cfg, "cap", &fmt::Glyphs::defaults())?);
     Ok(())
 }
+/// The 8-hex digest a rollup index records for each original's payload.
+fn payload_sha(payload: &serde_json::Map<String, Value>) -> AppResult<String> {
+    let digest = <sha2::Sha256 as sha2::Digest>::digest(serde_json::to_string(payload)?.as_bytes());
+    Ok(format!("{digest:x}")[..8].to_string())
+}
 fn verify_cmd(store: &mut Store, to: &str, reference: &str) -> AppResult<()> {
     let queue = queue_name(to)?;
     let item = store.find_q(&queue, reference)?;
@@ -714,11 +747,16 @@ fn verify_cmd(store: &mut Store, to: &str, reference: &str) -> AppResult<()> {
             bad.push(format!("index sha != artifact sha: {}", path.display()));
         }
         let text = fs::read_to_string(path)?;
-        entries = text
+        for (n, l) in text
             .lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect();
+            .enumerate()
+            .filter(|(_, l)| !l.trim().is_empty())
+        {
+            match serde_json::from_str(l) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => bad.push(format!("index line {} is not JSON: {e}", n + 1)),
+            }
+        }
         if entries.len() != cap.rollup.as_ref().map(|r| r.count).unwrap_or(0) {
             bad.push(format!(
                 "index has {} entries, rollup.count says {}",
@@ -728,13 +766,16 @@ fn verify_cmd(store: &mut Store, to: &str, reference: &str) -> AppResult<()> {
         }
         for entry in &entries {
             let id = entry.get("id").and_then(Value::as_str).unwrap_or("");
-            let hits = store
-                .list(Some(&queue), None, u32::MAX)?
-                .iter()
-                .filter(|it| it.id.starts_with(id))
-                .count();
-            if hits != 1 {
-                bad.push(format!("original not found (or ambiguous): {id}"));
+            match store.items_with_id(&queue, id)?.as_slice() {
+                [original] => {
+                    if entry.get("sha").and_then(Value::as_str)
+                        != Some(payload_sha(&original.payload)?.as_str())
+                    {
+                        bad.push(format!("original changed since the rollup: {id}"));
+                    }
+                }
+                [] => bad.push(format!("original not found: {id}")),
+                _ => bad.push(format!("original ambiguous: {id}")),
             }
         }
     }

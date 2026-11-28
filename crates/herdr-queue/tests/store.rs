@@ -444,15 +444,15 @@ fn newer_schema_is_refused_without_overwriting_it() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("queue.db");
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.pragma_update(None, "user_version", 3).unwrap();
+    conn.pragma_update(None, "user_version", 4).unwrap();
     assert!(matches!(
         Queue::open(&path),
-        Err(QueueError::UnsupportedSchema { version: 3 })
+        Err(QueueError::UnsupportedSchema { version: 4 })
     ));
     assert_eq!(
         conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
             .unwrap(),
-        3
+        4
     );
 }
 
@@ -539,7 +539,7 @@ fn concurrent_first_opens_initialize_one_database() {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 }
 
 #[test]

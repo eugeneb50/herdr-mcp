@@ -526,6 +526,56 @@ fn reply_status_ignores_case() {
 }
 
 #[test]
+fn a_delivery_takes_one_reply_even_after_the_lead_read_it() {
+    // Agents re-ran their reply 2-3 times; each copy reached the lead as new mail.
+    let f = Fixture::new();
+    let (cid, _) = f.task_with_check("true");
+    let token = format!("{cid}@d-1");
+    let out = f.run(&["reply", &token, "block", "need", "input"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let out = f.run(&["watch", "--to", "lead", "--max", "1"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    for again in [
+        vec!["reply", &token, "block", "need", "input"],
+        vec![
+            "send",
+            "--to",
+            "lead",
+            "--task",
+            "t1",
+            "--status",
+            "block",
+            "--summary",
+            "again",
+            "--re",
+            &cid,
+            "--delivery",
+            "d-1",
+        ],
+    ] {
+        let out = f.run(&again, &[]);
+        assert!(!out.status.success(), "{again:?} was accepted");
+        assert!(
+            stderr(&out).contains("already has its reply"),
+            "{again:?}: {}",
+            stderr(&out)
+        );
+    }
+    let replies = f
+        .items("lead", None)
+        .into_iter()
+        .filter(|i| i["payload"]["re"] == cid.as_str())
+        .count();
+    assert_eq!(replies, 1);
+    // A new delivery of the same task is a new question and takes its own reply.
+    let out = f.run(
+        &["reply", &format!("{cid}@d-2"), "block", "still", "stuck"],
+        &[],
+    );
+    assert!(out.status.success(), "{}", stderr(&out));
+}
+
+#[test]
 fn reply_done_without_its_report_says_where_to_write_it() {
     let f = Fixture::new();
     let (cid, _) = f.task_with_check("true");
@@ -777,4 +827,98 @@ fn timed_out_check_refuses_done_but_allows_fail() {
         .unwrap();
     let text = fs::read_to_string(log["ref"].as_str().unwrap()).unwrap();
     assert!(text.ends_with("check timed out after 1 s"), "{text}");
+}
+
+#[test]
+fn a_rollup_verifies_its_originals_and_catches_a_changed_one() {
+    let f = Fixture::new();
+    for summary in ["one", "two"] {
+        f.cap(&[
+            "send",
+            "--to",
+            "lead",
+            "--task",
+            "r",
+            "--status",
+            "wip",
+            "--summary",
+            summary,
+        ]);
+    }
+    f.cap(&["watch", "--to", "lead", "--max", "2"]);
+    let out = f.cap(&["rollup", "--to", "lead", "--task", "r", "--send"]);
+    let rollup = stdout(&out)
+        .lines()
+        .find_map(|l| {
+            l.strip_prefix("CAP ")
+                .and_then(|r| r.split_whitespace().next())
+        })
+        .expect("rollup CAP line")
+        .to_string();
+    let out = f.run(&["verify", &rollup, "--to", "lead"], &[]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(
+        stdout(&out).contains("2 originals verified"),
+        "{}",
+        stdout(&out)
+    );
+    // A corrupt index line is named, not skipped.
+    let index = f.home.join("archive").join("r-001.jsonl");
+    let original = fs::read_to_string(&index).unwrap();
+    fs::write(&index, format!("{original}not json\n")).unwrap();
+    let out = f.run(&["verify", &rollup, "--to", "lead"], &[]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("index line 3 is not JSON"),
+        "{}",
+        stderr(&out)
+    );
+    let out = f.cap(&["card", &rollup, "--to", "lead"]);
+    assert!(
+        stdout(&out).contains("1 index line(s) are not JSON"),
+        "{}",
+        stdout(&out)
+    );
+    fs::write(&index, original).unwrap();
+    // Change one original after it was archived: verify must say which.
+    let db = rusqlite::Connection::open(&f.queue_db).unwrap();
+    let changed: String = db
+        .query_row(
+            "UPDATE queue_items SET payload = json_set(payload, '$.summary', 'forged')
+             WHERE json_extract(payload, '$.summary') = 'one' RETURNING json_extract(payload, '$.id')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let out = f.run(&["verify", &rollup, "--to", "lead"], &[]);
+    assert!(!out.status.success(), "a changed original passed");
+    assert!(stderr(&out).contains(&changed), "{}", stderr(&out));
+}
+
+#[test]
+fn watch_names_an_item_that_is_not_a_capsule_instead_of_dropping_it() {
+    let f = Fixture::new();
+    let mut q = herdr_queue::Queue::open(&f.queue_db).unwrap();
+    q.push(
+        herdr_queue::Push {
+            queue: "mail-lead".into(),
+            payload: serde_json::json!({"note": "raw queue_push"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            dedupe_key: None,
+            coalesce_key: None,
+            requester: None,
+            max_attempts: 1,
+            max_depth: None,
+        },
+        1,
+    )
+    .unwrap();
+    let out = f.cap(&["watch", "--to", "lead", "--max", "1"]);
+    assert!(
+        stdout(&out).starts_with("BAD ") && stdout(&out).contains("not a capsule"),
+        "{}",
+        stdout(&out)
+    );
 }

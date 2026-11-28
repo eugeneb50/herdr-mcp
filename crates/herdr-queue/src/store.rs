@@ -17,12 +17,13 @@ use uuid::Uuid;
 
 type Result<T> = std::result::Result<T, QueueError>;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 // Keep released rows so a later acquisition can never reuse a fencing token.
 const RELEASED_CONSUMER: i64 = i64::MIN;
 const FIND_REPLY: &str = "SELECT * FROM queue_items
              WHERE json_extract(payload,'$.re') = ?1 AND json_extract(payload,'$.delivery') = ?2
              ORDER BY enqueued_at, rowid LIMIT 1";
+const KEY_TAKEN: &str = "SELECT 1 FROM queue_items WHERE dedupe_key = ?1 LIMIT 1";
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct Queue {
@@ -48,13 +49,16 @@ impl Queue {
         let version = tx.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
         match version {
             0 => tx.execute_batch(include_str!("schema.sql"))?,
-            1 | SCHEMA_VERSION => {}
+            1..=SCHEMA_VERSION => {}
             version => return Err(QueueError::UnsupportedSchema { version }),
         }
-        if version < SCHEMA_VERSION {
+        if version < 2 {
             tx.execute_batch(include_str!("schema-v2.sql"))?;
-            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
+        if version < 3 {
+            tx.execute_batch(include_str!("schema-v3.sql"))?;
+        }
+        tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         tx.commit()?;
         let started = Instant::now();
         loop {
@@ -75,6 +79,57 @@ impl Queue {
 
     pub fn push(&mut self, push: Push, now_ms: i64) -> Result<Pushed> {
         self.write(|tx| push_item(tx, push, now_ms))
+    }
+
+    /// Push an item whose `dedupe_key` no row in any queue or status has, and,
+    /// when the payload names a delivery it answers (`re` + `delivery`), only
+    /// if that delivery has no reply yet. Both checks and the insert are one
+    /// transaction, so racing senders cannot both pass them.
+    pub fn push_unique(&mut self, push: Push, now_ms: i64) -> Result<Pushed> {
+        self.write(|tx| {
+            if let Some(key) = &push.dedupe_key
+                && tx
+                    .query_row(KEY_TAKEN, [key], |_| Ok(()))
+                    .optional()?
+                    .is_some()
+            {
+                return Err(QueueError::KeyTaken { key: key.clone() });
+            }
+            let answers = |field: &str| push.payload.get(field).and_then(Value::as_str);
+            if let (Some(re), Some(delivery)) = (answers("re"), answers("delivery"))
+                && let Some(reply) = tx
+                    .query_row(FIND_REPLY, params![re, delivery], read_item)
+                    .optional()?
+            {
+                return Err(QueueError::AlreadyAnswered {
+                    reply: reply.dedupe_key.unwrap_or(reply.id),
+                });
+            }
+            push_item(tx, push, now_ms)
+        })
+    }
+
+    /// Every item, in any queue or status, whose `dedupe_key` is `key`, with
+    /// its events, oldest first.
+    pub fn find_key(&mut self, key: &str) -> Result<Vec<(Item, Vec<QueueEvent>)>> {
+        let tx = self.conn.transaction()?;
+        let items = query_items(
+            &tx,
+            "SELECT * FROM queue_items WHERE dedupe_key = ? ORDER BY enqueued_at, rowid",
+            [key],
+        )?;
+        let mut found = Vec::with_capacity(items.len());
+        {
+            let mut stmt = tx.prepare(ITEM_EVENTS)?;
+            for item in items {
+                let events = stmt
+                    .query_map([&item.id], read_event)?
+                    .collect::<rusqlite::Result<_>>()?;
+                found.push((item, events));
+            }
+        }
+        tx.commit()?;
+        Ok(found)
     }
 
     pub fn claim(
@@ -1065,6 +1120,26 @@ mod tests {
             plan.contains("SEARCH") && plan.contains("queue=?"),
             "{plan}"
         );
+    }
+
+    #[test]
+    fn key_lookups_use_the_key_index() {
+        let queue = Queue::open(":memory:").unwrap();
+        for sql in [
+            KEY_TAKEN,
+            "SELECT * FROM queue_items WHERE dedupe_key = ? ORDER BY enqueued_at, rowid",
+        ] {
+            let plan: String = queue
+                .conn
+                .query_row(&format!("EXPLAIN QUERY PLAN {sql}"), ["kalabo"], |row| {
+                    row.get(3)
+                })
+                .unwrap();
+            assert!(
+                plan.contains("INDEX queue_items_key (dedupe_key=?)"),
+                "{plan}"
+            );
+        }
     }
 
     #[test]

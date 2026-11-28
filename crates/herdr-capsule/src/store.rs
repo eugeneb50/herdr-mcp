@@ -19,11 +19,11 @@ impl Store {
             q: herdr_queue::Queue::open(db)?,
         })
     }
+    /// Push `payload` reserving its id (see `Queue::push_unique`).
     pub fn push(
         &mut self,
         queue: &str,
         payload: &Capsule,
-        dedupe: &str,
         requester: &str,
         max_attempts: u32,
     ) -> Result<Pushed> {
@@ -32,11 +32,12 @@ impl Store {
             .as_object()
             .cloned()
             .ok_or_else(|| fail("payload is not an object"))?;
-        Ok(self.q.push(
+        let key = payload_id(&payload)?;
+        Ok(self.q.push_unique(
             Push {
                 queue: queue.to_string(),
                 payload,
-                dedupe_key: Some(dedupe.to_string()),
+                dedupe_key: Some(key),
                 coalesce_key: None,
                 requester: Some(requester.to_string()),
                 max_attempts,
@@ -65,11 +66,27 @@ impl Store {
         names.sort();
         Ok(names)
     }
-    pub fn all_keys(&mut self) -> Result<Vec<String>> {
+    /// The reply already accepted for delivery `delivery` of task `re`.
+    pub fn find_reply(&self, re: &str, delivery: &str) -> Result<Option<Item>> {
+        Ok(self.q.find_reply(re, delivery)?)
+    }
+    /// The items in `queue` whose capsule id is `id`.
+    pub fn items_with_id(&mut self, queue: &str, id: &str) -> Result<Vec<Item>> {
         Ok(self
-            .list(None, None, u32::MAX)?
-            .iter()
-            .filter_map(|it| it.dedupe_key.clone())
+            .q
+            .find_key(id)?
+            .into_iter()
+            .map(|(item, _)| item)
+            .filter(|item| item.queue == queue)
+            .collect())
+    }
+    /// Mailbox items whose capsule id is `id`, with their events.
+    fn mail_items(&mut self, id: &str) -> Result<Vec<(Item, Vec<herdr_queue::QueueEvent>)>> {
+        Ok(self
+            .q
+            .find_key(id)?
+            .into_iter()
+            .filter(|(item, _)| item.queue.starts_with("mail-"))
             .collect())
     }
     /// The task delivered into `pane` that is still waiting for its reply:
@@ -105,40 +122,26 @@ impl Store {
         id: &str,
         delivery: &str,
     ) -> Result<Option<std::path::PathBuf>> {
-        for to in self.mailboxes()? {
-            for item in self.list(Some(&format!("mail-{to}")), None, u32::MAX)? {
-                if item.dedupe_key.as_deref() != Some(id) {
-                    continue;
-                }
-                let Some((_, events)) = self.q.item(&item.id)? else {
-                    continue;
-                };
-                let found = events
-                    .iter()
-                    .rev()
-                    .filter(|e| e.kind == "delivered")
-                    .filter_map(|e| e.data.as_ref())
-                    .find(|d| d["delivery"] == delivery)
-                    .and_then(|d| d["report"].as_str())
-                    .map(std::path::PathBuf::from);
-                if found.is_some() {
-                    return Ok(found);
-                }
+        for (_, events) in self.mail_items(id)? {
+            let found = events
+                .iter()
+                .rev()
+                .filter(|e| e.kind == "delivered")
+                .filter_map(|e| e.data.as_ref())
+                .find(|d| d["delivery"] == delivery)
+                .and_then(|d| d["report"].as_str())
+                .map(std::path::PathBuf::from);
+            if found.is_some() {
+                return Ok(found);
             }
         }
         Ok(None)
     }
     pub fn find_capsule(&mut self, id: &str) -> Result<Option<Capsule>> {
         let mut found = Vec::new();
-        for to in self.mailboxes()? {
-            let queue = format!("mail-{to}");
-            for item in self.list(Some(&queue), None, u32::MAX)? {
-                if item.dedupe_key.as_deref() == Some(id)
-                    && let Ok(cap) =
-                        Capsule::from_value(&serde_json::Value::Object(item.payload.clone()))
-                {
-                    found.push(cap);
-                }
+        for (item, _) in self.mail_items(id)? {
+            if let Ok(cap) = Capsule::from_value(&serde_json::Value::Object(item.payload)) {
+                found.push(cap);
             }
         }
         if found.len() > 1 {
@@ -151,14 +154,9 @@ impl Store {
     /// The item in `queue` whose capsule id is `reference`, else the one
     /// whose queue item id starts with it.
     pub fn find_q(&mut self, queue: &str, reference: &str) -> Result<Item> {
-        let items = self.list(Some(queue), None, u32::MAX)?;
-        let by_capsule: Vec<Item> = items
-            .iter()
-            .filter(|it| it.dedupe_key.as_deref() == Some(reference))
-            .cloned()
-            .collect();
+        let by_capsule = self.items_with_id(queue, reference)?;
         let hits: Vec<Item> = if by_capsule.is_empty() {
-            items
+            self.list(Some(queue), None, u32::MAX)?
                 .into_iter()
                 .filter(|it| it.id.starts_with(reference))
                 .collect()
@@ -187,7 +185,17 @@ impl Store {
         ))
     }
 }
-pub fn push_unique<M: FnMut(&mut Store) -> Result<String>>(
+fn payload_id(payload: &serde_json::Map<String, serde_json::Value>) -> Result<String> {
+    payload
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| fail("capsule has no id"))
+}
+/// Push `cap`, drawing a new id from `mint` while the queue says its id is
+/// taken. A reply to a delivery that already has one is refused, not retried.
+pub fn push_unique<M: FnMut() -> Result<String>>(
     store: &mut Store,
     queue: &str,
     cap: &mut Capsule,
@@ -195,12 +203,20 @@ pub fn push_unique<M: FnMut(&mut Store) -> Result<String>>(
     mut mint: M,
 ) -> Result<()> {
     for _ in 0..20 {
-        let dedupe = cap.id.clone();
-        let pushed = store.push(queue, cap, &dedupe, &cap.from, max_attempts)?;
-        if matches!(pushed, herdr_queue::Pushed::New(_)) {
-            return Ok(());
+        let from = cap.from.clone();
+        match store.push(queue, cap, &from, max_attempts) {
+            Ok(Pushed::New(_)) => return Ok(()),
+            Ok(other) => return Err(fail(format!("queue did not add the capsule: {other:?}"))),
+            Err(crate::Error::Queue(herdr_queue::QueueError::KeyTaken { .. })) => cap.id = mint()?,
+            Err(crate::Error::Queue(herdr_queue::QueueError::AlreadyAnswered { reply })) => {
+                return Err(fail(format!(
+                    "task {} delivery {} already has its reply {reply}; nothing sent",
+                    cap.re.as_deref().unwrap_or("?"),
+                    cap.delivery.as_deref().unwrap_or("?"),
+                )));
+            }
+            Err(e) => return Err(e),
         }
-        cap.id = mint(store)?;
     }
     Err(fail("could not mint a unique id after 20 tries"))
 }
@@ -215,8 +231,11 @@ mod tests {
             id: "kalabo".into(),
             ..Capsule::default()
         };
-        s.push("q", &pre, "kalabo", "lead", 2).unwrap();
+        s.push("mail-a", &pre, "lead", 2).unwrap();
         (d, s)
+    }
+    fn holders(s: &mut Store, id: &str) -> usize {
+        s.q.find_key(id).unwrap().len()
     }
     #[test]
     fn racing_sender_id_is_minted_again() {
@@ -225,11 +244,16 @@ mod tests {
             id: "kalabo".into(),
             ..Capsule::default()
         };
-        let mut ids = ["kalabo", "tirumo"].into_iter();
-        push_unique(&mut s, "q", &mut c, 2, |_| Ok(ids.next().unwrap().into())).unwrap();
-        let keys = s.all_keys().unwrap();
-        assert_eq!(keys.len(), 2);
-        assert!(keys.contains(&"tirumo".to_string()));
+        let mut ids = ["tirumo"].into_iter();
+        // A different mailbox: ids are reserved across all of them.
+        push_unique(&mut s, "mail-b", &mut c, 2, || {
+            Ok(ids.next().unwrap().into())
+        })
+        .unwrap();
+        assert_eq!(
+            (holders(&mut s, "kalabo"), holders(&mut s, "tirumo")),
+            (1, 1)
+        );
         assert!(line(&c, "cap", &crate::format::Glyphs::defaults()).starts_with("CAP tirumo"));
     }
     #[test]
@@ -239,8 +263,42 @@ mod tests {
             id: "kalabo".into(),
             ..Capsule::default()
         };
-        let e = push_unique(&mut s, "q", &mut c, 2, |_| Ok("kalabo".into())).unwrap_err();
+        let mut draws = 0;
+        let e = push_unique(&mut s, "mail-a", &mut c, 2, || {
+            draws += 1;
+            Ok("kalabo".into())
+        })
+        .unwrap_err();
         assert!(e.to_string().contains("20 tries"));
-        assert_eq!(s.all_keys().unwrap().len(), 1);
+        assert_eq!(draws, 20, "one draw per refused push, none after the last");
+        assert_eq!(holders(&mut s, "kalabo"), 1);
+    }
+    #[test]
+    fn a_second_reply_is_refused_without_a_new_draw() {
+        let (_d, mut s) = racing_store();
+        let reply = |id: &str| Capsule {
+            id: id.into(),
+            status: "done".into(),
+            re: Some("kalabo".into()),
+            delivery: Some("d1".into()),
+            ..Capsule::default()
+        };
+        push_unique(
+            &mut s,
+            "mail-lead",
+            &mut reply("rotisu"),
+            2,
+            || unreachable!(),
+        )
+        .unwrap();
+        let e = push_unique(&mut s, "mail-lead", &mut reply("tirumo"), 2, || {
+            panic!("an answered delivery must not mint")
+        })
+        .unwrap_err();
+        assert!(
+            e.to_string().contains("already has its reply rotisu"),
+            "{e}"
+        );
+        assert_eq!(holders(&mut s, "tirumo"), 0);
     }
 }
